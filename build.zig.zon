@@ -1,0 +1,20 @@
+.{
+    .name = .webgrep,
+    .version = "0.1.0",
+    .fingerprint = 0xb663164576a4acaa,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .libwebgrep = .{
+            .url = "https://github.com/fun7257/libwebgrep/archive/refs/tags/v0.1.1.tar.gz",
+            .hash = "libwebgrep-0.1.1-pjEXKqQ2DQDglhm1hVDszeL8m6elexVo3vpU2greTpJJ",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+        "README.zh-CN.md",
+    },
+}

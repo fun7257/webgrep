@@ -1,0 +1,23 @@
+# Zig build artifacts & caches
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# Frontend dependencies & build outputs
+web/node_modules/
+web/dist/
+web/dist-ssr/
+web/.svelte-kit/
+
+# Runtime local data registry
+data/
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+.env
+.env.*

@@ -1,0 +1,203 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    /* High-contrast Daylight theme (GitHub Primer / VS Code Light inspired) */
+    --background: 0 0% 100%;
+    --foreground: 213 14% 12%;
+    --card: 210 24% 97%;
+    --card-foreground: 213 14% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 213 14% 12%;
+    --primary: 212 92% 45%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 18% 93%;
+    --secondary-foreground: 213 14% 16%;
+    --muted: 210 20% 95%;
+    --muted-foreground: 213 10% 38%;
+    --accent: 210 18% 90%;
+    --accent-foreground: 213 14% 10%;
+    --destructive: 0 78% 52%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 16% 84%;
+    --input: 210 16% 82%;
+    --ring: 212 92% 45%;
+    --radius: 0.375rem;
+  }
+
+  .dark {
+    color-scheme: dark;
+    /* High-legibility Charcoal-Slate theme (GitHub Dark Dimmed / JetBrains inspired) */
+    --background: 220 17% 9%;
+    --foreground: 210 30% 96%;
+    --card: 220 17% 12%;
+    --card-foreground: 210 30% 96%;
+    --popover: 220 17% 13%;
+    --popover-foreground: 210 30% 96%;
+    --primary: 199 89% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 16% 17%;
+    --secondary-foreground: 210 25% 92%;
+    --muted: 220 16% 15%;
+    --muted-foreground: 215 16% 68%;
+    --accent: 220 16% 20%;
+    --accent-foreground: 210 30% 98%;
+    --destructive: 0 75% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 21%;
+    --input: 220 15% 22%;
+    --ring: 199 89% 48%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-size: 14px;
+    line-height: 1.5;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Hide ugly native browser number input spinners globally */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Clear, accessible scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.6);
+}
+
+/* High-contrast Inverted Text Selection (*::selection) — 18:1 contrast, never clashes with highlight colors */
+::selection,
+*::selection,
+mark::selection,
+input::selection,
+textarea::selection {
+  background-color: #f1f5f9 !important;
+  color: #090d16 !important;
+  -webkit-text-fill-color: #090d16 !important;
+  text-shadow: none !important;
+}
+
+html:not(.dark) ::selection,
+html:not(.dark) *::selection,
+html:not(.dark) mark::selection,
+html:not(.dark) input::selection,
+html:not(.dark) textarea::selection {
+  background-color: #0f172a !important;
+  color: #f8fafc !important;
+  -webkit-text-fill-color: #f8fafc !important;
+  text-shadow: none !important;
+}
+
+/* High-contrast Match Highlighting (WCAG AAA legibility) */
+.match-span-primary {
+  background-color: rgba(245, 158, 11, 0.42);
+  color: #fffbeb;
+  border-bottom: 1.5px solid #fbbf24;
+  border-radius: 3px;
+  padding: 1px 2.5px;
+  font-weight: 600;
+}
+
+html:not(.dark) .match-span-primary {
+  background-color: #fcd34d;
+  color: #451a03;
+  border-bottom: 1.5px solid #d97706;
+}
+
+.match-span-contains-0 {
+  background-color: rgba(56, 189, 248, 0.36);
+  color: #f0f9ff;
+  border-bottom: 1.5px solid #38bdf8;
+  border-radius: 3px;
+  padding: 1px 2.5px;
+  font-weight: 600;
+}
+
+html:not(.dark) .match-span-contains-0 {
+  background-color: #bae6fd;
+  color: #082f49;
+  border-bottom: 1.5px solid #0284c7;
+}
+
+.match-span-contains-1 {
+  background-color: rgba(192, 132, 252, 0.36);
+  color: #faf5ff;
+  border-bottom: 1.5px solid #c084fc;
+  border-radius: 3px;
+  padding: 1px 2.5px;
+  font-weight: 600;
+}
+
+html:not(.dark) .match-span-contains-1 {
+  background-color: #e9d5ff;
+  color: #3b0764;
+  border-bottom: 1.5px solid #9333ea;
+}
+
+.match-span-contains-2 {
+  background-color: rgba(52, 211, 153, 0.36);
+  color: #ecfdf5;
+  border-bottom: 1.5px solid #34d399;
+  border-radius: 3px;
+  padding: 1px 2.5px;
+  font-weight: 600;
+}
+
+html:not(.dark) .match-span-contains-2 {
+  background-color: #a7f3d0;
+  color: #022c22;
+  border-bottom: 1.5px solid #059669;
+}
+
+/* CSS Containment & GPU Compositor Isolation for 120Hz Virtual Scrolling */
+.virtual-row-strict {
+  contain: strict;
+}
+
+.virtual-slice-gpu {
+  will-change: transform;
+  contain: layout style;
+}
+
+@keyframes search-shimmer {
+  0% {
+    transform: translate3d(-100%, 0, 0);
+  }
+  100% {
+    transform: translate3d(250%, 0, 0);
+  }
+}
+
+.search-progress-shimmer {
+  will-change: transform;
+  animation: search-shimmer 1.15s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
