@@ -321,20 +321,85 @@ export function buildHighlightSegments(
   }
 
   const segments: HighlightSegment[] = [];
+  if (!windowAroundMatch) {
+    let pos = 0;
+    for (let i = 0; i < resolved.length; i++) {
+      const sp = resolved[i];
+      if (sp.start > pos) {
+        segments.push({
+          text: text.slice(pos, sp.start),
+          kind: 'plain',
+        });
+      }
+      segments.push({ text: text.slice(sp.start, sp.end), kind: sp.kind });
+      pos = sp.end;
+    }
+    if (pos < len) {
+      segments.push({ text: text.slice(pos), kind: 'plain' });
+    }
+    return segments;
+  }
+
+  // Match-centered snippet windowing for virtualized ResultList rows:
+  // Folds long leading/inter-match unmatched regions with ' … ' so primary and secondary
+  // highlights in the middle/end of long lines are always visible inside the row viewport.
+  const LEAD_THRESHOLD = 38;
+  const LEAD_HEAD = 14;
+  const LEAD_TAIL = 18;
+  const GAP_THRESHOLD = 32;
+  const GAP_SIDE = 12;
+  const TAIL_MAX = 180;
+
   let pos = 0;
   for (let i = 0; i < resolved.length; i++) {
     const sp = resolved[i];
     if (sp.start > pos) {
-      segments.push({
-        text: text.slice(pos, sp.start),
-        kind: 'plain',
-      });
+      const gapLen = sp.start - pos;
+      if (i === 0) {
+        if (gapLen > LEAD_THRESHOLD) {
+          const head = text.slice(0, LEAD_HEAD).trimEnd();
+          const tail = text.slice(sp.start - LEAD_TAIL, sp.start).trimStart();
+          segments.push({
+            text: `${head} … ${tail}`,
+            kind: 'plain',
+          });
+        } else {
+          segments.push({
+            text: text.slice(0, sp.start),
+            kind: 'plain',
+          });
+        }
+      } else if (gapLen > GAP_THRESHOLD) {
+        const left = text.slice(pos, pos + GAP_SIDE);
+        const right = text.slice(sp.start - GAP_SIDE, sp.start);
+        segments.push({
+          text: `${left} … ${right}`,
+          kind: 'plain',
+        });
+      } else {
+        segments.push({
+          text: text.slice(pos, sp.start),
+          kind: 'plain',
+        });
+      }
     }
     segments.push({ text: text.slice(sp.start, sp.end), kind: sp.kind });
     pos = sp.end;
   }
+
   if (pos < len) {
-    segments.push({ text: text.slice(pos), kind: 'plain' });
+    const remain = len - pos;
+    if (remain > TAIL_MAX) {
+      segments.push({
+        text: `${text.slice(pos, pos + TAIL_MAX)} …`,
+        kind: 'plain',
+      });
+    } else {
+      segments.push({
+        text: text.slice(pos),
+        kind: 'plain',
+      });
+    }
   }
   return segments;
 }
@@ -346,7 +411,7 @@ const hitSegmentCache = new WeakMap<
 
 /**
  * O(1) WeakMap-memoized highlight segments for virtualized HitItem rows.
- * Preserves 100% of the user's original text without deleting or truncating any content.
+ * Centers the snippet window around matched spans so highlights in the middle/end of long lines are always visible.
  */
 export function getCachedHighlightSegments(
   item: HitItem,
@@ -365,7 +430,7 @@ export function getCachedHighlightSegments(
     item.spans,
     containsTerms,
     caseInsensitive,
-    false,
+    true,
     primaryPattern,
     isRegexMode
   );

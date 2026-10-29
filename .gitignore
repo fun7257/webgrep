@@ -9,8 +9,9 @@ web/dist/
 web/dist-ssr/
 web/.svelte-kit/
 
-# Runtime local data registry
+# Runtime local data registry & test dataset
 data/
+testdata/
 
 # OS & Editor files
 .DS_Store
