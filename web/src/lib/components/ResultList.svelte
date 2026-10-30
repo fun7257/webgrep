@@ -5,7 +5,7 @@
     getCachedHighlightSegments,
     type HighlightSegment,
   } from '$lib/utils';
-  import { AtSign, Ban, Check, Copy, Loader2 } from 'lucide-svelte';
+  import { AtSign, Ban, Check, Copy, Loader2, RefreshCw } from 'lucide-svelte';
 
   interface VirtualHitRow {
     idx: number;
@@ -165,6 +165,37 @@
     });
   }
 
+  // Pull-down at scrollTop 0 re-runs the current search (touch only).
+  const PULL_THRESHOLD = 72;
+  let pullDist = $state(0);
+  let pullStartY: number | null = null;
+
+  function onTouchStart(e: TouchEvent) {
+    if (!scrollerEl || scrollerEl.scrollTop > 0 || e.touches.length !== 1) return;
+    pullStartY = e.touches[0].clientY;
+  }
+
+  function onTouchMove(e: TouchEvent) {
+    if (pullStartY === null) return;
+    if (scrollerEl && scrollerEl.scrollTop > 0) {
+      pullStartY = null;
+      pullDist = 0;
+      return;
+    }
+    const dy = e.touches[0].clientY - pullStartY;
+    pullDist = dy > 0 ? Math.min(dy * 0.5, PULL_THRESHOLD * 1.4) : 0;
+  }
+
+  function onTouchEnd() {
+    if (pullStartY === null) return;
+    const fire = pullDist >= PULL_THRESHOLD / 2;
+    pullStartY = null;
+    pullDist = 0;
+    if (fire && workbench.pattern.trim().length > 0 && !workbench.isSearching) {
+      workbench.executeSearch(false);
+    }
+  }
+
   // Long-press (touch) opens a bottom action sheet for the row.
   let menuRow = $state.raw<VirtualHitRow | null>(null);
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
@@ -219,10 +250,10 @@
     }, 1400);
   }
 
-  const isCaseInsensitive = $derived(workbench.caseMode !== 'sensitive');
+  const isCaseInsensitive = true;
   const isRegexMode = $derived(workbench.mode === 'regex');
   const segmentCacheKey = $derived(
-    `${workbench.mode}:${workbench.caseMode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}`
+    `${workbench.mode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}`
   );
 </script>
 
@@ -242,13 +273,26 @@
   {/each}
 {/snippet}
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={scrollerEl}
   bind:clientHeight={viewportHeight}
   bind:clientWidth={scrollerWidth}
   onscroll={handleScroll}
-  class="flex-1 overflow-y-auto overscroll-contain bg-background"
+  ontouchstart={onTouchStart}
+  ontouchmove={onTouchMove}
+  ontouchend={onTouchEnd}
+  ontouchcancel={onTouchEnd}
+  class="relative flex-1 overflow-y-auto overscroll-contain bg-background"
 >
+  {#if pullDist > 4}
+    <div
+      class="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center"
+      style={`transform: translate3d(0, ${pullDist - 28}px, 0); opacity: ${Math.min(1, pullDist / 40)}`}
+    >
+      <RefreshCw class="h-4 w-4 text-muted-foreground" />
+    </div>
+  {/if}
   {#if workbench.flatHits.length > 0}
     <div class="px-3 md:px-6 pb-8" style={`font-size: ${workbench.codeFontSize}px`}>
       <div
@@ -282,7 +326,7 @@
                 onpointerup={cancelPress}
                 onpointercancel={cancelPress}
                 oncontextmenu={(e) => {
-                  if (workbench.isCompact) e.preventDefault();
+                  if (workbench.isCompact || workbench.isTouch) e.preventDefault();
                 }}
                 onclick={() => {
                   if (suppressClick) {
@@ -290,7 +334,7 @@
                     return;
                   }
                   // Touch long-press selections are handled via the action sheet; skip selection guard there.
-                  if (!workbench.isCompact) {
+                  if (!workbench.isCompact && !workbench.isTouch) {
                     const sel = window.getSelection()?.toString() ?? '';
                     if (sel.length > 0) return;
                   }
@@ -302,7 +346,7 @@
                     workbench.selectHitByIndex(row.idx, true);
                   }
                 }}
-                class={`group flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none transition-colors overflow-hidden rounded-lg ${
+                class={`group ${workbench.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none transition-colors overflow-hidden rounded-lg ${
                   active
                     ? 'bg-secondary/75'
                     : item.isContext
@@ -335,9 +379,9 @@
 
                   <button
                     type="button"
-                    title={workbench.locale === 'zh' ? '复制该条内容' : 'Copy content'}
+                    title={workbench.t.ui.copyContent}
                     onclick={(e) => copyLineText(e, row.idx, item.text)}
-                    aria-label={workbench.locale === 'zh' ? '复制该条内容' : 'Copy content'}
+                    aria-label={workbench.t.ui.copyContent}
                     class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100 transition-opacity"
                   >
                     {#if copiedIdx === row.idx}
@@ -381,12 +425,10 @@
     <div class="flex h-full flex-col items-center justify-center p-8 text-center select-none">
       <p class="text-base font-medium text-foreground">{workbench.t.results.noMatchesTitle}</p>
       <p class="mt-1.5 text-[13px] text-muted-foreground font-mono">
-        {workbench.locale === 'zh'
-          ? `耗时 ${workbench.elapsedMs.toFixed(2)} ms`
-          : `Finished in ${workbench.elapsedMs.toFixed(2)} ms`}
+        {workbench.t.ui.finishedIn(workbench.elapsedMs.toFixed(2))}
       </p>
       <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
-        {#if workbench.activeFilterCount > 0 || workbench.selectedPaths.length > 0 || workbench.wholeWord || workbench.caseMode === 'sensitive'}
+        {#if workbench.activeFilterCount > 0 || workbench.selectedPaths.length > 0}
           <button
             type="button"
             onclick={() => {
@@ -423,8 +465,8 @@
         <button
           type="button"
           onclick={copyFromMenu}
-          aria-label={workbench.locale === 'zh' ? '复制' : 'Copy'}
-          title={workbench.locale === 'zh' ? '复制' : 'Copy'}
+          aria-label={workbench.t.ui.copy}
+          title={workbench.t.ui.copy}
           class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
         >
           <Copy class="h-5 w-5" />

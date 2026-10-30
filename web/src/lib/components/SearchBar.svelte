@@ -162,9 +162,7 @@
         token: '$rc()',
         badge: '.* Aa',
         label:
-          workbench.locale === 'zh'
-            ? '局部正则 + 区分大小写 $rc(...)'
-            : 'Scoped Regex + Match Case $rc(...)',
+          workbench.t.ui.comboRc,
         desc: '',
         aliases: ['rc', 'cr'],
         disabled: false,
@@ -173,9 +171,7 @@
         token: '$rw()',
         badge: '.* \\b',
         label:
-          workbench.locale === 'zh'
-            ? '局部正则 + 全词匹配 $rw(...)'
-            : 'Scoped Regex + Whole Word $rw(...)',
+          workbench.t.ui.comboRw,
         desc: '',
         aliases: ['rw', 'wr'],
         disabled: false,
@@ -184,9 +180,7 @@
         token: '$cw()',
         badge: 'Aa \\b',
         label:
-          workbench.locale === 'zh'
-            ? '局部区分大小写 + 全词匹配 $cw(...)'
-            : 'Scoped Match Case + Whole Word $cw(...)',
+          workbench.t.ui.comboCw,
         desc: '',
         aliases: ['cw', 'wc'],
         disabled: false,
@@ -195,9 +189,7 @@
         token: '$rcw()',
         badge: '.* Aa \\b',
         label:
-          workbench.locale === 'zh'
-            ? '局部正则 + 区分大小写 + 全词 $rcw(...)'
-            : 'Scoped Regex + Case + Whole Word $rcw(...)',
+          workbench.t.ui.comboRcw,
         desc: '',
         aliases: ['rcw', 'rwc', 'crw', 'cwr', 'wrc', 'wcr'],
         disabled: false,
@@ -274,8 +266,9 @@
     const before = raw.slice(0, pos);
     const after = raw.slice(pos);
     const needSpace = before.length > 0 && !/\s$/.test(before);
-    const paired = sym === '"';
-    const inserted = `${needSpace ? ' ' : ''}${paired ? '""' : sym}`;
+    // Tokens that come in pairs ( `"` → `""`, `$r()` ) put the cursor between the pair.
+    const paired = sym === '"' || sym.endsWith('()');
+    const inserted = `${needSpace ? ' ' : ''}${sym === '"' ? '""' : sym}`;
     workbench.pattern = `${before}${inserted}${after}`;
     const nextCursor = before.length + inserted.length - (paired ? 1 : 0);
     cursorPos = nextCursor;
@@ -287,6 +280,13 @@
       inputEl?.setSelectionRange(nextCursor, nextCursor);
     });
   }
+
+  $effect(() => {
+    workbench.insertToken = insertSymbol;
+    return () => {
+      workbench.insertToken = null;
+    };
+  });
 
   function backspaceToken() {
     const raw = workbench.pattern.replace(/\s+$/, '');
@@ -610,16 +610,6 @@
                     .*
                   </span>
                 {/if}
-                {#if entry.caseMode === 'sensitive'}
-                  <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
-                    Aa
-                  </span>
-                {/if}
-                {#if entry.wholeWord}
-                  <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
-                    \b
-                  </span>
-                {/if}
               </div>
 
               <button
@@ -629,8 +619,8 @@
                   workbench.removeHistoryEntry(entry.pattern, entry.mode);
                 }}
                 class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground"
-                title={workbench.locale === 'zh' ? '从搜索记录中删除' : 'Remove from history'}
-                aria-label={workbench.locale === 'zh' ? '从搜索记录中删除' : 'Remove from history'}
+                title={workbench.t.ui.removeHistory}
+                aria-label={workbench.t.ui.removeHistory}
               >
                 <X class="h-3.5 w-3.5" />
               </button>

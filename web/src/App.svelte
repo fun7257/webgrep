@@ -83,17 +83,17 @@
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
       if (e.code === 'KeyC') {
         e.preventDefault();
-        workbench.cycleCaseMode();
+        workbench.insertToken?.('$c()');
         return;
       }
       if (e.code === 'KeyW') {
         e.preventDefault();
-        workbench.toggleFlag('w');
+        workbench.insertToken?.('$w()');
         return;
       }
       if (e.code === 'KeyR') {
         e.preventDefault();
-        workbench.cycleSearchMode();
+        workbench.insertToken?.('$r()');
         return;
       }
     }
@@ -216,6 +216,7 @@
 
 <svelte:window
   onkeydown={handleGlobalKeydown}
+  onpointerdowncapture={(e) => (workbench.isTouch = e.pointerType === 'touch')}
   onpointermove={handlePointerMove}
   onpointerup={stopResize}
   onpointercancel={stopResize}
@@ -250,7 +251,7 @@
         <div
           onpointerdown={startResizeInspector}
           style="touch-action: none"
-          class="w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 transition-colors z-20"
+          class="relative w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 transition-colors z-20 before:absolute before:inset-y-0 before:-inset-x-1.5 [@media(any-pointer:coarse)]:before:-inset-x-3"
           title={workbench.t.header.dragResizeInspector}
         ></div>
         <InspectorPane />

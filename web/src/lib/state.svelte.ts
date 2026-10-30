@@ -1,5 +1,4 @@
 import type {
-  CaseMode,
   DataSourceItem,
   DirSuggestEntry,
   DirSuggestResponse,
@@ -9,7 +8,6 @@ import type {
   MetaResponse,
   SearchHistoryEntry,
   SearchMode,
-  SearchPreset,
   SourceConfig,
   SourceKind,
   SourcesResponse,
@@ -54,44 +52,6 @@ export function parseDollarFlags(raw: string): ParsedDollarFlags | null {
   return null;
 }
 
-export const BUILTIN_PRESETS: SearchPreset[] = [
-  {
-    id: 'simd-multi',
-    label: 'Multi OR · SIMD Engines',
-    description: 'Search multiple patterns simultaneously via Teddy / Aho-Corasick',
-    pattern: 'Finder|Multi|Regex',
-    mode: 'multi',
-    caseMode: 'sensitive',
-  },
-  {
-    id: 'chained-and-not',
-    label: 'Chained AND + NOT',
-    description: 'Find pub fn declarations containing Search without test lines',
-    pattern: 'pub fn',
-    mode: 'literal',
-    caseMode: 'sensitive',
-    contains: ['Search'],
-    excludes: ['test'],
-  },
-  {
-    id: 'replace-preview',
-    label: 'Live Replace Preview',
-    description: 'Preview non-destructive inline replacement across matches',
-    pattern: 'SearchConfig',
-    mode: 'literal',
-    caseMode: 'sensitive',
-    replacement: 'QueryOptions',
-  },
-  {
-    id: 'regex-fn',
-    label: 'Regex · Function Signatures',
-    description: 'Linear-time Thompson NFA regex with SIMD prefilter',
-    pattern: 'pub\\s+fn\\s+[a-zA-Z0-9_]+',
-    mode: 'regex',
-    caseMode: 'sensitive',
-  },
-];
-
 class WorkbenchState {
   // Workspace metadata
   meta = $state<MetaResponse>({
@@ -110,8 +70,6 @@ class WorkbenchState {
   // Search parameters
   pattern = $state<string>('');
   private _baseMode = $state<SearchMode>('literal');
-  private _baseCaseMode = $state<CaseMode>('insensitive');
-  private _baseWholeWord = $state<boolean>(false);
   wholeLine = $state<boolean>(false);
   invert = $state<boolean>(false);
 
@@ -137,6 +95,8 @@ class WorkbenchState {
   currentSearchId = $state<number>(0);
   searchCount = $state<number>(0);
   isSearching = $state<boolean>(false);
+  /** Search id the user cancelled; late WS frames for it are dropped. */
+  private cancelledSearchId = -1;
   errorMessage = $state<string | null>(null);
 
   // Telemetry & Streaming Results
@@ -177,12 +137,18 @@ class WorkbenchState {
   sources = $state.raw<DataSourceItem[]>([]);
   selectedSources = $state<string[]>([]);
   sourcesLoading = $state<boolean>(false);
-  sourceManagerOpen = $state<boolean>(false);
   addSourceModalOpen = $state<boolean>(false);
-  settingsTab = $state<'general' | 'sources' | 'add-source' | 'shortcuts'>('general');
+  settingsTab = $state<'general' | 'sources' | 'shortcuts'>('general');
+  /** Inline "add data source" form inside the Sources pane. */
+  sourceAddOpen = $state<boolean>(false);
 
   openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
-    this.settingsTab = tab;
+    if (tab === 'add-source') {
+      this.settingsTab = 'sources';
+      this.sourceAddOpen = true;
+    } else {
+      this.settingsTab = tab;
+    }
     this.settingsOpen = true;
   }
 
@@ -230,6 +196,10 @@ class WorkbenchState {
   detailOpen = $state<boolean>(false);
   /** True when viewport < 768px: stacked list/detail navigation, bottom sheets, symbol bar. */
   isCompact = $state<boolean>(false);
+  /** Last pointer used was a finger (touch laptops / hybrids switch modality at runtime). */
+  isTouch = $state<boolean>(false);
+  /** Registered by SearchBar: inserts a token (e.g. `$r()`) at the input cursor. */
+  insertToken: ((token: string) => void) | null = null;
   codeFontSize = $state<number>(13.5);
   wordWrap = $state<boolean>(true);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
@@ -443,25 +413,23 @@ class WorkbenchState {
     };
 
     // Pass 1: Detect scoped `$r(...)`, `$c(...)`, `$w(...)`, `$rc(...)`, `$rw(...)`, `$cw(...)`, `$rcw(...)`
-    let flagRegex = false;
     let hasScopedRegex = false;
-    let flagCase = false;
-    let flagWord = false;
+    let hasScopedCase = false;
+    let hasScopedWord = false;
     for (const tok of rawTokens) {
       if (tok.quoted) continue;
       const scoped = parseScopedDollarToken(tok.raw);
       if (scoped) {
-        if (scoped.inner.length > 0 && scoped.flags.regex) {
-          hasScopedRegex = true;
+        if (scoped.inner.length > 0) {
+          if (scoped.flags.regex) hasScopedRegex = true;
+          if (scoped.flags.caseSensitive) hasScopedCase = true;
+          if (scoped.flags.wholeWord) hasScopedWord = true;
         }
         continue;
       }
     }
 
-    const isRegexMode = flagRegex || this._baseMode === 'regex';
-
     const normalizeUnquotedValue = (s: string): string => {
-      if (isRegexMode) return s;
       // In literal mode, unescape leading `\-`, `\+`, `\@`, `\$` and inline escaped spaces `\ `
       let out = s.replace(/\\(\s)/g, '$1');
       if (/^\\[-+@$]/.test(out)) {
@@ -589,89 +557,42 @@ class WorkbenchState {
       };
     }
 
-    const primaryTokens: { token: ClassifiedToken; afterRegexFlag: boolean }[] = [];
+    const primaryTokens: { token: ClassifiedToken }[] = [];
     const contains: string[] = [];
     const excludes: string[] = [];
     const globs: string[] = [];
     const modifiers: ClassifiedToken[] = [];
 
-    let prevWasRegexFlag = false;
     for (const c of classified) {
       if (c.kind === 'primary') {
-        primaryTokens.push({ token: c, afterRegexFlag: prevWasRegexFlag });
-        prevWasRegexFlag = false;
+        primaryTokens.push({ token: c });
       } else if (c.kind === 'include') {
         contains.push(c.value);
         modifiers.push(c);
-        prevWasRegexFlag = false;
       } else if (c.kind === 'exclude') {
         excludes.push(c.value);
         modifiers.push(c);
-        prevWasRegexFlag = false;
       } else if (c.kind === 'file') {
         for (const item of splitGlobList(c.value)) {
           const norm = normalizeGlobItem(item, false);
           if (norm) globs.push(norm);
         }
         modifiers.push(c);
-        prevWasRegexFlag = false;
       } else if (c.kind === 'exclude-file') {
         for (const item of splitGlobList(c.value)) {
           const norm = normalizeGlobItem(item, true);
           if (norm) globs.push(norm);
         }
         modifiers.push(c);
-        prevWasRegexFlag = false;
       } else if (c.kind === 'flag') {
         modifiers.push(c);
-        const df = parseDollarFlags(c.raw);
-        prevWasRegexFlag = Boolean(df?.regex);
       }
     }
 
-    // Browser-style progressive search with order-commutative regex + literal resolution:
-    // When regex mode ($r) is active and the user enters both a literal token and a regex token
-    // in any order (e.g. `$r fn\s+\w+ search` OR `search $r fn\s+\w+` OR `search fn\s+\w+ $r`),
-    // elect the regex token as `primaryPattern` so both orders produce 100% identical results.
-    const hasRegexSyntax = (s: string): boolean => /[\\.*+?^${}()|[\]]/.test(s);
-    const isValidRegex = (s: string): boolean => {
-      try {
-        new RegExp(s);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
     let finalPrimary = '';
     if (primaryTokens.length > 0) {
-      let primaryIdx = 0;
-      if (isRegexMode && primaryTokens.length > 1) {
-        const flaggedValidRegexIdx = primaryTokens.findIndex(
-          (p) => !p.token.forceLiteral && p.afterRegexFlag && hasRegexSyntax(p.token.value) && isValidRegex(p.token.value)
-        );
-        const anyValidRegexIdx = primaryTokens.findIndex(
-          (p) => !p.token.forceLiteral && hasRegexSyntax(p.token.value) && isValidRegex(p.token.value)
-        );
-        const flaggedRegexIdx = primaryTokens.findIndex(
-          (p) => !p.token.forceLiteral && p.afterRegexFlag && hasRegexSyntax(p.token.value)
-        );
-        const anyRegexIdx = primaryTokens.findIndex(
-          (p) => !p.token.forceLiteral && hasRegexSyntax(p.token.value)
-        );
-        const flaggedIdx = primaryTokens.findIndex((p) => p.afterRegexFlag);
-        if (flaggedValidRegexIdx >= 0) {
-          primaryIdx = flaggedValidRegexIdx;
-        } else if (anyValidRegexIdx >= 0) {
-          primaryIdx = anyValidRegexIdx;
-        } else if (flaggedRegexIdx >= 0) {
-          primaryIdx = flaggedRegexIdx;
-        } else if (anyRegexIdx >= 0) {
-          primaryIdx = anyRegexIdx;
-        } else if (flaggedIdx >= 0) {
-          primaryIdx = flaggedIdx;
-        }
-      }
+      // The first plain token is always the primary pattern; the rest narrow results (AND).
+      const primaryIdx = 0;
 
       finalPrimary = primaryTokens[primaryIdx].token.value;
       for (let k = 0; k < primaryTokens.length; k++) {
@@ -692,17 +613,17 @@ class WorkbenchState {
       excludes,
       globs,
       modifiers,
-      flagRegex,
       hasScopedRegex,
-      flagCase,
-      flagWord,
+      hasScopedCase,
+      hasScopedWord,
     };
   });
 
-  mode = $derived<SearchMode>(this.parsedQuery.flagRegex ? 'regex' : this._baseMode);
-  hasRegexActive = $derived<boolean>(this.mode === 'regex' || this.parsedQuery.hasScopedRegex);
-  caseMode = $derived<CaseMode>(this.parsedQuery.flagCase ? 'sensitive' : this._baseCaseMode);
-  wholeWord = $derived<boolean>(this.parsedQuery.flagWord || this._baseWholeWord);
+  mode = $derived<SearchMode>(this._baseMode);
+  /** Scoped `$r(…)` / `$c(…)` / `$w(…)` tokens currently present in the query. */
+  hasRegexActive = $derived<boolean>(this.parsedQuery.hasScopedRegex);
+  hasCaseActive = $derived<boolean>(this.parsedQuery.hasScopedCase);
+  hasWordActive = $derived<boolean>(this.parsedQuery.hasScopedWord);
 
   primaryPattern = $derived<string>(this.parsedQuery.primaryPattern);
   contains = $derived<string[]>(this.parsedQuery.contains);
@@ -715,8 +636,8 @@ class WorkbenchState {
       this.excludes.length +
       this.parsedGlobs.length +
       (this.hasRegexActive ? 1 : 0) +
-      (this.caseMode === 'sensitive' ? 1 : 0) +
-      (this.wholeWord ? 1 : 0)
+      (this.hasCaseActive ? 1 : 0) +
+      (this.hasWordActive ? 1 : 0)
   );
 
   init() {
@@ -874,8 +795,6 @@ class WorkbenchState {
     const entry: SearchHistoryEntry = {
       pattern: pat,
       mode: this.mode,
-      caseMode: this.caseMode,
-      wholeWord: this.wholeWord,
       contains: [...this.contains],
       excludes: [...this.excludes],
       replacement: this.replacement,
@@ -1089,51 +1008,6 @@ class WorkbenchState {
     this.scheduleSearch(true);
   }
 
-  toggleFlag(flag: 'r' | 'c' | 'w') {
-    const scopedRegex = new RegExp(`([-+!]?)\\$([a-zA-Z.*]+)\\(([^)]*)\\)`, 'g');
-    let hadFlag = false;
-    const nextPattern = this.pattern.replace(
-      scopedRegex,
-      (full, prefix: string, rawFlags: string, inner: string) => {
-        const df = parseDollarFlags(`$${rawFlags}`);
-        if (!df) return full;
-        const hasTarget =
-          (flag === 'r' && df.regex) ||
-          (flag === 'c' && df.caseSensitive) ||
-          (flag === 'w' && df.wholeWord);
-        if (!hasTarget) return full;
-        hadFlag = true;
-        const keepR = flag === 'r' ? false : df.regex;
-        const keepC = flag === 'c' ? false : df.caseSensitive;
-        const keepW = flag === 'w' ? false : df.wholeWord;
-        const rem = `${keepR ? 'r' : ''}${keepC ? 'c' : ''}${keepW ? 'w' : ''}`;
-        return rem ? `${prefix}$${rem}(${inner})` : `${prefix}${inner}`;
-      }
-    );
-
-    if (hadFlag) {
-      this.pattern = nextPattern.replace(/\s{2,}/g, ' ').trim();
-    } else {
-      const trimmed = this.pattern.trim();
-      if (!trimmed) {
-        this.pattern = `$${flag}()`;
-      } else if (!/\s/.test(trimmed) && !trimmed.startsWith('$') && !trimmed.startsWith('@')) {
-        this.pattern = `$${flag}(${trimmed})`;
-      } else {
-        this.pattern = `${this.pattern.trimEnd()} $${flag}()`;
-      }
-    }
-    this.scheduleSearch(true);
-  }
-
-  cycleCaseMode() {
-    this.toggleFlag('c');
-  }
-
-  cycleSearchMode() {
-    this.toggleFlag('r');
-  }
-
   toggleScopeToken(scope: string) {
     const token = `@${scope}`;
     const parts = this.pattern.trim().split(/\s+/).filter(Boolean);
@@ -1159,11 +1033,10 @@ class WorkbenchState {
   }
 
   removeInlineModifier(rawToken: string) {
-    const idx = this.pattern.indexOf(rawToken);
-    if (idx >= 0) {
-      const before = this.pattern.slice(0, idx);
-      const after = this.pattern.slice(idx + rawToken.length);
-      this.pattern = `${before} ${after}`.replace(/\s{2,}/g, ' ').trim();
+    const escaped = rawToken.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+    const regex = new RegExp(`(^|\\s)${escaped}(?=\\s|$)`);
+    if (regex.test(this.pattern)) {
+      this.pattern = this.pattern.replace(regex, '$1').replace(/\s{2,}/g, ' ').trim();
     } else {
       const parts = this.pattern
         .split(/\s+/)
@@ -1197,39 +1070,9 @@ class WorkbenchState {
     this.executeSearch(false);
   }
 
-  applyPreset(preset: SearchPreset) {
-    const parts = [preset.pattern];
-    if (preset.contains) {
-      for (const c of preset.contains) parts.push(c);
-    }
-    if (preset.excludes) {
-      for (const x of preset.excludes) parts.push(`-${x}`);
-    }
-    if (preset.mode === 'regex') parts.push('$r');
-    if (preset.caseMode === 'sensitive') parts.push('$c');
-    if (preset.wholeWord) parts.push('$w');
-    this.pattern = parts.join(' ');
-    this._baseMode = preset.mode === 'multi' ? 'multi' : 'literal';
-    this._baseCaseMode = 'insensitive';
-    this._baseWholeWord = false;
-    this.wholeLine = false;
-    this.invert = false;
-    this.replacement = '';
-    this.executeSearch(false);
-  }
-
   applyHistoryEntry(entry: SearchHistoryEntry) {
-    let q = entry.pattern.trim();
-    const hasDollarR = /\s\$r\b|^\$r\b/i.test(q);
-    const hasDollarC = /\s\$c\b|^\$c\b/i.test(q);
-    const hasDollarW = /\s\$w\b|^\$w\b/i.test(q);
-    if (entry.mode === 'regex' && !hasDollarR) q += ' $r';
-    if (entry.caseMode === 'sensitive' && !hasDollarC) q += ' $c';
-    if (entry.wholeWord && !hasDollarW) q += ' $w';
-    this.pattern = q;
+    this.pattern = entry.pattern.trim();
     this._baseMode = entry.mode === 'multi' ? 'multi' : 'literal';
-    this._baseCaseMode = 'insensitive';
-    this._baseWholeWord = false;
     this.replacement = '';
     this.executeSearch(false);
   }
@@ -1249,8 +1092,6 @@ class WorkbenchState {
     this.globsInput = '';
     this.selectedPaths = [];
     this._baseMode = 'literal';
-    this._baseCaseMode = 'insensitive';
-    this._baseWholeWord = false;
     this.wholeLine = false;
     this.invert = false;
     this.scheduleSearch(true);
@@ -1355,13 +1196,20 @@ class WorkbenchState {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    if (this.isSearching && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'cancel',
-          id: this.currentSearchId,
-        })
-      );
+    if (this.isSearching) {
+      // Freeze the view at what has already arrived, then ignore everything still in flight
+      // for this search id (queued WS frames would otherwise keep growing the result list).
+      this.flushPendingHitsSync();
+      this.awaitingFirstChunk = false;
+      this.cancelledSearchId = this.currentSearchId;
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'cancel',
+            id: this.currentSearchId,
+          })
+        );
+      }
     }
     this.isSearching = false;
   }
@@ -1370,8 +1218,6 @@ class WorkbenchState {
     this.cancelSearch();
     this.pattern = '';
     this._baseMode = 'literal';
-    this._baseCaseMode = 'insensitive';
-    this._baseWholeWord = false;
     this.errorMessage = null;
     this.resetResultBuffer();
   }
@@ -1453,8 +1299,8 @@ class WorkbenchState {
       tenant: this.tenant,
       pattern: pat,
       mode: this.mode,
-      case: this.caseMode,
-      wholeWord: this.wholeWord,
+      case: 'insensitive',
+      wholeWord: false,
       wholeLine: this.wholeLine,
       invert: this.invert,
       contains: this.contains,
@@ -1477,8 +1323,6 @@ class WorkbenchState {
     const cacheKey = JSON.stringify({
       p: pat,
       m: this.mode,
-      c: this.caseMode,
-      ww: this.wholeWord,
       wl: this.wholeLine,
       inv: this.invert,
       inc: this.contains,
@@ -1514,7 +1358,7 @@ class WorkbenchState {
   }
 
   private handleWsMessage(msg: WsIncomingMessage) {
-    if (msg.id !== this.currentSearchId) return;
+    if (msg.id !== this.currentSearchId || msg.id === this.cancelledSearchId) return;
 
     switch (msg.type) {
       case 'hits': {

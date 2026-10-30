@@ -33,10 +33,12 @@
     };
   });
 
+  // Each tap inserts a NEW scoped `$x()` token (multiple scoped modes can coexist);
+  // the highlight only reflects that a mode is currently active.
   const toggles = $derived([
-    { label: '$r', active: workbench.hasRegexActive, run: () => workbench.toggleFlag('r') },
-    { label: '$c', active: workbench.caseMode === 'sensitive', run: () => workbench.toggleFlag('c') },
-    { label: '$w', active: workbench.wholeWord, run: () => workbench.toggleFlag('w') },
+    { label: '$r', token: '$r()', active: workbench.hasRegexActive },
+    { label: '$c', token: '$c()', active: workbench.hasCaseActive },
+    { label: '$w', token: '$w()', active: workbench.hasWordActive },
   ]);
 
   const symbols = ['@', '-', '"'];
@@ -61,7 +63,7 @@
   {#each toggles as tg (tg.label)}
     <button
       type="button"
-      onclick={tg.run}
+      onclick={() => onInsert(tg.token)}
       class={`${btn} ${tg.active ? 'bg-primary/15 text-primary' : 'text-foreground'}`}
     >
       {tg.label}

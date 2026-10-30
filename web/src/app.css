@@ -187,7 +187,7 @@ body {
   touch-action: manipulation;
 }
 
-@media (pointer: coarse) {
+@media (any-pointer: coarse) {
   .touch-target {
     position: relative;
   }
@@ -237,5 +237,14 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .detail-enter {
     animation: none;
+  }
+}
+
+/* iOS Safari zooms the whole page when focusing an input with font-size < 16px */
+@media (any-pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select {
+    font-size: 16px !important;
   }
 }

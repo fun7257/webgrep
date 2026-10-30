@@ -150,23 +150,9 @@ export interface FileHitGroup {
 export interface SearchHistoryEntry {
   pattern: string;
   mode: SearchMode;
-  caseMode: CaseMode;
-  wholeWord: boolean;
   contains: string[];
   excludes: string[];
   replacement: string;
   timestamp: number;
 }
 
-export interface SearchPreset {
-  id: string;
-  label: string;
-  description: string;
-  pattern: string;
-  mode: SearchMode;
-  caseMode?: CaseMode;
-  wholeWord?: boolean;
-  contains?: string[];
-  excludes?: string[];
-  replacement?: string;
-}

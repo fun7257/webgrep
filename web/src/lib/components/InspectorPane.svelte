@@ -42,7 +42,8 @@
     return fromFile ?? '';
   });
 
-  let isCaseInsensitive = $derived(workbench.caseMode !== 'sensitive');
+  // Global match-case no longer exists: case sensitivity is expressed per token via `$c(…)`.
+  const isCaseInsensitive = true;
   let isRegexMode = $derived(workbench.mode === 'regex');
 
   let structuredInfo = $derived(analyzeStructuredLine(activeLineText));
@@ -121,7 +122,7 @@
 
   // Touch: there is no mouseup after a long-press selection; follow selectionchange instead.
   function handleSelectionChange() {
-    if (!workbench.isCompact || !asideEl) return;
+    if ((!workbench.isCompact && !workbench.isTouch) || !asideEl) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !asideEl.contains(sel.anchorNode)) {
       selectedText = '';
