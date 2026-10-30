@@ -129,7 +129,6 @@ class WorkbenchState {
   hidden = $state<boolean>(false);
   respectIgnore = $state<boolean>(false);
   maxResults = $state<number>(20000);
-  maxPerFile = $state<number>(500);
 
   // Execution mode
   liveSearch = $state<boolean>(true);
@@ -148,6 +147,7 @@ class WorkbenchState {
   bytesSearched = $state<number>(0);
   elapsedMs = $state<number>(0);
   limitHit = $state<boolean>(false);
+  cacheHit = $state<string>('none');
   hasSearchedOnce = $state<boolean>(false);
 
   fileGroups = $state.raw<FileHitGroup[]>([]);
@@ -157,6 +157,20 @@ class WorkbenchState {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushRaf: number | null = null;
   private awaitingFirstChunk = false;
+  private activeQueryCacheKey = '';
+  private l0Cache = new Map<
+    string,
+    {
+      fileGroups: FileHitGroup[];
+      flatHits: HitItem[];
+      filesSearched: number;
+      filesMatched: number;
+      totalMatches: number;
+      matchedLines: number;
+      bytesSearched: number;
+      limitHit: boolean;
+    }
+  >();
 
   // Data Sources (Project Source Registry with UUID)
   tenant = $state<string>('default');
@@ -165,9 +179,9 @@ class WorkbenchState {
   sourcesLoading = $state<boolean>(false);
   sourceManagerOpen = $state<boolean>(false);
   addSourceModalOpen = $state<boolean>(false);
-  settingsTab = $state<'general' | 'sources' | 'add-source'>('general');
+  settingsTab = $state<'general' | 'sources' | 'add-source' | 'shortcuts'>('general');
 
-  openSettings(tab: 'general' | 'sources' | 'add-source' = 'general') {
+  openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
     this.settingsTab = tab;
     this.settingsOpen = true;
   }
@@ -210,8 +224,12 @@ class WorkbenchState {
   rightInspectorOpen = $state<boolean>(true);
   leftSidebarWidth = $state<number>(260);
   rightInspectorWidth = $state<number>(520);
-  shortcutsModalOpen = $state<boolean>(false);
   settingsOpen = $state<boolean>(false);
+  paletteOpen = $state<boolean>(false);
+  /** Compact (mobile) layout: full-screen detail view is shown only after an explicit open. */
+  detailOpen = $state<boolean>(false);
+  /** True when viewport < 768px: stacked list/detail navigation, bottom sheets, symbol bar. */
+  isCompact = $state<boolean>(false);
   codeFontSize = $state<number>(13.5);
   wordWrap = $state<boolean>(true);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
@@ -727,9 +745,6 @@ class WorkbenchState {
       if (typeof s.maxResults === 'number' && Number.isFinite(s.maxResults)) {
         this.maxResults = Math.max(1, Math.min(500000, Math.round(s.maxResults)));
       }
-      if (typeof s.maxPerFile === 'number' && Number.isFinite(s.maxPerFile)) {
-        this.maxPerFile = Math.max(0, Math.min(100000, Math.round(s.maxPerFile)));
-      }
       if (typeof s.codeFontSize === 'number' && Number.isFinite(s.codeFontSize)) {
         this.codeFontSize = Math.max(10, Math.min(28, s.codeFontSize));
       }
@@ -781,7 +796,6 @@ class WorkbenchState {
           hidden: this.hidden,
           contextLines: this.contextLines,
           maxResults: this.maxResults,
-          maxPerFile: this.maxPerFile,
           codeFontSize: this.codeFontSize,
           wordWrap: this.wordWrap,
           resultDensity: this.resultDensity,
@@ -800,7 +814,6 @@ class WorkbenchState {
     this.hidden = false;
     this.contextLines = 0;
     this.maxResults = 20000;
-    this.maxPerFile = 500;
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
@@ -1119,11 +1132,6 @@ class WorkbenchState {
 
   cycleSearchMode() {
     this.toggleFlag('r');
-  }
-
-  showAllInFile(_filePath: string) {
-    this.maxPerFile = 0;
-    this.executeSearch(false);
   }
 
   toggleScopeToken(scope: string) {
@@ -1460,8 +1468,47 @@ class WorkbenchState {
       hidden: this.hidden,
       respectIgnore: this.respectIgnore,
       maxResults: effectiveMaxResults,
-      maxPerFile: this.maxPerFile,
     };
+
+    const enabledSourcesSig = this.sources
+      .filter((s) => s.enabled)
+      .map((s) => s.id)
+      .join(',');
+    const cacheKey = JSON.stringify({
+      p: pat,
+      m: this.mode,
+      c: this.caseMode,
+      ww: this.wholeWord,
+      wl: this.wholeLine,
+      inv: this.invert,
+      inc: this.contains,
+      exc: this.excludes,
+      rep: this.replacement,
+      ctx: this.contextLines,
+      src: this.selectedSources,
+      en: enabledSourcesSig,
+      paths: this.selectedPaths,
+      globs: this.parsedGlobs,
+      types: this.selectedTypes,
+      hid: this.hidden,
+      ign: this.respectIgnore,
+      max: effectiveMaxResults,
+    });
+    this.activeQueryCacheKey = cacheKey;
+
+    // Tier L0: Frontend Instant Ring Cache (< 0.05ms zero-copy $state.raw swap)
+    const l0Hit = this.l0Cache.get(cacheKey);
+    if (l0Hit) {
+      this.fileGroups = l0Hit.fileGroups;
+      this.flatHits = l0Hit.flatHits;
+      this.filesSearched = l0Hit.filesSearched;
+      this.filesMatched = l0Hit.filesMatched;
+      this.totalMatches = l0Hit.totalMatches;
+      this.matchedLines = l0Hit.matchedLines;
+      this.bytesSearched = l0Hit.bytesSearched;
+      this.limitHit = l0Hit.limitHit;
+      this.cacheHit = 'l0-instant';
+    }
 
     this.ws.send(JSON.stringify(payload));
   }
@@ -1502,8 +1549,26 @@ class WorkbenchState {
         this.matchedLines = msg.matchedLines ?? this.flatHits.length;
         this.bytesSearched = msg.bytesSearched ?? this.bytesSearched;
         this.limitHit = Boolean(msg.limitHit) && String(msg.limitHit) !== 'none';
+        this.cacheHit = msg.cacheHit ?? 'none';
         if (typeof msg.searchCount === 'number' && msg.searchCount > 0) {
           this.searchCount = msg.searchCount;
+        }
+
+        if (this.activeQueryCacheKey && this.flatHits.length <= 20000) {
+          if (this.l0Cache.size >= 24 && !this.l0Cache.has(this.activeQueryCacheKey)) {
+            const oldestKey = this.l0Cache.keys().next().value;
+            if (oldestKey !== undefined) this.l0Cache.delete(oldestKey);
+          }
+          this.l0Cache.set(this.activeQueryCacheKey, {
+            fileGroups: this.fileGroups,
+            flatHits: this.flatHits,
+            filesSearched: this.filesSearched,
+            filesMatched: this.filesMatched,
+            totalMatches: this.totalMatches,
+            matchedLines: this.matchedLines,
+            bytesSearched: this.bytesSearched,
+            limitHit: this.limitHit,
+          });
         }
 
         if (this.totalMatches > 0 && this.pattern.trim().length >= 2) {
@@ -1571,11 +1636,7 @@ class WorkbenchState {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         nextFlat.push(item);
-        const itemMatchCount = item.isContext
-          ? 0
-          : this.contains.length > 0
-            ? 1
-            : Math.max(1, item.spans?.length || 1);
+        const itemMatchCount = item.isContext ? 0 : 1;
         addedMatches += itemMatchCount;
         let gIdx = this.groupIndexByFile.get(item.file);
         if (gIdx === undefined) {
@@ -1650,8 +1711,9 @@ class WorkbenchState {
         next[gIdx] = { ...next[gIdx], collapsed: false };
         this.fileGroups = next;
       }
-      if (forceOpenInspector && !this.rightInspectorOpen) {
-        this.rightInspectorOpen = true;
+      if (forceOpenInspector) {
+        this.detailOpen = true;
+        if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
       }
       // Check if the streaming hit text might have been truncated by the 4096-byte UTF-8 streaming cap
       // (Note: CJK chars are 3 UTF-8 bytes each, or a JSON line starting with '{' that doesn't end with '}')
@@ -1705,8 +1767,9 @@ class WorkbenchState {
     this.inspectorContext = contextRadius;
     this.inspectorLoading = true;
     this.inspectorError = null;
-    if (forceOpen && !this.rightInspectorOpen) {
-      this.rightInspectorOpen = true;
+    if (forceOpen) {
+      this.detailOpen = true;
+      if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
     }
 
     try {

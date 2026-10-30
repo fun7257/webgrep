@@ -1,6 +1,7 @@
 const std = @import("std");
 const libwebgrep = @import("libwebgrep");
 const file_api = @import("file_api.zig");
+const search_cache = @import("search_cache.zig");
 
 pub const SourceConfigDto = struct {
     path: []const u8 = "",
@@ -180,9 +181,50 @@ pub const SourceRegistry = struct {
     home_dir: ?[]const u8 = null,
     sources: std.ArrayList(SourceRecord) = .empty,
     search_count: std.atomic.Value(u64) = .init(0),
+    heat_epoch: std.atomic.Value(u64) = .init(0),
+    file_heat: std.StringHashMapUnmanaged(u64) = .empty,
+    search_cache: search_cache.SearchCache = .{},
 
     pub fn getSearchCount(self: *const SourceRegistry) u64 {
         return self.search_count.load(.acquire);
+    }
+
+    pub fn getHeatEpoch(self: *const SourceRegistry) u64 {
+        return self.heat_epoch.load(.acquire);
+    }
+
+    pub fn recordFileHeat(self: *SourceRegistry, io: std.Io, virtual_path: []const u8, delta: u64) void {
+        self.recordFileHeatInternal(io, virtual_path, delta, true);
+    }
+
+    pub fn recordPassiveMatchHeat(self: *SourceRegistry, io: std.Io, virtual_path: []const u8, delta: u64) void {
+        self.recordFileHeatInternal(io, virtual_path, delta, false);
+    }
+
+    fn recordFileHeatInternal(self: *SourceRegistry, io: std.Io, virtual_path: []const u8, delta: u64, bump_epoch: bool) void {
+        if (virtual_path.len == 0 or delta == 0) return;
+        if (bump_epoch) {
+            _ = self.heat_epoch.fetchAdd(1, .acq_rel);
+        }
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (self.file_heat.getPtr(virtual_path)) |val_ptr| {
+            val_ptr.* = @min(2000, val_ptr.* +| delta);
+            return;
+        }
+        if (self.file_heat.count() >= 4096) return;
+        const key_copy = self.gpa.dupe(u8, virtual_path) catch return;
+        self.file_heat.put(self.gpa, key_copy, @min(2000, delta)) catch {
+            self.gpa.free(key_copy);
+        };
+    }
+
+    pub fn getFileHeat(self: *SourceRegistry, io: std.Io, virtual_path: []const u8) u64 {
+        if (virtual_path.len == 0) return 0;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.file_heat.get(virtual_path) orelse 0;
     }
 
     pub fn recordSearch(self: *SourceRegistry, io: std.Io) u64 {
@@ -209,7 +251,13 @@ pub const SourceRegistry = struct {
     }
 
     pub fn deinit(self: *SourceRegistry, io: std.Io) void {
+        self.search_cache.deinit(self.gpa, io);
         self.mutex.lockUncancelable(io);
+        var it = self.file_heat.keyIterator();
+        while (it.next()) |k| {
+            self.gpa.free(k.*);
+        }
+        self.file_heat.deinit(self.gpa);
         for (self.sources.items) |*s| s.deinit(self.gpa);
         self.sources.deinit(self.gpa);
         self.mutex.unlock(io);
@@ -634,6 +682,9 @@ pub const SourceRegistry = struct {
     ) ![]u8 {
         const clean_vpath = try file_api.sanitizeRelPath(virtual_path_raw);
         if (clean_vpath.len == 0) return error.InvalidPath;
+
+        // Boost access heat whenever a user inspects a record from this file
+        self.recordFileHeat(io, clean_vpath, 150);
 
         const slash_idx = std.mem.indexOfScalar(u8, clean_vpath, '/') orelse return error.InvalidPath;
         const source_name = clean_vpath[0..slash_idx];

@@ -6,8 +6,8 @@
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
   import ResultList from '$lib/components/ResultList.svelte';
   import InspectorPane from '$lib/components/InspectorPane.svelte';
-  import ShortcutsModal from '$lib/components/ShortcutsModal.svelte';
   import SettingsPopover from '$lib/components/SettingsPopover.svelte';
+  import CommandPalette from '$lib/components/CommandPalette.svelte';
 
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let resizingInspector = $state(false);
@@ -20,8 +20,40 @@
 
   onMount(() => {
     workbench.init();
-    searchInputEl?.focus();
+
+    // Compact (mobile) layout breakpoint: < 768px
+    const mq = window.matchMedia('(max-width: 767px)');
+    workbench.isCompact = mq.matches;
+    const onMq = (e: MediaQueryListEvent) => (workbench.isCompact = e.matches);
+    mq.addEventListener('change', onMq);
+
+    // Avoid popping the soft keyboard on touch devices at load.
+    if (!mq.matches) searchInputEl?.focus();
+
+    return () => mq.removeEventListener('change', onMq);
   });
+
+  // Stacked navigation: opening the detail view pushes a history entry so the
+  // system back button / edge-swipe returns to the list instead of leaving the app.
+  let detailPushed = false;
+
+  $effect(() => {
+    const open = workbench.isCompact && workbench.detailOpen && !!workbench.inspectedPath;
+    if (open && !detailPushed) {
+      history.pushState({ detail: true }, '');
+      detailPushed = true;
+    } else if (!open && detailPushed) {
+      detailPushed = false;
+      if (history.state?.detail) history.back();
+    }
+  });
+
+  function handlePopState() {
+    if (detailPushed) {
+      detailPushed = false;
+      workbench.detailOpen = false;
+    }
+  }
 
   function isTypingInInput(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
@@ -29,38 +61,54 @@
     return tag === 'input' || tag === 'textarea' || target.isContentEditable;
   }
 
+  function navigateFile(delta: 1 | -1) {
+    const hits = workbench.flatHits;
+    const cur = workbench.activeHitIndex;
+    if (cur < 0 || cur >= hits.length) return;
+    const file = hits[cur].file;
+    let i = cur + delta;
+    while (i >= 0 && i < hits.length && hits[i].file === file) i += delta;
+    if (i < 0 || i >= hits.length) return;
+    if (delta < 0) {
+      // jump to the first hit of the previous file
+      const prevFile = hits[i].file;
+      while (i > 0 && hits[i - 1].file === prevFile) i--;
+    }
+    workbench.selectHitByIndex(i, false);
+    workbench.scrollToActiveTick += 1;
+  }
+
   function handleGlobalKeydown(e: KeyboardEvent) {
-    if (e.AltKey || e.altKey) {
-      if (e.key.toLowerCase() === 'c') {
+    // Alt + letter toggles (use e.code: on macOS Alt+letter yields special chars in e.key)
+    if (e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (e.code === 'KeyC') {
         e.preventDefault();
         workbench.cycleCaseMode();
         return;
       }
-      if (e.key.toLowerCase() === 'w') {
+      if (e.code === 'KeyW') {
         e.preventDefault();
         workbench.toggleFlag('w');
         return;
       }
-      if (e.key.toLowerCase() === 'r') {
+      if (e.code === 'KeyR') {
         e.preventDefault();
         workbench.cycleSearchMode();
         return;
       }
     }
 
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
+    if ((e.metaKey || e.ctrlKey) && e.code === 'KeyK') {
       e.preventDefault();
-      if (workbench.settingsOpen && workbench.settingsTab === 'sources') {
-        workbench.settingsOpen = false;
-      } else {
-        workbench.openSettings('sources');
-      }
+      workbench.settingsOpen = false;
+      workbench.paletteOpen = !workbench.paletteOpen;
       return;
     }
 
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
-      if (workbench.settingsOpen && workbench.settingsTab === 'general') {
+      workbench.paletteOpen = false;
+      if (workbench.settingsOpen) {
         workbench.settingsOpen = false;
       } else {
         workbench.openSettings('general');
@@ -69,12 +117,17 @@
     }
 
     if (e.key === 'Escape') {
+      // Step back one layer at a time: palette → settings → detail → cancel search
+      if (workbench.paletteOpen) {
+        workbench.paletteOpen = false;
+        return;
+      }
       if (workbench.settingsOpen) {
         workbench.settingsOpen = false;
         return;
       }
-      if (workbench.shortcutsModalOpen) {
-        workbench.shortcutsModalOpen = false;
+      if (workbench.isCompact && workbench.detailOpen) {
+        workbench.detailOpen = false;
         return;
       }
       if (workbench.isSearching) {
@@ -84,6 +137,18 @@
     }
 
     if (isTypingInInput(e.target)) return;
+    if (workbench.paletteOpen || workbench.settingsOpen) return;
+
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      const sel = window.getSelection()?.toString() ?? '';
+      const hit = workbench.activeHit;
+      if (sel.length === 0 && hit) {
+        e.preventDefault();
+        navigator.clipboard?.writeText(hit.text);
+      }
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     if (e.key === '/') {
       e.preventDefault();
@@ -91,8 +156,23 @@
       searchInputEl?.select();
     } else if (e.key === '?') {
       e.preventDefault();
-      workbench.settingsOpen = false;
-      workbench.shortcutsModalOpen = !workbench.shortcutsModalOpen;
+      if (workbench.settingsOpen && workbench.settingsTab === 'shortcuts') {
+        workbench.settingsOpen = false;
+      } else {
+        workbench.openSettings('shortcuts');
+      }
+    } else if (e.key === 'Tab' && !e.shiftKey && e.target === document.body) {
+      e.preventDefault();
+      searchInputEl?.focus();
+    } else if (e.key === 'Enter' && e.target === document.body) {
+      if (workbench.activeHitIndex >= 0) {
+        e.preventDefault();
+        workbench.selectHitByIndex(workbench.activeHitIndex, true);
+      }
+    } else if (e.key === '[') {
+      navigateFile(-1);
+    } else if (e.key === ']') {
+      navigateFile(1);
     } else if (e.key === 'ArrowDown' || e.key === 'j') {
       if (workbench.flatHits.length > 0) {
         e.preventDefault();
@@ -108,12 +188,13 @@
 
   let resizeRaf: number | null = null;
 
-  function startResizeInspector(e: MouseEvent) {
+  function startResizeInspector(e: PointerEvent) {
     e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     resizingInspector = true;
   }
 
-  function handleMouseMove(e: MouseEvent) {
+  function handlePointerMove(e: PointerEvent) {
     if (!resizingInspector) return;
     const clientX = e.clientX;
     if (resizeRaf !== null) return;
@@ -135,12 +216,14 @@
 
 <svelte:window
   onkeydown={handleGlobalKeydown}
-  onmousemove={handleMouseMove}
-  onmouseup={stopResize}
+  onpointermove={handlePointerMove}
+  onpointerup={stopResize}
+  onpointercancel={stopResize}
+  onpopstate={handlePopState}
 />
 
 <div
-  class={`relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground ${
+  class={`relative flex h-app w-screen flex-col overflow-hidden bg-background text-foreground ${
     resizingInspector ? 'select-none cursor-col-resize' : ''
   }`}
 >
@@ -155,17 +238,26 @@
       {/if}
     </main>
 
-    {#if !isHomeView && workbench.rightInspectorOpen && workbench.inspectedPath}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        onmousedown={startResizeInspector}
-        class="w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 transition-colors z-20"
-        title={workbench.t.header.dragResizeInspector}
-      ></div>
-      <InspectorPane />
+    {#if !isHomeView && workbench.inspectedPath}
+      {#if workbench.isCompact}
+        {#if workbench.detailOpen}
+          <div class="detail-enter fixed inset-0 z-30 bg-background">
+            <InspectorPane />
+          </div>
+        {/if}
+      {:else if workbench.rightInspectorOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          onpointerdown={startResizeInspector}
+          style="touch-action: none"
+          class="w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 transition-colors z-20"
+          title={workbench.t.header.dragResizeInspector}
+        ></div>
+        <InspectorPane />
+      {/if}
     {/if}
   </div>
 
-  <ShortcutsModal />
   <SettingsPopover />
+  <CommandPalette />
 </div>

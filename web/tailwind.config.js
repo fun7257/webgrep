@@ -1,11 +1,13 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
+  future: { hoverOnlyWhenSupported: true },
   content: ['./index.html', './src/**/*.{svelte,js,ts,jsx,tsx}'],
   theme: {
     extend: {
       fontFamily: {
         sans: [
+          'ui-sans-serif',
           'Inter',
           '-apple-system',
           'BlinkMacSystemFont',
@@ -14,6 +16,7 @@ export default {
           'sans-serif',
         ],
         mono: [
+          'ui-monospace',
           '"JetBrains Mono"',
           '"Fira Code"',
           '"SF Mono"',
@@ -37,6 +40,7 @@ export default {
           DEFAULT: 'hsl(var(--secondary))',
           foreground: 'hsl(var(--secondary-foreground))',
         },
+        status: 'hsl(var(--status))',
         destructive: {
           DEFAULT: 'hsl(var(--destructive))',
           foreground: 'hsl(var(--destructive-foreground))',

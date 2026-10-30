@@ -18,7 +18,9 @@
 
 - `web/`：**Svelte 5 (`^5.57.2`) + Vite 8 (`^8.3.5` Rolldown) + TypeScript 7 (`^7.0.2`) + Tailwind CSS 4** 前端工作台。
   - [`web/src/lib/state.svelte.ts`](web/src/lib/state.svelte.ts)：全局响应式状态、目录数据源与多 Tag 管理、渐进式查询解析器（`parsedQuery`）、WebSocket 流式两阶段节拍器。
-  - [`web/src/lib/components/SourceManagerModal.svelte`](web/src/lib/components/SourceManagerModal.svelte)：极简目录数据源配置中心（内联快速添加、服务端路径实时补全、多 Tag 绑定、按 Tag 分组启停与一键 `@` 下钻）。
+  - [`web/src/lib/components/SettingsPopover.svelte`](web/src/lib/components/SettingsPopover.svelte)：图标 Tab 设置中心（通用、数据源、添加数据源、快捷键帮助）；移动端为底部抽屉。
+  - [`web/src/lib/components/CommandPalette.svelte`](web/src/lib/components/CommandPalette.svelte)：`⌘/Ctrl + K` 命令面板。
+  - [`web/src/lib/components/SymbolBar.svelte`](web/src/lib/components/SymbolBar.svelte)：移动端软键盘上方符号工具条。
   - [`web/src/lib/components/SearchBar.svelte`](web/src/lib/components/SearchBar.svelte)：极简浏览器式搜索栏、`@tag-数据源/子目录/文件` 无限层级智能下钻补全、`$` 模式补全、右侧紧凑状态角标。
   - [`web/src/lib/components/TelemetryBar.svelte`](web/src/lib/components/TelemetryBar.svelte)：零 CLS 遥测状态栏与可点击剥离的深搜/排除胶囊。
   - [`web/src/lib/components/ResultList.svelte`](web/src/lib/components/ResultList.svelte)：120Hz GPU 合成层零重排虚拟列表。

@@ -5,13 +5,16 @@
     getCachedHighlightSegments,
     type HighlightSegment,
   } from '$lib/utils';
-  import { Check, Copy, Loader2 } from 'lucide-svelte';
+  import { AtSign, Ban, Check, Copy, Loader2 } from 'lucide-svelte';
 
   interface VirtualHitRow {
     idx: number;
     key: string;
     item: HitItem;
     srcName: string;
+    /** True when the data source differs from the previous hit (breadcrumb only shown on change). */
+    showSrc: boolean;
+    fileName: string;
   }
 
   let copiedIdx = $state<number>(-1);
@@ -107,7 +110,13 @@
       const it = hits[i];
       const slash = it.file.indexOf('/');
       const srcName = slash > 0 ? it.file.slice(0, slash) : '';
+      const prevFile = i > 0 ? hits[i - 1].file : '';
+      const prevSlash = prevFile.indexOf('/');
+      const prevSrc = prevSlash > 0 ? prevFile.slice(0, prevSlash) : '';
+      const lastSlash = it.file.lastIndexOf('/');
       items.push({
+        showSrc: i === 0 || srcName !== prevSrc,
+        fileName: lastSlash >= 0 ? it.file.slice(lastSlash + 1) : it.file,
         idx: i,
         key: `${i}:${it.file}:${it.line}:${it.col}`,
         item: it,
@@ -156,6 +165,51 @@
     });
   }
 
+  // Long-press (touch) opens a bottom action sheet for the row.
+  let menuRow = $state.raw<VirtualHitRow | null>(null);
+  let pressTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressOrigin: { x: number; y: number } | null = null;
+  let suppressClick = false;
+
+  function cancelPress() {
+    if (pressTimer !== null) clearTimeout(pressTimer);
+    pressTimer = null;
+    pressOrigin = null;
+  }
+
+  function onRowPointerDown(e: PointerEvent, row: VirtualHitRow) {
+    if (e.pointerType !== 'touch') return;
+    pressOrigin = { x: e.clientX, y: e.clientY };
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      suppressClick = true;
+      menuRow = row;
+      navigator.vibrate?.(8);
+    }, 480);
+  }
+
+  function onRowPointerMove(e: PointerEvent) {
+    if (!pressOrigin) return;
+    if (Math.abs(e.clientX - pressOrigin.x) > 8 || Math.abs(e.clientY - pressOrigin.y) > 8) {
+      cancelPress();
+    }
+  }
+
+  function copyFromMenu() {
+    if (!menuRow) return;
+    navigator.clipboard?.writeText(menuRow.item.text);
+    menuRow = null;
+  }
+
+  function scopeFromMenu(exclude: boolean) {
+    if (!menuRow || !menuRow.srcName) return;
+    const token = `${exclude ? '-' : ''}@${menuRow.srcName}`;
+    const cur = workbench.pattern.trim();
+    workbench.pattern = cur ? `${cur} ${token}` : token;
+    workbench.scheduleSearch(true);
+    menuRow = null;
+  }
+
   function copyLineText(e: MouseEvent, idx: number, text: string) {
     e.stopPropagation();
     navigator.clipboard?.writeText(text);
@@ -193,10 +247,10 @@
   bind:clientHeight={viewportHeight}
   bind:clientWidth={scrollerWidth}
   onscroll={handleScroll}
-  class="flex-1 overflow-y-auto bg-background"
+  class="flex-1 overflow-y-auto overscroll-contain bg-background"
 >
   {#if workbench.flatHits.length > 0}
-    <div class="px-6 pb-8" style={`font-size: ${workbench.codeFontSize}px`}>
+    <div class="px-3 md:px-6 pb-8" style={`font-size: ${workbench.codeFontSize}px`}>
       <div
         class="relative w-full"
         style={`height: ${visibleSlice.totalHeight}px`}
@@ -223,9 +277,23 @@
               <div
                 role="button"
                 tabindex="0"
+                onpointerdown={(e) => onRowPointerDown(e, row)}
+                onpointermove={onRowPointerMove}
+                onpointerup={cancelPress}
+                onpointercancel={cancelPress}
+                oncontextmenu={(e) => {
+                  if (workbench.isCompact) e.preventDefault();
+                }}
                 onclick={() => {
-                  const sel = window.getSelection()?.toString() ?? '';
-                  if (sel.length > 0) return;
+                  if (suppressClick) {
+                    suppressClick = false;
+                    return;
+                  }
+                  // Touch long-press selections are handled via the action sheet; skip selection guard there.
+                  if (!workbench.isCompact) {
+                    const sel = window.getSelection()?.toString() ?? '';
+                    if (sel.length > 0) return;
+                  }
                   workbench.selectHitByIndex(row.idx, true);
                 }}
                 onkeydown={(e) => {
@@ -245,7 +313,12 @@
                 <!-- Layer 1: Subtle Project Attribution (@project) + Hover Copy Button -->
                 <div class="flex h-[18px] shrink-0 items-center justify-between gap-3 select-none">
                   <div class="flex items-center gap-1.5 min-w-0 font-mono text-[11px] leading-none">
-                    {#if row.srcName}
+                    {#if workbench.isCompact}
+                      {#if row.showSrc && row.srcName}
+                        <span class="shrink-0 text-muted-foreground/70">@{row.srcName}</span>
+                      {/if}
+                      <span class="truncate text-muted-foreground/60">{row.fileName}:{item.line}</span>
+                    {:else if row.showSrc && row.srcName}
                       <button
                         type="button"
                         onclick={(e) => {
@@ -264,10 +337,11 @@
                     type="button"
                     title={workbench.locale === 'zh' ? '复制该条内容' : 'Copy content'}
                     onclick={(e) => copyLineText(e, row.idx, item.text)}
-                    class="shrink-0 rounded p-0.5 text-muted-foreground/45 hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                    aria-label={workbench.locale === 'zh' ? '复制该条内容' : 'Copy content'}
+                    class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100 transition-opacity"
                   >
                     {#if copiedIdx === row.idx}
-                      <Check class="h-3.5 w-3.5 text-emerald-400" />
+                      <Check class="h-3.5 w-3.5 text-primary" />
                     {:else}
                       <Copy class="h-3.5 w-3.5" />
                     {/if}
@@ -327,3 +401,55 @@
     </div>
   {/if}
 </div>
+
+{#if menuRow}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    onclick={() => (menuRow = null)}
+    onkeydown={(e) => e.key === 'Escape' && (menuRow = null)}
+    class="fixed inset-0 z-50 flex items-end bg-black/50 select-none"
+  >
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      onclick={(e) => e.stopPropagation()}
+      class="pb-safe w-full rounded-t-2xl border-t border-border bg-card p-3"
+    >
+      <div class="mx-auto mb-3 h-1 w-9 rounded-full bg-border"></div>
+      <div class="mb-2 truncate px-2 font-mono text-[12px] text-muted-foreground">
+        {menuRow.fileName}:{menuRow.item.line}
+      </div>
+      <div class="flex items-center justify-around">
+        <button
+          type="button"
+          onclick={copyFromMenu}
+          aria-label={workbench.locale === 'zh' ? '复制' : 'Copy'}
+          title={workbench.locale === 'zh' ? '复制' : 'Copy'}
+          class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
+        >
+          <Copy class="h-5 w-5" />
+        </button>
+        {#if menuRow.srcName}
+          <button
+            type="button"
+            onclick={() => scopeFromMenu(false)}
+            aria-label={`@${menuRow.srcName}`}
+            title={`@${menuRow.srcName}`}
+            class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
+          >
+            <AtSign class="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            onclick={() => scopeFromMenu(true)}
+            aria-label={`-@${menuRow.srcName}`}
+            title={`-@${menuRow.srcName}`}
+            class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
+          >
+            <Ban class="h-5 w-5" />
+          </button>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}

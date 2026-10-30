@@ -14,7 +14,7 @@
   {title}
   aria-checked={checked}
   onclick={() => onchange(!checked)}
-  class={`group relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
+  class={`touch-target group relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
     checked
       ? 'bg-primary shadow-xs'
       : 'bg-secondary/90 border-border/80 hover:bg-secondary'

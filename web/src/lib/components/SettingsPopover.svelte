@@ -10,6 +10,9 @@
     FolderGit2,
     FolderOpen,
     FolderPlus,
+    Keyboard,
+    Moon,
+    Sun,
     Loader2,
     Plus,
     RotateCcw,
@@ -18,7 +21,20 @@
     X,
   } from 'lucide-svelte';
 
-  type SettingsTabId = 'general' | 'sources' | 'add-source';
+  type SettingsTabId = 'general' | 'sources' | 'add-source' | 'shortcuts';
+
+  const tabs = $derived([
+    { id: 'general' as const, icon: SlidersHorizontal, title: workbench.t.settings.tabGeneral },
+    { id: 'sources' as const, icon: FolderGit2, title: workbench.t.settings.tabSources },
+    { id: 'add-source' as const, icon: FolderPlus, title: workbench.t.settings.tabAdd },
+    { id: 'shortcuts' as const, icon: Keyboard, title: workbench.t.settings.tabShortcuts },
+  ]);
+
+  const shortcutGroups = $derived([
+    { id: 'syntax', title: workbench.t.settings.groupSyntax },
+    { id: 'nav', title: workbench.t.settings.groupNav },
+    { id: 'panel', title: workbench.t.settings.groupPanel },
+  ] as const);
 
   // Add Source form state
   let kindInput = $state<'dir' | 'file'>('dir');
@@ -184,7 +200,7 @@
     onkeydown={(e) => {
       if (e.key === 'Escape') closeModal();
     }}
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none"
+    class="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/60 backdrop-blur-xs p-0 md:p-4 select-none"
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -193,75 +209,40 @@
         e.stopPropagation();
         showDirSuggest = false;
       }}
-      class="flex h-[520px] max-h-[calc(100vh-2rem)] w-full max-w-[680px] overflow-hidden rounded-2xl border border-border/80 bg-card shadow-2xl"
+      class="pb-safe flex flex-col md:flex-row h-[560px] md:h-[520px] max-h-[88dvh] w-full max-w-[680px] overflow-hidden rounded-t-2xl md:rounded-2xl border border-border/80 bg-card shadow-2xl"
     >
-      <!-- Left Sidebar Navigation (macOS System Settings Style) -->
-      <aside class="flex w-[188px] shrink-0 flex-col border-r border-border/60 bg-secondary/20 p-3">
-        <div class="px-2.5 pb-2.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-          {workbench.locale === 'zh' ? '系统设置' : 'Settings'}
-        </div>
-
-        <nav class="flex flex-col gap-1 text-[13px]">
+      <!-- Icon tab rail: horizontal on mobile, vertical on desktop -->
+      <aside
+        class="flex shrink-0 flex-row md:flex-col items-center gap-1 border-b md:border-b-0 md:border-r border-border/60 bg-secondary/20 p-2"
+      >
+        {#each tabs as tab (tab.id)}
+          {@const Icon = tab.icon}
           <button
             type="button"
-            onclick={() => switchTab('general')}
-            class={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors cursor-pointer ${
-              workbench.settingsTab === 'general'
-                ? 'bg-secondary font-medium text-foreground shadow-2xs'
+            onclick={() => switchTab(tab.id)}
+            title={tab.title}
+            aria-label={tab.title}
+            class={`touch-target relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors cursor-pointer ${
+              workbench.settingsTab === tab.id
+                ? 'bg-secondary text-foreground'
                 : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
             }`}
           >
-            <SlidersHorizontal class="h-4 w-4 shrink-0" />
-            <span class="truncate">{workbench.locale === 'zh' ? '通用与检索' : 'General'}</span>
-          </button>
-
-          <button
-            type="button"
-            onclick={() => switchTab('sources')}
-            class={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left transition-colors cursor-pointer ${
-              workbench.settingsTab === 'sources'
-                ? 'bg-secondary font-medium text-foreground shadow-2xs'
-                : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
-            }`}
-          >
-            <div class="flex items-center gap-2.5 min-w-0">
-              <FolderGit2 class="h-4 w-4 shrink-0" />
-              <span class="truncate">{workbench.locale === 'zh' ? '数据源' : 'Sources'}</span>
-            </div>
-            {#if workbench.sources.length > 0}
-              <span class="font-mono text-[11px] text-muted-foreground">
-                {workbench.enabledSourceCount}/{workbench.sources.length}
+            <Icon class="h-4 w-4" />
+            {#if tab.id === 'sources' && workbench.sources.length > 0}
+              <span class="absolute right-0.5 top-0.5 font-mono text-[9px] leading-none text-muted-foreground">
+                {workbench.enabledSourceCount}
               </span>
             {/if}
           </button>
-
-          <button
-            type="button"
-            onclick={() => switchTab('add-source')}
-            class={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors cursor-pointer ${
-              workbench.settingsTab === 'add-source'
-                ? 'bg-secondary font-medium text-foreground shadow-2xs'
-                : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
-            }`}
-          >
-            <FolderPlus class="h-4 w-4 shrink-0" />
-            <span class="truncate">{workbench.locale === 'zh' ? '添加数据源' : 'Add Source'}</span>
-          </button>
-        </nav>
+        {/each}
       </aside>
 
       <!-- Right Content Area -->
-      <section class="flex flex-1 flex-col min-w-0 bg-card">
-        <!-- Content Header -->
-        <div class="flex h-12 shrink-0 items-center justify-between border-b border-border/50 px-6">
+      <section class="flex flex-1 flex-col min-w-0 min-h-0 bg-card">
+        <div class="flex h-12 shrink-0 items-center justify-between border-b border-border/50 px-4 md:px-6">
           <div class="text-[14px] font-semibold text-foreground">
-            {#if workbench.settingsTab === 'general'}
-              {workbench.locale === 'zh' ? '通用与检索' : 'General & Search'}
-            {:else if workbench.settingsTab === 'sources'}
-              {workbench.locale === 'zh' ? '数据源' : 'Data Sources'}
-            {:else}
-              {workbench.locale === 'zh' ? '添加数据源' : 'Add Data Source'}
-            {/if}
+            {tabs.find((tab) => tab.id === workbench.settingsTab)?.title}
           </div>
 
           <div class="flex items-center gap-1.5">
@@ -269,19 +250,20 @@
               <button
                 type="button"
                 title={workbench.t.settings.resetTitle}
+                aria-label={workbench.t.settings.resetTitle}
                 onclick={() => workbench.resetSettings()}
-                class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+                class="touch-target flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
               >
-                <RotateCcw class="h-3 w-3" />
-                <span>{workbench.t.settings.reset}</span>
+                <RotateCcw class="h-3.5 w-3.5" />
               </button>
             {/if}
 
             <button
               type="button"
               title={workbench.t.settings.closeTitle}
+              aria-label={workbench.t.settings.closeTitle}
               onclick={closeModal}
-              class="rounded-lg p-1 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+              class="touch-target flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
             >
               <X class="h-4 w-4" />
             </button>
@@ -289,7 +271,7 @@
         </div>
 
         <!-- Scrollable Pane Body -->
-        <div class="flex-1 overflow-y-auto px-6 py-5 text-[13px]">
+        <div class="flex-1 overflow-y-auto px-4 md:px-6 py-5 text-[13px]">
           {#if workbench.settingsTab === 'general'}
             <div class="space-y-5">
               <!-- Group 1: Interface & Appearance -->
@@ -337,6 +319,27 @@
                     >
                       English
                     </button>
+                  </div>
+                </div>
+
+                <!-- Theme -->
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-foreground/95 font-medium">{workbench.t.settings.themeLabel}</div>
+                  <div class="inline-flex h-8 items-center rounded-lg border border-border/80 bg-background/90 p-0.5">
+                    {#each [{ dark: false, Icon: Sun }, { dark: true, Icon: Moon }] as opt (opt.dark)}
+                      <button
+                        type="button"
+                        aria-label={opt.dark ? workbench.t.header.darkMode : workbench.t.header.lightMode}
+                        onclick={() => workbench.darkMode !== opt.dark && workbench.toggleTheme()}
+                        class={`touch-target flex h-6 w-8 items-center justify-center rounded-md transition-colors cursor-pointer ${
+                          workbench.darkMode === opt.dark
+                            ? 'bg-primary text-primary-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <opt.Icon class="h-3.5 w-3.5" />
+                      </button>
+                    {/each}
                   </div>
                 </div>
 
@@ -496,6 +499,22 @@
                 </div>
               </div>
             </div>
+          {:else if workbench.settingsTab === 'shortcuts'}
+            <div class="space-y-5">
+              {#each shortcutGroups as grp (grp.id)}
+                <div>
+                  <div class="mb-1 text-[11px] font-semibold text-muted-foreground">{grp.title}</div>
+                  <div class="divide-y divide-border/50">
+                    {#each workbench.t.shortcuts.items.filter((it) => it.group === grp.id) as it (it.key)}
+                      <div class="flex items-center justify-between gap-3 py-2">
+                        <span class="text-foreground/90">{it.desc}</span>
+                        <kbd class="shrink-0 rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-foreground">{it.key}</kbd>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
           {:else if workbench.settingsTab === 'sources'}
             <!-- Minimalist Data Sources List (Switch + Delete only) -->
             {#if workbench.sources.length === 0}
@@ -590,7 +609,7 @@
                 </div>
                 <div class="relative">
                   {#if kindInput === 'file'}
-                    <FileText class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-sky-400/80" />
+                    <FileText class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                   {:else}
                     <FolderOpen class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                   {/if}
@@ -638,7 +657,7 @@
                         >
                           <div class="flex items-center gap-1.5 min-w-0">
                             {#if entry.isDir === false}
-                              <FileText class="h-3.5 w-3.5 shrink-0 text-sky-400/80" />
+                              <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                               <span class="font-mono font-medium text-foreground truncate">{entry.name}</span>
                             {:else}
                               <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

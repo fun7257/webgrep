@@ -44,7 +44,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 ### 2.2 内联操作符（`@` 无限层级范围、`$模式` 与 `-排除`）
 1. **`@` 无限层级多 Tag 数据源与路径过滤（及 `-@排除范围`）**：
-   - `webgrep` 不再使用启动命令行绑定单目录的旧模式，而是通过 [`SourceManagerModal.svelte`](../web/src/lib/components/SourceManagerModal.svelte)（快捷键 `⌘/Ctrl + D` 或点击顶栏数据源徽标）动态管理目录数据源，每个目录支持绑定**多个 Tag**，并持久化至 `<data_dir>/sources.json`。
+   - `webgrep` 不再使用启动命令行绑定单目录的旧模式，而是通过 [`SettingsPopover.svelte`](../web/src/lib/components/SettingsPopover.svelte) 的「数据源」页（顶栏 `Database` 图标或 `⌘/Ctrl + K` 命令面板）动态管理目录数据源，每个目录支持绑定**多个 Tag**，并持久化至 `<data_dir>/sources.json`。
    - **无限层级 `@` 语法**：支持 `@tag`（按 Tag 聚合群搜）、`@tag1-tag2`（多 Tag 交集）、`@tag-数据源名`（精确锁源）、以及继续通过 `/` 或 `-` 深入任意层级的子目录与文件（如 `@zig-webgrep/web/src/lib/components` 或 `@zig-webgrep-src-search_job.zig`）。
    - **分级下钻补全交互**：输入 `@` 唤起下拉菜单时，按 **`Enter` 或点击条目**直接确认该范围；按 **`Tab` 或点击右侧「下钻 ▸」**则自动补全 `-` 或 `/` 分隔符并立即展开下一层级（`Tag -> 数据源 -> 子目录 -> 文件`），全程无需关闭补全菜单。
 2. **`$模式`（`$r` 正则、`$c` 区分大小写、`$w` 全词匹配）**：
@@ -193,3 +193,14 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - [ ] 新搜索触发时是否保持了 `awaitingFirstChunk`（无缝保留旧结果，不闪白屏）？
 - [ ] 动态出现的 UI 元素是否会导致相邻文字或列表发生水平/垂直位移（CLS）？
 - [ ] `npm --prefix web run check && npm --prefix web run build` 是否零报错通过？
+
+---
+
+## 八、图标优先、快捷键与移动端规范
+
+- **色彩**：仅「中性灰阶 + `primary` 强调色 + `status` 状态色」。禁止新增 `amber/emerald/rose/sky/fuchsia` 等硬编码彩色类；匹配高亮层级用下划线样式（实线/虚线/点线）区分。
+- **文字**：状态栏、顶栏、按钮优先使用 lucide 图标，文字放入 `title` / `aria-label`。
+- **顶栏**：仅连接状态、数据源、设置。主题、语言、快捷键帮助归入设置；命令入口为 `⌘/Ctrl + K`（[`CommandPalette.svelte`](../web/src/lib/components/CommandPalette.svelte)，命令表见 `lib/commands.ts`）。
+- **快捷键**：`Alt + C/W/R` 必须使用 `e.code`（macOS 下 `e.key` 会变成特殊字符）；`Esc` 逐层返回；`[` `]` 切换文件；`Tab` 在搜索框与列表间切换焦点。
+- **移动端（< 768px，`workbench.isCompact`）**：列表与详情为栈式导航（`detailOpen` + `history.pushState`，系统返回键回列表）；设置为底部抽屉；软键盘上方显示 [`SymbolBar.svelte`](../web/src/lib/components/SymbolBar.svelte)；结果行长按弹出操作面板。
+- **触控**：可点击元素在 `(pointer: coarse)` 下命中区 ≥ 44px（`.touch-target`）；不得依赖 `hover` 显示核心操作；根容器使用 `h-app`（`100dvh`）与 `pt-safe` / `pb-safe`。

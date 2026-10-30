@@ -78,4 +78,5 @@ test {
     _ = search_job;
     _ = server;
     _ = source_registry;
+    _ = @import("search_cache.zig");
 }

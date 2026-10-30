@@ -5,13 +5,17 @@
     buildHighlightSegments,
   } from '$lib/utils';
   import {
+    ArrowLeft,
+    Braces,
     Check,
     Copy,
+    FileText,
     Loader2,
     Search,
     X,
   } from 'lucide-svelte';
 
+  let asideEl = $state<HTMLElement | null>(null);
   let selectedText = $state<string>('');
   let copiedLine = $state<boolean>(false);
 
@@ -115,6 +119,38 @@
     selectedText = sel.length > 0 && sel.length <= 256 ? sel : '';
   }
 
+  // Touch: there is no mouseup after a long-press selection; follow selectionchange instead.
+  function handleSelectionChange() {
+    if (!workbench.isCompact || !asideEl) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !asideEl.contains(sel.anchorNode)) {
+      selectedText = '';
+      return;
+    }
+    handleMouseUp();
+  }
+
+  function closeDetail() {
+    workbench.detailOpen = false;
+    if (!workbench.isCompact) workbench.rightInspectorOpen = false;
+  }
+
+  // Edge swipe (from left edge, rightwards) closes the full-screen detail view on mobile.
+  let swipeStart: { x: number; y: number } | null = null;
+
+  function onPointerDown(e: PointerEvent) {
+    if (!workbench.isCompact || e.pointerType !== 'touch' || e.clientX > 32) return;
+    swipeStart = { x: e.clientX, y: e.clientY };
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (!swipeStart) return;
+    const dx = e.clientX - swipeStart.x;
+    const dy = Math.abs(e.clientY - swipeStart.y);
+    swipeStart = null;
+    if (dx > 72 && dy < 48) closeDetail();
+  }
+
   function appendSelectedText() {
     if (!selectedText) return;
     workbench.appendSearchTerm(selectedText);
@@ -158,15 +194,33 @@
   {/each}
 {/snippet}
 
+<svelte:document onselectionchange={handleSelectionChange} />
+
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside
-  style={`width: ${workbench.rightInspectorWidth}px`}
+  bind:this={asideEl}
+  style={workbench.isCompact ? undefined : `width: ${workbench.rightInspectorWidth}px`}
   onmouseup={handleMouseUp}
-  class="flex h-full shrink-0 flex-col border-l border-border/40 bg-background overflow-hidden"
+  onpointerdown={onPointerDown}
+  onpointerup={onPointerUp}
+  class={`flex h-full flex-col bg-background overflow-hidden ${
+    workbench.isCompact ? 'w-full pt-safe pb-safe' : 'shrink-0 border-l border-border/40'
+  }`}
 >
   <!-- Minimalist Noise-Free Header -->
-  <div class="flex h-11 shrink-0 items-center justify-between gap-2 px-5 select-none">
+  <div class="flex h-11 shrink-0 items-center justify-between gap-2 px-3 md:px-5 select-none">
     <div class="flex items-center gap-2 min-w-0 font-mono text-xs">
+      {#if workbench.isCompact}
+        <button
+          type="button"
+          onclick={closeDetail}
+          aria-label={workbench.t.inspector.closeTitle}
+          title={workbench.t.inspector.closeTitle}
+          class="touch-target -ml-1 flex h-9 w-9 items-center justify-center rounded-md text-foreground hover:bg-secondary/60"
+        >
+          <ArrowLeft class="h-4 w-4" />
+        </button>
+      {/if}
       {#if inspectedProject}
         <span class="text-muted-foreground/75 shrink-0">
           @{inspectedProject}
@@ -200,41 +254,35 @@
         </button>
       {/if}
 
-      <!-- Minimal Text Switch: 格式化 vs 原文 -->
-      <div class="inline-flex h-7 items-center rounded-md bg-secondary/40 p-0.5 text-xs">
-        <button
-          type="button"
-          onclick={() => (workbench.inspectorTab = 'structured')}
-          class={`flex h-6 items-center rounded px-2.5 transition-colors ${
-            workbench.inspectorTab === 'structured'
-              ? 'bg-secondary text-foreground font-medium'
-              : 'text-muted-foreground/75 hover:text-foreground'
-          }`}
-        >
-          {workbench.t.inspector.formattedBtn}
-        </button>
-        <button
-          type="button"
-          onclick={() => (workbench.inspectorTab = 'raw')}
-          class={`flex h-6 items-center rounded px-2.5 transition-colors ${
-            workbench.inspectorTab === 'raw'
-              ? 'bg-secondary text-foreground font-medium'
-              : 'text-muted-foreground/75 hover:text-foreground'
-          }`}
-        >
-          {workbench.t.inspector.rawBtn}
-        </button>
-      </div>
+      <!-- Formatted / Raw toggle (single icon button) -->
+      <button
+        type="button"
+        onclick={() =>
+          (workbench.inspectorTab = workbench.inspectorTab === 'raw' ? 'structured' : 'raw')}
+        title={workbench.inspectorTab === 'raw'
+          ? workbench.t.inspector.formattedBtn
+          : workbench.t.inspector.rawBtn}
+        aria-label={workbench.inspectorTab === 'raw'
+          ? workbench.t.inspector.formattedBtn
+          : workbench.t.inspector.rawBtn}
+        class="touch-target rounded-md p-1.5 text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground transition-colors"
+      >
+        {#if workbench.inspectorTab === 'raw'}
+          <Braces class="h-3.5 w-3.5" />
+        {:else}
+          <FileText class="h-3.5 w-3.5" />
+        {/if}
+      </button>
 
       {#if activeLineText}
         <button
           type="button"
           title={workbench.t.inspector.copyTitle}
           onclick={copyCurrentContent}
-          class="rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
+          class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
         >
           {#if copiedLine}
-            <Check class="h-3.5 w-3.5 text-emerald-400" />
+            <Check class="h-3.5 w-3.5 text-primary" />
           {:else}
             <Copy class="h-3.5 w-3.5" />
           {/if}
@@ -244,8 +292,8 @@
       <button
         type="button"
         title={workbench.t.inspector.closeTitle}
-        onclick={() => (workbench.rightInspectorOpen = false)}
-        class="rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
+        onclick={closeDetail}
+        class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
       >
         <X class="h-3.5 w-3.5" />
       </button>
@@ -255,7 +303,7 @@
   <!-- Borderless Reading Canvas: 100% Lossless Content, Beautified Typography -->
   <div
     style={`font-size: ${workbench.codeFontSize}px`}
-    class="flex-1 min-h-0 overflow-y-auto px-5 pb-6 pt-1 font-mono"
+    class="flex-1 min-h-0 overflow-y-auto px-3 md:px-5 pb-6 pt-1 font-mono"
   >
     {#if workbench.inspectorLoading && !activeLineText}
       <div class="flex h-full items-center justify-center gap-2 text-[13px] text-muted-foreground">
@@ -263,7 +311,7 @@
         <span>{workbench.t.inspector.loading}</span>
       </div>
     {:else if workbench.inspectorError && !activeLineText}
-      <div class="text-[13px] text-rose-400">
+      <div class="text-[13px] text-status">
         {workbench.inspectorError}
       </div>
     {:else if !activeLineText}

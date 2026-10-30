@@ -63,18 +63,18 @@ export const KNOWN_FILE_TYPES: {
   label: string;
   color: string;
 }[] = [
-  { id: 'zig', label: 'zig', color: 'text-amber-400 border-amber-500/30 bg-amber-500/10' },
-  { id: 'ts', label: 'ts', color: 'text-sky-400 border-sky-500/30 bg-sky-500/10' },
-  { id: 'js', label: 'js', color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10' },
-  { id: 'json', label: 'json', color: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' },
-  { id: 'md', label: 'md', color: 'text-purple-400 border-purple-500/30 bg-purple-500/10' },
-  { id: 'py', label: 'py', color: 'text-blue-400 border-blue-500/30 bg-blue-500/10' },
-  { id: 'rust', label: 'rust', color: 'text-orange-400 border-orange-500/30 bg-orange-500/10' },
-  { id: 'go', label: 'go', color: 'text-cyan-400 border-cyan-500/30 bg-cyan-500/10' },
-  { id: 'html', label: 'html', color: 'text-rose-400 border-rose-500/30 bg-rose-500/10' },
-  { id: 'css', label: 'css', color: 'text-indigo-400 border-indigo-500/30 bg-indigo-500/10' },
-  { id: 'toml', label: 'toml', color: 'text-teal-400 border-teal-500/30 bg-teal-500/10' },
-  { id: 'yaml', label: 'yaml', color: 'text-pink-400 border-pink-500/30 bg-pink-500/10' },
+  { id: 'zig', label: 'zig', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'ts', label: 'ts', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'js', label: 'js', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'json', label: 'json', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'md', label: 'md', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'py', label: 'py', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'rust', label: 'rust', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'go', label: 'go', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'html', label: 'html', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'css', label: 'css', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'toml', label: 'toml', color: 'text-muted-foreground border-border bg-secondary' },
+  { id: 'yaml', label: 'yaml', color: 'text-muted-foreground border-border bg-secondary' },
 ];
 
 export interface HighlightSegment {

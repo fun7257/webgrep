@@ -100,7 +100,6 @@ export interface WsSearchMessage {
   hidden: boolean;
   respectIgnore: boolean;
   maxResults: number;
-  maxPerFile: number;
 }
 
 export interface WsCancelMessage {
@@ -133,6 +132,7 @@ export type WsIncomingMessage =
       bytesSearched: number;
       limitHit: string | boolean;
       searchCount?: number;
+      cacheHit?: string;
     }
   | {
       type: 'error';

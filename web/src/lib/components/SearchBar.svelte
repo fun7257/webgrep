@@ -9,6 +9,7 @@
     Search,
     X,
   } from 'lucide-svelte';
+  import SymbolBar from './SymbolBar.svelte';
 
   interface Props {
     inputEl?: HTMLInputElement | null;
@@ -266,6 +267,39 @@
     });
   }
 
+  function insertSymbol(sym: string) {
+    if (!inputEl) return;
+    const raw = workbench.pattern;
+    const pos = Math.min(inputEl.selectionStart ?? raw.length, raw.length);
+    const before = raw.slice(0, pos);
+    const after = raw.slice(pos);
+    const needSpace = before.length > 0 && !/\s$/.test(before);
+    const paired = sym === '"';
+    const inserted = `${needSpace ? ' ' : ''}${paired ? '""' : sym}`;
+    workbench.pattern = `${before}${inserted}${after}`;
+    const nextCursor = before.length + inserted.length - (paired ? 1 : 0);
+    cursorPos = nextCursor;
+    suggestDismissed = false;
+    selectedSuggestIdx = 0;
+    workbench.scheduleSearch();
+    requestAnimationFrame(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+
+  function backspaceToken() {
+    const raw = workbench.pattern.replace(/\s+$/, '');
+    const idx = raw.lastIndexOf(' ');
+    workbench.pattern = idx >= 0 ? raw.slice(0, idx + 1) : '';
+    cursorPos = workbench.pattern.length;
+    workbench.scheduleSearch();
+    requestAnimationFrame(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(cursorPos, cursorPos);
+    });
+  }
+
   function selectHistoryItem(entry: SearchHistoryEntry) {
     selectedHistoryIdx = -1;
     suggestDismissed = true;
@@ -418,7 +452,14 @@
         workbench.cancelSearch();
       } else if (workbench.pattern) {
         workbench.clearSearch();
+      } else {
+        inputEl?.blur();
       }
+    } else if (e.key === 'Tab' && !e.shiftKey && workbench.flatHits.length > 0) {
+      // Move focus from the search box to the result list (j/k, Enter, [ ] take over).
+      e.preventDefault();
+      if (workbench.activeHitIndex < 0) workbench.selectHitByIndex(0, false);
+      inputEl?.blur();
     } else if (e.key === 'ArrowDown' && workbench.flatHits.length > 0) {
       if (e.altKey) return;
       e.preventDefault();
@@ -433,8 +474,8 @@
 
 <div
   class={hero
-    ? 'flex flex-1 flex-col items-center justify-center px-6 pb-[14vh] select-none'
-    : 'relative px-6 pt-3 pb-1.5 select-none'}
+    ? 'flex flex-1 flex-col items-center justify-center px-3 md:px-6 pb-[14vh] select-none'
+    : 'relative px-3 md:px-6 pt-2 md:pt-3 pb-1.5 select-none'}
 >
   {#if hero}
     <!-- Google-Style Centered Brand Wordmark -->
@@ -445,8 +486,8 @@
       {#if workbench.sources.length === 0}
         <button
           type="button"
-          onclick={() => (workbench.sourceManagerOpen = true)}
-          class="inline-flex items-center gap-1.5 text-xs text-amber-400 hover:underline"
+          onclick={() => workbench.openSettings('add-source')}
+          class="inline-flex items-center gap-1.5 text-xs text-status hover:underline"
         >
           <FolderGit2 class="h-3.5 w-3.5" />
           <span>尚未配置项目 · 点击添加本地项目目录</span>
@@ -527,7 +568,8 @@
             workbench.clearSearch();
             inputEl?.focus();
           }}
-          class="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+          aria-label={workbench.t.searchBar.clearTitle}
+          class="touch-target shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
         >
           <X class="h-4 w-4" />
         </button>
@@ -554,7 +596,7 @@
               onkeydown={(e) => {
                 if (e.key === 'Enter') selectHistoryItem(entry);
               }}
-              class={`group flex items-center justify-between gap-3 px-4 py-2 cursor-pointer transition-colors ${
+              class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
                 isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
               }`}
             >
@@ -586,10 +628,11 @@
                   e.stopPropagation();
                   workbench.removeHistoryEntry(entry.pattern, entry.mode);
                 }}
-                class="text-xs text-muted-foreground/60 hover:text-foreground hover:underline shrink-0 px-1"
+                class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground"
                 title={workbench.locale === 'zh' ? '从搜索记录中删除' : 'Remove from history'}
+                aria-label={workbench.locale === 'zh' ? '从搜索记录中删除' : 'Remove from history'}
               >
-                {workbench.locale === 'zh' ? '删除' : 'Remove'}
+                <X class="h-3.5 w-3.5" />
               </button>
             </div>
           {/each}
@@ -613,7 +656,7 @@
               type="button"
               disabled={item.disabled}
               onclick={() => applyFlagSuggestion(item.token)}
-              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-1.5 text-left transition-colors ${
+              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors ${
                 item.disabled
                   ? 'opacity-45 cursor-not-allowed text-muted-foreground'
                   : isSelected
@@ -654,7 +697,7 @@
               type="button"
               onmouseenter={() => (selectedSuggestIdx = idx)}
               onclick={() => applyScopeSuggestion(item.label)}
-              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-1.5 font-mono text-xs text-left transition-colors ${
+              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 font-mono text-xs text-left transition-colors ${
                 isSelected
                   ? 'bg-secondary text-foreground'
                   : 'text-foreground hover:bg-secondary/60'
@@ -671,3 +714,7 @@
     {/if}
   </div>
 </div>
+
+{#if workbench.isCompact && isInputFocused}
+  <SymbolBar onInsert={insertSymbol} onBackspace={backspaceToken} />
+{/if}

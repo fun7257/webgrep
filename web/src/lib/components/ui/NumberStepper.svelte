@@ -70,7 +70,7 @@
     title="Decrease"
     disabled={value <= min}
     onclick={() => stepBy(-1)}
-    class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
+    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
   >
     <Minus class="h-3 w-3" />
   </button>
@@ -98,7 +98,7 @@
     title="Increase"
     disabled={value >= max}
     onclick={() => stepBy(1)}
-    class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
+    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
   >
     <Plus class="h-3 w-3" />
   </button>
