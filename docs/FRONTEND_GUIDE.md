@@ -204,7 +204,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - [ ] 是否新增了全局模式开关或整体切换快捷键？（应改为在查询中插入 `$x(…)` token）
 - [ ] 快捷键是否使用 `e.code`（Alt + 字母）、是否同步更新了设置里的「快捷键」页（`i18n.ts`）？
 - [ ] 文案是否进入 `i18n.ts`（zh / en 同步），组件内有无散落的 `locale === 'zh' ? … : …`？
-- [ ] `npm --prefix web run check && npm --prefix web run build` 是否零报错、零警告通过？
+- [ ] `npm --prefix web run test && npm --prefix web run check && npm --prefix web run build` 是否零报错、零警告通过？
 
 ---
 

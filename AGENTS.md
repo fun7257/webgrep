@@ -35,9 +35,9 @@
 
 每次完成代码修改后，Agent 必须执行以下构建与测试校验，确保零警告、零报错：
 
-1. **前端 TypeScript 7 类型检查与生产构建**：
+1. **前端单元测试、TypeScript 7 类型检查与生产构建**：
    ```bash
-   npm --prefix web run check && npm --prefix web run build
+   npm --prefix web run test && npm --prefix web run check && npm --prefix web run build
    ```
 2. **Zig 后端与 `../libwebgrep` 联调构建及测试**：
    ```bash

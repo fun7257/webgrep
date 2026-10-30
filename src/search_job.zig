@@ -3354,4 +3354,141 @@ test "strong consistency: >64MiB files (91MB, 195MB, 203MB) scan 100% to EOF and
     }, &cancel, .{ .ctx = &c_203m_l2, .sendFn = TailCollector.send });
     try std.testing.expectEqual(@as(u64, 1), c_203m_l2.matched_lines);
     try std.testing.expectEqualStrings("superset", c_203m_l2.tier());
+
+    // 6. Scoped `$w(ErrorCode)` and `$cw(ErrorCode)` parity with `wholeWord: true` (`rg -s -w ErrorCode`) on testdata/
+    var c_ww_native = TailCollector{ .allocator = gpa, .io = io };
+    try executeSearchWithRegistry(gpa, io, td_dir, &reg, .{
+        .id = 6,
+        .pattern = "ErrorCode",
+        .case = "sensitive",
+        .wholeWord = true,
+        .maxResults = 5000,
+    }, &cancel, .{ .ctx = &c_ww_native, .sendFn = TailCollector.send });
+    try std.testing.expectEqual(@as(u64, 4), c_ww_native.matched_lines);
+
+    var c_scoped_w = TailCollector{ .allocator = gpa, .io = io };
+    try executeSearchWithRegistry(gpa, io, td_dir, &reg, .{
+        .id = 7,
+        .pattern = "$w(ErrorCode)",
+        .maxResults = 5000,
+    }, &cancel, .{ .ctx = &c_scoped_w, .sendFn = TailCollector.send });
+    try std.testing.expectEqual(c_ww_native.matched_lines, c_scoped_w.matched_lines);
+
+    var c_scoped_cw = TailCollector{ .allocator = gpa, .io = io };
+    try executeSearchWithRegistry(gpa, io, td_dir, &reg, .{
+        .id = 8,
+        .pattern = "$cw(ErrorCode)",
+        .maxResults = 5000,
+    }, &cancel, .{ .ctx = &c_scoped_cw, .sendFn = TailCollector.send });
+    try std.testing.expectEqual(c_ww_native.matched_lines, c_scoped_cw.matched_lines);
+}
+
+test "search_job: scoped whole-word modifiers ($w, $cw, $rw, $rcw) on indented lines match rg -w semantics" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    // Indented code and log lines where byte 0 is space/tab or punctuation (non-word character)
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "indented.zig",
+        .data = "pub const Engine = struct {\n" ++
+            "    id: u64 = 1001,\n" ++
+            "    user_id: u64 = 2002,\n" ++
+            "    pub fn check(id: u64) ErrorCode {\n" ++
+            "        const err = ErrorCode.Timeout;\n" ++
+            "        const fake = MyErrorCode;\n" ++
+            "        const lower = errorcode;\n" ++
+            "        // partial word first, then exact whole word on the same indented line:\n" ++
+            "        const combo = ErrorCode2 + ErrorCode;\n" ++
+            "        return err;\n" ++
+            "    }\n" ++
+            "};\n" ++
+            "\tid = 4096; // tab-indented whole word + 4-digit number\n" ++
+            "    code_5digits = 12345;\n" ++
+            "    port = 8080;\n",
+    });
+
+    const CountCollector = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        matched_lines: u64 = 0,
+        total_matches: u64 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+                self.total_matches = parsed.value.totalMatches;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // 1. `$w(id)` on indented lines: matches `    id: u64`, `    pub fn check(id: u64)`, and `\tid = 4096;` (3 lines),
+    //    must NOT match `user_id`!
+    var c_w_id = CountCollector{ .allocator = gpa, .io = io };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 1,
+        .pattern = "$w(id)",
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_w_id, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 3), c_w_id.matched_lines);
+
+    // 2. `$cw(ErrorCode)` (case-sensitive + whole-word): matches lines 4, 5, and 9 (`ErrorCode2 + ErrorCode`),
+    //    must NOT match `MyErrorCode` (line 6) or `errorcode` (line 7)!
+    var c_cw_err = CountCollector{ .allocator = gpa, .io = io };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 2,
+        .pattern = "$cw(ErrorCode)",
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_cw_err, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 3), c_cw_err.matched_lines);
+
+    // 3. `$w(ErrorCode)` with case="insensitive": matches lines 4, 5, 7 (`errorcode`), and 9 (`ErrorCode2 + ErrorCode`) = 4 lines
+    var c_w_err_ci = CountCollector{ .allocator = gpa, .io = io };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 3,
+        .pattern = "$w(ErrorCode)",
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_w_err_ci, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 4), c_w_err_ci.matched_lines);
+
+    // 4. `$rw(\d{4})` (regex + whole-word): matches `1001`, `2002`, `4096`, `8080` (4 lines),
+    //    must NOT match `12345` (5 digits)!
+    var c_rw_digits = CountCollector{ .allocator = gpa, .io = io };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 4,
+        .pattern = "$rw(\\d{4})",
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_rw_digits, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 4), c_rw_digits.matched_lines);
+
+    // 5. Raw regex `\b\d{4}\b` in `mode: "regex"` on indented lines -> also 4 lines
+    var c_raw_re = CountCollector{ .allocator = gpa, .io = io };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 5,
+        .pattern = "\\b\\d{4}\\b",
+        .mode = "regex",
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_raw_re, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 4), c_raw_re.matched_lines);
+
+    // 6. Scoped `$w(...)` and `$rw(...)` inside `contains` and `excludes`
+    var c_contains_w = CountCollector{ .allocator = gpa, .io = io };
+    const inc_rw = [_][]const u8{"$rw(\\d{4})"};
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 6,
+        .pattern = "$w(id)",
+        .contains = &inc_rw,
+        .case = "insensitive",
+    }, &cancel, .{ .ctx = &c_contains_w, .sendFn = CountCollector.send });
+    // Only `    id: u64 = 1001,` and `\tid = 4096;` have both whole-word `id` and a 4-digit number!
+    try std.testing.expectEqual(@as(u64, 2), c_contains_w.matched_lines);
 }

@@ -341,6 +341,11 @@
       </div>
     {:else if structuredInfo.kind === 'kv' && structuredInfo.kvPairs}
       <div class="space-y-2 leading-7">
+        {#if structuredInfo.prefix}
+          <div class="text-muted-foreground font-mono pb-1 border-b border-border/40 break-all">
+            {@render renderHighlighted(structuredInfo.prefix)}
+          </div>
+        {/if}
         {#each structuredInfo.kvPairs as kv, idx (`kv:${idx}:${kv.key}`)}
           <div class="flex items-baseline gap-3">
             <span class="text-muted-foreground/70 shrink-0 select-none">
@@ -351,6 +356,11 @@
             </span>
           </div>
         {/each}
+        {#if structuredInfo.suffix}
+          <div class="text-muted-foreground font-mono pt-1 border-t border-border/40 break-all">
+            {@render renderHighlighted(structuredInfo.suffix)}
+          </div>
+        {/if}
       </div>
     {:else}
       <div

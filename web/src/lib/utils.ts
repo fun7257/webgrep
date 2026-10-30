@@ -502,22 +502,36 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
     }
   }
 
-  // 3. Key=Value pairs detection (only when the line is a pure KV log line)
+  // 3. Key=Value pairs detection (preserves any leading timestamp/level/module prefix and trailing suffix)
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
     const kvRegex = /(?:^|[\s,;])([a-zA-Z0-9_.-]+)=("[^"]*"|'[^']*'|[^\s,;<>"']+)/g;
     const pairs: { key: string; value: string }[] = [];
+    let firstKeyStart = -1;
+    let lastMatchEnd = 0;
     let match: RegExpExecArray | null;
     while ((match = kvRegex.exec(text)) !== null) {
+      if (firstKeyStart === -1) {
+        const fullMatch = match[0];
+        const keyValLen = match[1].length + 1 + match[2].length;
+        firstKeyStart = match.index + (fullMatch.length - keyValLen);
+      }
+      lastMatchEnd = match.index + match[0].length;
       pairs.push({
         key: match[1],
         value: match[2].replace(/^["']|["']$/g, ''),
       });
     }
     if (pairs.length >= 3) {
+      const prefix = firstKeyStart > 0 ? text.slice(0, firstKeyStart).trim() : '';
+      const suffix = lastMatchEnd < text.length ? text.slice(lastMatchEnd).trim() : '';
+      const kvFormatted = pairs.map((p) => `${p.key}: ${p.value}`).join('\n');
+      const parts = [prefix, kvFormatted, suffix].filter((p) => p.length > 0);
       return {
         kind: 'kv',
+        prefix: prefix || undefined,
+        suffix: suffix || undefined,
         kvPairs: pairs,
-        formattedText: pairs.map((p) => `${p.key}: ${p.value}`).join('\n'),
+        formattedText: parts.join('\n\n'),
         charCount,
       };
     }
