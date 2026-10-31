@@ -2,7 +2,18 @@
   import { workbench } from '$lib/state.svelte';
   import type { DirSuggestEntry } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
-  import { AlertTriangle, ChevronRight, FileText, Folder, FolderOpen, Loader2, Plus, X } from 'lucide-svelte';
+  import StreamGuideCard from './StreamGuideCard.svelte';
+  import {
+    AlertTriangle,
+    ChevronRight,
+    FileText,
+    Folder,
+    FolderOpen,
+    Loader2,
+    Plus,
+    Radio,
+    X,
+  } from 'lucide-svelte';
 
   interface Props {
     /** Called after a source was added successfully. */
@@ -13,7 +24,7 @@
 
   const t = $derived(workbench.t.ui);
 
-  let kind = $state<'dir' | 'file'>('dir');
+  let kind = $state<'dir' | 'file' | 'stream'>('dir');
   let pathInput = $state('');
   let nameInput = $state('');
   let submitting = $state(false);
@@ -24,6 +35,7 @@
   let selectedIdx = $state(0);
   let suggestTimer: ReturnType<typeof setTimeout> | null = null;
   let pathEl = $state<HTMLInputElement | null>(null);
+  let streamNameEl = $state<HTMLInputElement | null>(null);
 
   const derivedName = $derived.by(() => {
     const clean = pathInput.trim().replace(/\/+$/, '');
@@ -33,21 +45,27 @@
   });
 
   function queueSuggest(val: string) {
+    if (kind === 'stream') return;
     if (suggestTimer) clearTimeout(suggestTimer);
     suggestTimer = setTimeout(async () => {
-      const list = await workbench.fetchDirSuggestions(val, kind);
+      const list = await workbench.fetchDirSuggestions(val, kind === 'file' ? 'file' : 'dir');
       suggestions = list;
       selectedIdx = 0;
       showSuggest = list.length > 0;
     }, 60);
   }
 
-  function selectKind(next: 'dir' | 'file') {
+  function selectKind(next: 'dir' | 'file' | 'stream') {
     if (kind === next) return;
     kind = next;
     submitError = null;
-    queueSuggest(pathInput);
-    requestAnimationFrame(() => pathEl?.focus());
+    if (next === 'stream') {
+      showSuggest = false;
+      requestAnimationFrame(() => streamNameEl?.focus());
+    } else {
+      queueSuggest(pathInput);
+      requestAnimationFrame(() => pathEl?.focus());
+    }
   }
 
   function apply(entry: DirSuggestEntry, drill: boolean) {
@@ -103,6 +121,22 @@
   }
 
   async function submit() {
+    if (kind === 'stream') {
+      const targetStream = (nameInput.trim() || 'app-logs').trim();
+      submitting = true;
+      submitError = null;
+      try {
+        await workbench.ingestTestLog(targetStream);
+        nameInput = '';
+        ondone();
+      } catch (err) {
+        submitError = err instanceof Error ? err.message : t.addFailed;
+      } finally {
+        submitting = false;
+      }
+      return;
+    }
+
     const cleanPath = pathInput.trim();
     if (!cleanPath) {
       submitError = kind === 'file' ? t.pathRequiredFile : t.pathRequiredDir;
@@ -141,97 +175,122 @@
       options={[
         { value: 'dir', icon: Folder, title: t.kindDirDesc },
         { value: 'file', icon: FileText, title: t.kindFileDesc },
+        { value: 'stream', icon: Radio, title: t.kindStreamDesc },
       ]}
       onchange={selectKind}
     />
   </div>
 
-  <div class="relative">
-    {#if kind === 'file'}
-      <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-    {:else}
-      <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-    {/if}
-    <input
-      bind:this={pathEl}
-      type="text"
-      value={pathInput}
-      oninput={(e) => {
-        pathInput = (e.currentTarget as HTMLInputElement).value;
-        queueSuggest(pathInput);
-      }}
-      onfocus={() => queueSuggest(pathInput)}
-      onkeydown={onPathKeydown}
-      title={kind === 'file' ? t.filePath : t.dirPath}
-      placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
-      spellcheck="false"
-      autocomplete="off"
-      class={`${inputCls} pl-9 pr-3`}
-    />
+  {#if kind === 'stream'}
+    <div class="relative">
+      <Radio class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      <input
+        bind:this={streamNameEl}
+        type="text"
+        bind:value={nameInput}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+        title={t.streamNamePlaceholder}
+        placeholder={t.streamNamePlaceholder}
+        spellcheck="false"
+        autocomplete="off"
+        class={`${inputCls} pl-9 pr-3`}
+      />
+    </div>
 
-    {#if showSuggest && suggestions.length > 0}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={() => {}}
-        class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
-      >
-        {#each suggestions as entry, idx (entry.path)}
-          {@const isDir = entry.isDir !== false}
-          <div
-            class={`flex items-center rounded-lg ${
-              idx === selectedIdx ? 'bg-secondary' : 'hover:bg-secondary/50'
-            }`}
-          >
-            <button
-              type="button"
-              onmouseenter={() => (selectedIdx = idx)}
-              onclick={() => apply(entry, false)}
-              class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs"
+    <StreamGuideCard serviceName={nameInput || 'app-logs'} />
+  {:else}
+    <div class="relative">
+      {#if kind === 'file'}
+        <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      {:else}
+        <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      {/if}
+      <input
+        bind:this={pathEl}
+        type="text"
+        value={pathInput}
+        oninput={(e) => {
+          pathInput = (e.currentTarget as HTMLInputElement).value;
+          queueSuggest(pathInput);
+        }}
+        onfocus={() => queueSuggest(pathInput)}
+        onkeydown={onPathKeydown}
+        title={kind === 'file' ? t.filePath : t.dirPath}
+        placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
+        spellcheck="false"
+        autocomplete="off"
+        class={`${inputCls} pl-9 pr-3`}
+      />
+
+      {#if showSuggest && suggestions.length > 0}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={() => {}}
+          class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
+        >
+          {#each suggestions as entry, idx (entry.path)}
+            {@const isDir = entry.isDir !== false}
+            <div
+              class={`flex items-center rounded-lg ${
+                idx === selectedIdx ? 'bg-secondary' : 'hover:bg-secondary/50'
+              }`}
             >
-              {#if isDir}
-                <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              {:else}
-                <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              {/if}
-              <span class="truncate font-mono font-medium text-foreground">{entry.name}</span>
-              <span class="ml-auto max-w-[45%] truncate font-mono text-[10.5px] text-muted-foreground">{entry.path}</span>
-            </button>
-            {#if isDir}
               <button
                 type="button"
-                onclick={() => apply(entry, true)}
-                aria-label={t.pickDrill}
-                title={t.pickDrill}
-                class="touch-target flex h-10 w-9 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+                onmouseenter={() => (selectedIdx = idx)}
+                onclick={() => apply(entry, false)}
+                class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs"
               >
-                <ChevronRight class="h-4 w-4" />
+                {#if isDir}
+                  <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {:else}
+                  <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {/if}
+                <span class="truncate font-mono font-medium text-foreground">{entry.name}</span>
+                <span class="ml-auto max-w-[45%] truncate font-mono text-[10.5px] text-muted-foreground">{entry.path}</span>
               </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
+              {#if isDir}
+                <button
+                  type="button"
+                  onclick={() => apply(entry, true)}
+                  aria-label={t.pickDrill}
+                  title={t.pickDrill}
+                  class="touch-target flex h-10 w-9 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+                >
+                  <ChevronRight class="h-4 w-4" />
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
-  <input
-    type="text"
-    bind:value={nameInput}
-    onkeydown={(e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        void submit();
-      }
-    }}
-    title={t.nameOptional}
-    placeholder={derivedName
-      ? `${t.defaultNamePrefix}${derivedName}`
-      : kind === 'file'
-        ? t.defaultFileName
-        : t.defaultDirName}
-    spellcheck="false"
-    class={`${inputCls} px-3`}
-  />
+    <input
+      type="text"
+      bind:value={nameInput}
+      onkeydown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          void submit();
+        }
+      }}
+      title={t.nameOptional}
+      placeholder={derivedName
+        ? `${t.defaultNamePrefix}${derivedName}`
+        : kind === 'file'
+          ? t.defaultFileName
+          : t.defaultDirName}
+      spellcheck="false"
+      class={`${inputCls} px-3`}
+    />
+  {/if}
 
   {#if submitError}
     <div class="flex items-center justify-between gap-2 rounded-lg bg-status/10 px-2.5 py-2 text-xs text-status">
@@ -247,7 +306,7 @@
 
   <button
     type="button"
-    disabled={submitting || !pathInput.trim()}
+    disabled={submitting || (kind !== 'stream' && !pathInput.trim())}
     onclick={submit}
     title={t.addSource}
     aria-label={t.addSource}

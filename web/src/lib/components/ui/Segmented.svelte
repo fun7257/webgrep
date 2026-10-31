@@ -1,4 +1,4 @@
-<script lang="ts" generics="T extends string | boolean">
+<script lang="ts" generics="T extends string | number | boolean">
   import type { Sun } from 'lucide-svelte';
 
   interface Option {

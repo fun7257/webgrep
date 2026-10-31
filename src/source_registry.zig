@@ -542,6 +542,47 @@ pub const SourceRegistry = struct {
         try self.saveToDiskLocked(io);
     }
 
+    /// Ensures `<data_root_path>/streams/<clean_service>` exists on disk and is registered
+    /// as an enabled `@<clean_service>` directory source in `SourceRegistry`.
+    /// Returns the sanitized service name allocated on `arena`.
+    pub fn ensureStreamSourceRegistered(
+        self: *SourceRegistry,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        raw_service_name: []const u8,
+    ) ![]const u8 {
+        const sanitized = try sanitizeNameAlloc(arena, raw_service_name);
+        const clean_service = if (sanitized.len > 0) sanitized else try arena.dupe(u8, "ingest");
+
+        const rel_dir_path = try std.fmt.allocPrint(
+            arena,
+            "{s}/streams/{s}",
+            .{ self.data_root_path, clean_service },
+        );
+
+        try std.Io.Dir.cwd().createDirPath(io, rel_dir_path);
+
+        // Fast check under lock if a source with this name already exists
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            for (self.sources.items) |s| {
+                if (std.ascii.eqlIgnoreCase(s.name, clean_service)) {
+                    return clean_service;
+                }
+            }
+        }
+
+        self.upsertSource(arena, io, .{
+            .kind = "dir",
+            .name = clean_service,
+            .path = rel_dir_path,
+            .enabled = true,
+        }) catch {};
+
+        return clean_service;
+    }
+
     pub fn toggleSource(
         self: *SourceRegistry,
         io: std.Io,

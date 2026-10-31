@@ -16,6 +16,7 @@
   } from 'lucide-svelte';
 
   let asideEl = $state<HTMLElement | null>(null);
+  let scrollContainerEl = $state<HTMLDivElement | null>(null);
   let selectedText = $state<string>('');
   let copiedLine = $state<boolean>(false);
 
@@ -25,6 +26,11 @@
     const p = workbench.inspectedPath || '';
     const slash = p.indexOf('/');
     return slash > 0 ? p.slice(0, slash) : '';
+  });
+  let inspectedSubPath = $derived.by(() => {
+    const p = workbench.inspectedPath || '';
+    const slash = p.indexOf('/');
+    return slash > 0 ? p.slice(slash + 1) : p;
   });
 
   // Prefer the full untruncated line from /api/file once loaded; fall back to streaming hit text immediately.
@@ -47,6 +53,37 @@
   let isRegexMode = $derived(workbench.mode === 'regex');
 
   let structuredInfo = $derived(analyzeStructuredLine(activeLineText));
+  let isStructuredLog = $derived(
+    structuredInfo.kind === 'json' ||
+      structuredInfo.kind === 'embedded-json' ||
+      structuredInfo.kind === 'kv'
+  );
+  let contextLines = $derived(
+    fileData && fileData.path === workbench.inspectedPath && fileData.lines.length > 0
+      ? fileData.lines
+      : activeLineText
+        ? [{ n: workbench.inspectedLine, text: activeLineText }]
+        : []
+  );
+
+  // Auto-scroll the active line into center view when inspecting a multi-line code/HTML/text file
+  $effect(() => {
+    const targetPath = workbench.inspectedPath;
+    const targetLine = workbench.inspectedLine;
+    const linesCount = contextLines.length;
+    if (!targetPath || !targetLine || linesCount <= 1 || !scrollContainerEl) return;
+    requestAnimationFrame(() => {
+      const activeEl = scrollContainerEl?.querySelector('[data-active-line="true"]') as HTMLElement | null;
+      if (activeEl && scrollContainerEl) {
+        const containerRect = scrollContainerEl.getBoundingClientRect();
+        const elRect = activeEl.getBoundingClientRect();
+        const offset = elRect.top - containerRect.top - containerRect.height / 2 + elRect.height / 2;
+        if (Math.abs(offset) > containerRect.height * 0.28) {
+          scrollContainerEl.scrollTop += offset;
+        }
+      }
+    });
+  });
 
   function highlightFormattedText(text: string) {
     if (!text) return [{ text: '', kind: 'plain' as const }];
@@ -227,6 +264,11 @@
           @{inspectedProject}
         </span>
       {/if}
+      {#if inspectedSubPath}
+        <span class="truncate text-muted-foreground/60" title={`${inspectedSubPath}:${workbench.inspectedLine}`}>
+          {inspectedSubPath}:{workbench.inspectedLine}
+        </span>
+      {/if}
     </div>
 
     <div class="flex items-center gap-1 shrink-0">
@@ -301,8 +343,9 @@
     </div>
   </div>
 
-  <!-- Borderless Reading Canvas: 100% Lossless Content, Beautified Typography -->
+  <!-- Borderless Reading Canvas: Adaptive Structured Event Card vs Multi-Line Code/HTML Context -->
   <div
+    bind:this={scrollContainerEl}
     style={`font-size: ${workbench.codeFontSize}px`}
     class="flex-1 min-h-0 overflow-y-auto px-3 md:px-5 pb-6 pt-1 font-mono"
   >
@@ -362,13 +405,63 @@
           </div>
         {/if}
       </div>
-    {:else}
+    {:else if isStructuredLog}
       <div
         class={`${
           workbench.wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre overflow-x-auto'
         } leading-7 text-foreground/90`}
       >
         {@render renderHighlighted(structuredInfo.formattedText)}
+      </div>
+    {:else}
+      <!-- Multi-Line Context View for Code, HTML, Markdown, Stack Traces & Text -->
+      <div class="space-y-0.5">
+        {#if fileData && fileData.path === workbench.inspectedPath && fileData.startLine > 1}
+          <button
+            type="button"
+            onclick={() => workbench.expandInspectorContext(30)}
+            class="mb-1 flex w-full items-center justify-center rounded-md py-1 text-[11px] text-muted-foreground/60 hover:bg-secondary/50 hover:text-foreground transition-colors cursor-pointer select-none"
+          >
+            ↑ {workbench.t.inspector.expandContext}
+          </button>
+        {/if}
+
+        {#each contextLines as ln (ln.n)}
+          {@const isTarget = ln.n === workbench.inspectedLine}
+          <div
+            data-active-line={isTarget ? 'true' : undefined}
+            class={`flex items-baseline gap-3 rounded px-2 py-0.5 leading-[1.65] ${
+              isTarget
+                ? 'bg-secondary/75 border-l-2 border-primary text-foreground'
+                : 'text-foreground/80 hover:bg-secondary/30'
+            }`}
+          >
+            <span
+              class={`w-9 shrink-0 select-none text-right text-[11px] tabular-nums ${
+                isTarget ? 'font-semibold text-primary' : 'text-muted-foreground/45'
+              }`}
+            >
+              {ln.n}
+            </span>
+            <div
+              class={`min-w-0 flex-1 ${
+                workbench.wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre overflow-x-auto'
+              }`}
+            >
+              {@render renderHighlighted(ln.text)}
+            </div>
+          </div>
+        {/each}
+
+        {#if fileData && fileData.path === workbench.inspectedPath && !fileData.eof}
+          <button
+            type="button"
+            onclick={() => workbench.expandInspectorContext(30)}
+            class="mt-1 flex w-full items-center justify-center rounded-md py-1 text-[11px] text-muted-foreground/60 hover:bg-secondary/50 hover:text-foreground transition-colors cursor-pointer select-none"
+          >
+            ↓ {workbench.t.inspector.expandContext}
+          </button>
+        {/if}
       </div>
     {/if}
   </div>

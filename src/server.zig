@@ -2,12 +2,14 @@ const std = @import("std");
 const file_api = @import("file_api.zig");
 const search_job = @import("search_job.zig");
 const source_registry = @import("source_registry.zig");
+const ingestor = @import("ingestor.zig");
 
 pub const ServerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     web_dir_path: []const u8,
     registry: *source_registry.SourceRegistry,
+    ingestor: ?*ingestor.Ingestor = null,
 };
 
 pub const cors_headers = [_]std.http.Header{
@@ -270,6 +272,79 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                 .extra_headers = &json_headers,
             }) catch break;
             continue;
+        }
+
+        // Log Ingestion HTTP Endpoints (Raw / Vector / FluentBit / Elastic _bulk / Loki / OTLP)
+        if ((method == .POST or method == .PUT) and ctx.ingestor != null) {
+            const ing = ctx.ingestor.?;
+            const is_raw_ingest = std.mem.eql(u8, path_part, "/ingest") or
+                std.mem.startsWith(u8, path_part, "/ingest/") or
+                std.mem.eql(u8, path_part, "/insert/jsonline");
+            const is_bulk = std.mem.eql(u8, path_part, "/_bulk") or
+                std.mem.endsWith(u8, path_part, "/_bulk");
+            const is_loki = std.mem.eql(u8, path_part, "/loki/api/v1/push");
+            const is_otlp = std.mem.eql(u8, path_part, "/v1/logs");
+
+            if (is_raw_ingest or is_bulk or is_loki or is_otlp) {
+                var body_buf: [16384]u8 = undefined;
+                const body_reader = request.readerExpectContinue(&body_buf) catch {
+                    respondErrorJson(&request, .bad_request, "failed to read ingest body");
+                    break;
+                };
+                const raw_body = body_reader.allocRemaining(req_arena, .limited(32 * 1024 * 1024)) catch {
+                    respondErrorJson(&request, .bad_request, "ingest payload too large or invalid");
+                    continue;
+                };
+
+                const service_param = (file_api.getQueryParamAlloc(req_arena, query_part, "service") catch null) orelse
+                    ((file_api.getQueryParamAlloc(req_arena, query_part, "source") catch null) orelse "");
+
+                if (is_loki) {
+                    const stats = ing.ingestLokiPush(ctx.io, service_param, raw_body) catch |err| {
+                        respondErrorJson(&request, .bad_request, @errorName(err));
+                        continue;
+                    };
+                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
+                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
+                    continue;
+                } else if (is_otlp) {
+                    const stats = ing.ingestOtlpLogs(ctx.io, service_param, raw_body) catch |err| {
+                        respondErrorJson(&request, .bad_request, @errorName(err));
+                        continue;
+                    };
+                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
+                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
+                    continue;
+                } else if (is_bulk) {
+                    var default_idx: []const u8 = service_param;
+                    if (default_idx.len == 0 and std.mem.endsWith(u8, path_part, "/_bulk") and path_part.len > 6) {
+                        default_idx = std.mem.trim(u8, path_part[0 .. path_part.len - 6], "/");
+                    }
+                    const stats = ing.ingestElasticBulk(ctx.io, default_idx, raw_body) catch |err| {
+                        respondErrorJson(&request, .bad_request, @errorName(err));
+                        continue;
+                    };
+                    const resp = std.fmt.allocPrint(
+                        req_arena,
+                        "{{\"took\":1,\"errors\":false,\"accepted\":{d},\"bytesWritten\":{d}}}",
+                        .{ stats.accepted, stats.bytesWritten },
+                    ) catch "{\"took\":1,\"errors\":false}";
+                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
+                    continue;
+                } else {
+                    var svc = service_param;
+                    if (svc.len == 0 and std.mem.startsWith(u8, path_part, "/ingest/")) {
+                        svc = std.mem.trim(u8, path_part["/ingest/".len..], "/");
+                    }
+                    const stats = ing.ingestRaw(ctx.io, if (svc.len > 0) svc else "ingest", raw_body) catch |err| {
+                        respondErrorJson(&request, .bad_request, @errorName(err));
+                        continue;
+                    };
+                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
+                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
+                    continue;
+                }
+            }
         }
 
         if (std.mem.startsWith(u8, path_part, "/api/")) {

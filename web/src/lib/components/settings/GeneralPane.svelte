@@ -115,13 +115,13 @@
   </SettingRow>
 
   <SettingRow icon={Timer} label={s.debounceLabel} hint={s.debounceDesc}>
-    <NumberStepper
+    <Segmented
       value={workbench.debounceMs}
-      min={0}
-      max={2000}
-      step={20}
-      suffix="ms"
-      widthClass="w-11"
+      options={[
+        { value: 60, label: s.debounceFast, title: s.debounceFastTitle },
+        { value: 150, label: s.debounceNormal, title: s.debounceNormalTitle },
+        { value: 320, label: s.debounceSlow, title: s.debounceSlowTitle },
+      ]}
       onchange={(v) => display(() => (workbench.debounceMs = v))}
     />
   </SettingRow>

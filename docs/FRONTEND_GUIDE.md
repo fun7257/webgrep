@@ -275,7 +275,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - 桌面端保持左右分栏，分隔条使用 Pointer Events，命中区向两侧扩展（触屏更宽）。
 
 ### 10.3 符号工具条（[`SymbolBar.svelte`](../web/src/lib/components/SymbolBar.svelte)）
-- 仅在 `isCompact && 搜索框聚焦` 时显示，用 `visualViewport` 的 `resize/scroll` 计算 `bottom` 贴住软键盘。
+- 仅在 `isCompact && 搜索框聚焦` 时显示，无缝内嵌在搜索框正下方的统一附着面板顶部（处于搜索框与历史/补全下拉列表之间，不依赖 iOS `WKWebView` 中不可靠的 `visualViewport` 高度缩减，彻底避开软键盘与 iOS 底部自动填充胶囊遮挡，同时保证零 CLS）。首页（`hero`）在移动端聚焦时自动上移对齐，留出充足键盘上方空间。
 - 按钮：`$r` `$c` `$w`（每次点击**插入**新的 `$x()`，可叠加）、`@`、`-`、`"`、退格（回退一个 token）。
 - 按钮必须 `onmousedown` / `onpointerdown` 里 `preventDefault()`，**不得抢走输入框焦点**。
 

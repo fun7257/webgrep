@@ -409,6 +409,57 @@ const hitSegmentCache = new WeakMap<
   { cacheKey: string; segments: HighlightSegment[] }
 >();
 
+export interface NanoTimestampInfo {
+  nsStr: string;
+  formattedTime: string;
+  fullFormattedTime: string;
+  restText: string;
+  prefixLen: number;
+}
+
+/**
+ * Detects a leading 19-digit Unix nanosecond timestamp (`<19-digit-ns> <payload>`)
+ * produced by WebGrep's native log ingestor and formats it into human-readable local time.
+ */
+export function extractLeadingNanoTimestamp(text: string): NanoTimestampInfo | null {
+  if (!text || text.length < 20) return null;
+  for (let i = 0; i < 19; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 48 || code > 57) return null;
+  }
+  const sep = text.charCodeAt(19);
+  if (sep !== 32 && sep !== 9) return null;
+
+  const nsStr = text.slice(0, 19);
+  const msNum = Number(nsStr.slice(0, 13));
+  // Valid range: 2000-01-01 to 2100-01-01
+  if (!Number.isFinite(msNum) || msNum < 946684800000 || msNum > 4102444800000) {
+    return null;
+  }
+
+  const d = new Date(msNum);
+  const pad2 = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  const pad3 = (n: number) => (n < 10 ? `00${n}` : n < 100 ? `0${n}` : `${n}`);
+  const formattedTime = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+  const fullFormattedTime = `${d.getFullYear()}-${formattedTime}`;
+
+  let restStart = 20;
+  while (
+    restStart < text.length &&
+    (text.charCodeAt(restStart) === 32 || text.charCodeAt(restStart) === 9)
+  ) {
+    restStart++;
+  }
+
+  return {
+    nsStr,
+    formattedTime,
+    fullFormattedTime,
+    restText: text.slice(restStart),
+    prefixLen: restStart,
+  };
+}
+
 /**
  * O(1) WeakMap-memoized highlight segments for virtualized HitItem rows.
  * Centers the snippet window around matched spans so highlights in the middle/end of long lines are always visible.
@@ -425,9 +476,39 @@ export function getCachedHighlightSegments(
   if (existing && existing.cacheKey === cacheKey) {
     return existing.segments;
   }
+
+  let targetText = item.text;
+  let targetSpans: HitSpan[] | undefined = item.spans;
+  const tsInfo = extractLeadingNanoTimestamp(item.text);
+  if (tsInfo && tsInfo.restText.length > 0) {
+    const pLen = tsInfo.prefixLen;
+    const isTimeOnlyDefaultSpan =
+      primaryPattern.trim().length === 0 &&
+      targetSpans?.length === 1 &&
+      targetSpans[0].start === 0 &&
+      targetSpans[0].end <= pLen;
+    const hasMatchInPrefix =
+      !isTimeOnlyDefaultSpan &&
+      ((targetSpans?.some((s) => s.start < pLen) ?? false) ||
+        (primaryPattern.trim().length > 0 && tsInfo.nsStr.includes(primaryPattern.trim())) ||
+        containsTerms.some((t) => t.length > 0 && tsInfo.nsStr.includes(t)));
+
+    if (!hasMatchInPrefix) {
+      targetText = tsInfo.restText;
+      targetSpans = isTimeOnlyDefaultSpan
+        ? undefined
+        : targetSpans
+            ?.filter((s) => s.end > pLen)
+            .map((s) => ({
+              start: Math.max(0, s.start - pLen),
+              end: Math.max(0, s.end - pLen),
+            }));
+    }
+  }
+
   const segments = buildHighlightSegments(
-    item.text,
-    item.spans,
+    targetText,
+    targetSpans,
     containsTerms,
     caseInsensitive,
     true,
@@ -458,7 +539,10 @@ function unescapeFormattedText(s: string): string {
  * Beautifies a line for comfortable reading in the Inspector without deleting any user information.
  */
 export function analyzeStructuredLine(text: string): StructuredAnalysis {
-  const trimmed = text.trim();
+  const tsInfo = extractLeadingNanoTimestamp(text);
+  const tsHeader = tsInfo ? `${tsInfo.fullFormattedTime} (${tsInfo.nsStr})` : '';
+  const bodyText = tsInfo && tsInfo.restText.length > 0 ? tsInfo.restText : text;
+  const trimmed = bodyText.trim();
   const charCount = text.length;
 
   // 1. Direct JSON object or array
@@ -471,7 +555,8 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
       const pretty = JSON.stringify(parsed, null, 2);
       return {
         kind: 'json',
-        formattedText: pretty,
+        prefix: tsHeader || undefined,
+        formattedText: tsHeader ? `${tsHeader}\n\n${pretty}` : pretty,
         charCount,
       };
     } catch {
@@ -480,14 +565,15 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
   }
 
   // 2. Embedded JSON inside a log or text line
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
+  const firstBrace = bodyText.indexOf('{');
+  const lastBrace = bodyText.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace + 1) {
-    const candidate = text.slice(firstBrace, lastBrace + 1);
+    const candidate = bodyText.slice(firstBrace, lastBrace + 1);
     try {
       const parsed = JSON.parse(candidate);
-      const prefix = text.slice(0, firstBrace).trim();
-      const suffix = text.slice(lastBrace + 1).trim();
+      const rawPrefix = bodyText.slice(0, firstBrace).trim();
+      const prefix = [tsHeader, rawPrefix].filter((p) => p.length > 0).join('  ');
+      const suffix = bodyText.slice(lastBrace + 1).trim();
       const prettyJson = JSON.stringify(parsed, null, 2);
       const parts = [prefix, prettyJson, suffix].filter((p) => p.length > 0);
       return {
@@ -509,7 +595,7 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
     let firstKeyStart = -1;
     let lastMatchEnd = 0;
     let match: RegExpExecArray | null;
-    while ((match = kvRegex.exec(text)) !== null) {
+    while ((match = kvRegex.exec(bodyText)) !== null) {
       if (firstKeyStart === -1) {
         const fullMatch = match[0];
         const keyValLen = match[1].length + 1 + match[2].length;
@@ -522,8 +608,9 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
       });
     }
     if (pairs.length >= 3) {
-      const prefix = firstKeyStart > 0 ? text.slice(0, firstKeyStart).trim() : '';
-      const suffix = lastMatchEnd < text.length ? text.slice(lastMatchEnd).trim() : '';
+      const rawPrefix = firstKeyStart > 0 ? bodyText.slice(0, firstKeyStart).trim() : '';
+      const prefix = [tsHeader, rawPrefix].filter((p) => p.length > 0).join('  ');
+      const suffix = lastMatchEnd < bodyText.length ? bodyText.slice(lastMatchEnd).trim() : '';
       const kvFormatted = pairs.map((p) => `${p.key}: ${p.value}`).join('\n');
       const parts = [prefix, kvFormatted, suffix].filter((p) => p.length > 0);
       return {
@@ -538,9 +625,11 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
   }
 
   // 4. Plain text / code / log line (beautify escaped newlines/tabs only, zero deletion)
+  const unescaped = unescapeFormattedText(bodyText);
   return {
     kind: 'long-line',
-    formattedText: unescapeFormattedText(text),
+    prefix: tsHeader || undefined,
+    formattedText: tsHeader ? `${tsHeader}\n${unescaped}` : unescaped,
     charCount,
   };
 }

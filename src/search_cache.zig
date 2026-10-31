@@ -45,6 +45,8 @@ pub const CachedQueryEntry = struct {
     context: u32,
     has_replacement: bool,
     max_results: u64,
+    time_start_ns: u64 = 0,
+    time_end_ns: u64 = 0,
     contains: []const []const u8,
     excludes: []const []const u8,
     file_mtimes: []const FileMtimeRecord,

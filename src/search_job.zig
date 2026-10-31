@@ -3,6 +3,7 @@ const libwebgrep = @import("libwebgrep");
 const file_api = @import("file_api.zig");
 const source_registry = @import("source_registry.zig");
 const search_cache = @import("search_cache.zig");
+const ingestor = @import("ingestor.zig");
 
 pub const SearchRequest = struct {
     type: []const u8 = "search",
@@ -25,6 +26,10 @@ pub const SearchRequest = struct {
     hidden: bool = false,
     respectIgnore: bool = false,
     maxResults: u64 = 20000,
+    timeStartNs: u64 = 0,
+    timeEndNs: u64 = 0,
+    timeStartMs: u64 = 0,
+    timeEndMs: u64 = 0,
 };
 
 pub const FrameSender = struct {
@@ -276,9 +281,12 @@ pub fn executeSearchWithRegistry(
     sender: FrameSender,
 ) !void {
     const start_ts = std.Io.Clock.awake.now(io);
+    const eff_time_start_ns: u64 = if (req.timeStartNs > 0) req.timeStartNs else req.timeStartMs *| 1_000_000;
+    const eff_time_end_ns: u64 = if (req.timeEndNs > 0) req.timeEndNs else req.timeEndMs *| 1_000_000;
+    const has_time_filter = (eff_time_start_ns > 0 or eff_time_end_ns > 0);
 
-    // If pattern is empty and neither invert nor contains is active, complete immediately with 0 hits.
-    if (req.pattern.len == 0 and !req.invert and req.contains.len == 0) {
+    // If pattern is empty and neither invert, contains, nor time filter is active, complete immediately with 0 hits.
+    if (req.pattern.len == 0 and !req.invert and req.contains.len == 0 and !has_time_filter) {
         const elapsed_ns = start_ts.untilNow(io, .awake).toNanoseconds();
         const elapsed_ms: f64 = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1_000_000.0;
         const done_json = try file_api.stringifyAlloc(gpa, DoneFrame{
@@ -475,6 +483,12 @@ pub fn executeSearchWithRegistry(
                 return;
             };
             break :blk .{ .regex = re };
+        } else if (req.pattern.len == 0 and has_time_filter) {
+            const re = libwebgrep.Regex.init(gpa, "^.", .{ .case = .sensitive }) catch |err| {
+                try sendError(gpa, sender, req.id, @errorName(err));
+                return;
+            };
+            break :blk .{ .regex = re };
         } else if (is_regex_mode) {
             const re = libwebgrep.Regex.init(gpa, req.pattern, .{ .case = case_mode }) catch |err| {
                 try sendError(gpa, sender, req.id, @errorName(err));
@@ -558,6 +572,8 @@ pub fn executeSearchWithRegistry(
         .cancel_flag = cancel_flag,
         .sender = sender,
         .last_progress_ts = start_ts,
+        .time_start_ns = eff_time_start_ns,
+        .time_end_ns = eff_time_end_ns,
     };
     defer runner.file_tasks.deinit(job_arena);
     defer runner.active_task_indices.deinit(job_arena);
@@ -752,6 +768,8 @@ const JobRunner = struct {
     swapped_primary_finder: ?libwebgrep.Finder = null,
     cancel_flag: *const std.atomic.Value(bool),
     sender: FrameSender,
+    time_start_ns: u64 = 0,
+    time_end_ns: u64 = 0,
 
     file_tasks: std.ArrayList(FileTask) = .empty,
     active_task_indices: std.ArrayList(usize) = .empty,
@@ -961,6 +979,12 @@ const JobRunner = struct {
     ) bool {
         if (self.req.types.len > 0) {
             if (!libwebgrep.walk_types.matches(self.req.types, base_name)) return false;
+        }
+        if (self.time_start_ns > 0 or self.time_end_ns > 0) {
+            if (ingestor.parseSealedSegmentTimeRange(base_name)) |seg| {
+                if (self.time_start_ns > 0 and seg.max_ns < self.time_start_ns) return false;
+                if (self.time_end_ns > 0 and seg.min_ns > self.time_end_ns) return false;
+            }
         }
         return self.sourceMatchesProjectFilters(src_id, src_name);
     }
@@ -1241,6 +1265,8 @@ const JobRunner = struct {
         };
         hasher.update(&flags);
         hasher.update(std.mem.asBytes(&self.req.maxResults));
+        hasher.update(std.mem.asBytes(&self.time_start_ns));
+        hasher.update(std.mem.asBytes(&self.time_end_ns));
         if (self.req.replacement) |rep| {
             hasher.update(rep);
         }
@@ -1313,6 +1339,8 @@ const JobRunner = struct {
                     e.tasks_fingerprint != tasks_fingerprint or
                     e.heat_epoch != heat_epoch or
                     e.max_results != self.req.maxResults or
+                    e.time_start_ns != self.time_start_ns or
+                    e.time_end_ns != self.time_end_ns or
                     e.whole_word != self.req.wholeWord or
                     e.whole_line != self.req.wholeLine or
                     e.invert != self.req.invert or
@@ -1413,6 +1441,20 @@ const JobRunner = struct {
         parsed_case: libwebgrep.CaseMode,
         default_case_insensitive: bool,
     ) bool {
+        if (self.time_start_ns > 0 or self.time_end_ns > 0) {
+            const fallback_year: u16 = if (task.mtime_ns > 0)
+                ingestor.currentYearUtc(@intCast(@max(0, task.mtime_ns)))
+            else
+                2026;
+            if (ingestor.parseUniversalLineTimestampNs(line_text, fallback_year)) |line_ns| {
+                if (self.time_start_ns > 0 and line_ns < self.time_start_ns) return false;
+                if (self.time_end_ns > 0 and line_ns > self.time_end_ns) return false;
+            } else if (task.mtime_ns > 0) {
+                const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                if (self.time_start_ns > 0 and mtime_u64 < self.time_start_ns) return false;
+                if (self.time_end_ns > 0 and mtime_u64 > self.time_end_ns) return false;
+            }
+        }
         for (task.effective_excludes) |ex_lit| {
             if (ex_lit.len == 0) continue;
             const ci = switch (parsed_case) {
@@ -1516,11 +1558,16 @@ const JobRunner = struct {
                 }
                 if (!sliceIsSubset(e.contains, self.req.contains)) continue;
                 if (!sliceIsSubset(e.excludes, self.req.excludes)) continue;
+                // Superset time range must cover the requested time range
+                if (e.time_start_ns > self.time_start_ns) continue;
+                if (e.time_end_ns != 0 and (self.time_end_ns == 0 or e.time_end_ns < self.time_end_ns)) continue;
 
                 // Strong Consistency Guard for >4096-byte long lines / lossy UTF-8 lines:
                 // If predicates changed (`pattern`, `contains`, or `excludes`), in-memory filtering on `ci.text`
                 // is only 100% sound when every cached line in `e` was stored without 4096-byte truncation!
                 const predicates_changed = !exact_pat or
+                    e.time_start_ns != self.time_start_ns or
+                    e.time_end_ns != self.time_end_ns or
                     !slicesEqual(e.contains, self.req.contains) or
                     !slicesEqual(e.excludes, self.req.excludes);
                 if (predicates_changed and !e.all_lines_exact) continue;
@@ -1887,6 +1934,8 @@ const JobRunner = struct {
             .context = self.req.context,
             .has_replacement = (self.req.replacement != null and self.req.replacement.?.len > 0),
             .max_results = self.req.maxResults,
+            .time_start_ns = self.time_start_ns,
+            .time_end_ns = self.time_end_ns,
             .contains = contains_copy,
             .excludes = excludes_copy,
             .file_mtimes = fm_copy,
@@ -2124,6 +2173,177 @@ const JobRunner = struct {
     }
 };
 
+fn findLineStartAtOrBefore(slice: []const u8, pos: usize) usize {
+    var k = @min(pos, slice.len);
+    while (k > 0) {
+        if (slice[k - 1] == '\n') return k;
+        k -= 1;
+    }
+    return 0;
+}
+
+fn countNewlinesFast(slice: []const u8) u64 {
+    var count: u64 = 0;
+    const Vec32 = @Vector(32, u8);
+    const nl_vec: Vec32 = @splat('\n');
+    var i: usize = 0;
+    while (i + 32 <= slice.len) : (i += 32) {
+        const chunk: Vec32 = slice[i..][0..32].*;
+        const mask: u32 = @bitCast(chunk == nl_vec);
+        count += @popCount(mask);
+    }
+    while (i < slice.len) : (i += 1) {
+        if (slice[i] == '\n') count += 1;
+    }
+    return count;
+}
+
+/// Walks backwards up to 32 lines from `line_start` to find the nearest timestamped parent line
+/// (so multi-line stack traces in Java/Python/Go logs inherit their parent event's timestamp).
+fn findLineTimestampWithLookbehind(slice: []const u8, line_start: usize, fallback_year: u16) ?u64 {
+    if (line_start < slice.len) {
+        if (ingestor.parseUniversalLineTimestampNs(slice[line_start..], fallback_year)) |ns| return ns;
+    }
+    var cur = line_start;
+    var steps: usize = 0;
+    while (cur > 0 and steps < 32) : (steps += 1) {
+        const prev_start = findLineStartAtOrBefore(slice, cur - 1);
+        if (ingestor.parseUniversalLineTimestampNs(slice[prev_start..cur], fallback_year)) |ns| {
+            return ns;
+        }
+        cur = prev_start;
+    }
+    return null;
+}
+
+pub const NarrowedTimeSlice = struct {
+    sub_slice: []const u8,
+    base_line_offset: u64,
+    is_time_series: bool,
+};
+
+/// Performs O(log N) binary search over an `mmap` file slice for any time-series log file
+/// (19-digit ns streams, ISO-8601, RFC3339, Log4j, Slash YMD, Nginx CLF, Syslog, JSONL),
+/// returning the narrowed `[sub_start..sub_end]` slice, `base_line_offset`, and `is_time_series`.
+/// Non-log files (code, HTML, Markdown, plain text) return `is_time_series = false` untouched.
+pub fn narrowMmapSliceByTimeRange(
+    slice: []const u8,
+    start_ns: u64,
+    end_ns: u64,
+) NarrowedTimeSlice {
+    return narrowMmapSliceByTimeRangeWithYear(slice, start_ns, end_ns, 2026);
+}
+
+pub fn narrowMmapSliceByTimeRangeWithYear(
+    slice: []const u8,
+    start_ns: u64,
+    end_ns: u64,
+    fallback_year: u16,
+) NarrowedTimeSlice {
+    if (slice.len < 10) {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
+    }
+
+    // Skip leading blank lines if any
+    var first_pos: usize = 0;
+    while (first_pos < slice.len and (slice[first_pos] == '\n' or slice[first_pos] == '\r')) : (first_pos += 1) {}
+    if (first_pos >= slice.len) {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
+    }
+
+    const first_ns = ingestor.parseUniversalLineTimestampNs(slice[first_pos..], fallback_year) orelse {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
+    };
+
+    // Inspect the last timestamped line near EOF to verify monotonic time-series ordering
+    var end_trim = slice.len;
+    while (end_trim > first_pos and (slice[end_trim - 1] == '\n' or slice[end_trim - 1] == '\r' or slice[end_trim - 1] == ' ')) {
+        end_trim -= 1;
+    }
+    const last_line_start = findLineStartAtOrBefore(slice, end_trim);
+    const last_ns = findLineTimestampWithLookbehind(slice[0..end_trim], last_line_start, fallback_year) orelse {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
+    };
+    if (last_ns < first_ns) {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
+    }
+
+    if (start_ns == 0 and end_ns == 0) {
+        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
+    }
+
+    // Whole-file range pruning: if [first_ns, last_ns] is completely outside [start_ns, end_ns], skip entire file!
+    if ((start_ns > 0 and last_ns < start_ns) or (end_ns > 0 and first_ns > end_ns)) {
+        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
+    }
+
+    var sub_start: usize = 0;
+    if (start_ns > 0 and first_ns < start_ns) {
+        var lo: usize = 0;
+        var hi: usize = slice.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const line_start = findLineStartAtOrBefore(slice, mid);
+            const line_end = if (std.mem.indexOfScalarPos(u8, slice, line_start, '\n')) |nl|
+                nl + 1
+            else
+                slice.len;
+
+            if (findLineTimestampWithLookbehind(slice, line_start, fallback_year)) |line_ns| {
+                if (line_ns < start_ns) {
+                    lo = line_end;
+                } else {
+                    hi = line_start;
+                }
+            } else {
+                return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
+            }
+        }
+        sub_start = lo;
+    }
+
+    if (sub_start >= slice.len) {
+        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
+    }
+
+    var sub_end: usize = slice.len;
+    if (end_ns > 0 and last_ns > end_ns) {
+        var lo: usize = sub_start;
+        var hi: usize = slice.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            var line_start = findLineStartAtOrBefore(slice, mid);
+            if (line_start < lo) line_start = lo;
+            const line_end = if (std.mem.indexOfScalarPos(u8, slice, line_start, '\n')) |nl|
+                nl + 1
+            else
+                slice.len;
+
+            if (findLineTimestampWithLookbehind(slice, line_start, fallback_year)) |line_ns| {
+                if (line_ns <= end_ns) {
+                    lo = line_end;
+                } else {
+                    hi = line_start;
+                }
+            } else {
+                return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
+            }
+        }
+        sub_end = lo;
+    }
+
+    if (sub_start >= sub_end) {
+        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
+    }
+
+    const base_lines = if (sub_start > 0) countNewlinesFast(slice[0..sub_start]) else 0;
+    return .{
+        .sub_slice = slice[sub_start..sub_end],
+        .base_line_offset = base_lines,
+        .is_time_series = true,
+    };
+}
+
 const WorkerContext = struct {
     runner: *JobRunner,
     local_matcher: MatcherUnion,
@@ -2194,6 +2414,11 @@ const WorkerContext = struct {
             .cancel = self.runner.cancel_flag,
         };
 
+        const fallback_year: u16 = if (task.mtime_ns > 0)
+            ingestor.currentYearUtc(@intCast(@max(0, task.mtime_ns)))
+        else
+            2026;
+
         var sink = FileSink{
             .worker = self,
             .task = task,
@@ -2201,6 +2426,7 @@ const WorkerContext = struct {
             .source_id = task.source_id,
             .source_name = task.source_name,
             .case_insensitive = is_case_insensitive,
+            .fallback_year = fallback_year,
         };
 
         var hot_lease: ?search_cache.HotFileLease = null;
@@ -2222,18 +2448,63 @@ const WorkerContext = struct {
             self.runner.registry.?.search_cache.releaseHotFileSlice(self.runner.io, lease.slot_idx);
         };
 
-        const maybe_res = if (hot_lease) |lease|
-            (switch (self.local_matcher) {
-                .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, lease.slice, task.rel_path, f, cfg),
-                .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, lease.slice, task.rel_path, m, cfg),
-                .regex => |*r| libwebgrep.searchSlice(FileSink, &sink, lease.slice, task.rel_path, r, cfg),
-            } catch null)
-        else blk: {
+        const has_time_filter = (self.runner.time_start_ns > 0 or self.runner.time_end_ns > 0);
+
+        const maybe_res = if (hot_lease) |lease| blk_mmap: {
+            var active_slice = lease.slice;
+            if (has_time_filter) {
+                const narrowed = narrowMmapSliceByTimeRangeWithYear(
+                    lease.slice,
+                    self.runner.time_start_ns,
+                    self.runner.time_end_ns,
+                    fallback_year,
+                );
+                sink.is_time_series = narrowed.is_time_series;
+                if (narrowed.is_time_series) {
+                    active_slice = narrowed.sub_slice;
+                    sink.base_line_offset = narrowed.base_line_offset;
+                } else if (task.mtime_ns > 0) {
+                    // Document / Code / HTML file: filter at file level via stat.mtime!
+                    const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                    if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                        (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                    {
+                        active_slice = lease.slice[0..0];
+                    }
+                }
+            }
+            break :blk_mmap (switch (self.local_matcher) {
+                .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, f, cfg),
+                .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, m, cfg),
+                .regex => |*r| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, r, cfg),
+            } catch null);
+        } else blk: {
             var file = parent_dir.openFile(self.runner.io, task.open_sub_path, .{ .allow_directory = false }) catch {
                 self.runner.had_scan_error.store(true, .release);
                 return;
             };
             defer file.close(self.runner.io);
+
+            if (has_time_filter and compression == .none) {
+                var peek_buf: [256]u8 = undefined;
+                const peek_n = file.readPositionalAll(self.runner.io, &peek_buf, 0) catch 0;
+                var first_pos: usize = 0;
+                while (first_pos < peek_n and (peek_buf[first_pos] == '\n' or peek_buf[first_pos] == '\r')) : (first_pos += 1) {}
+                sink.is_time_series = first_pos < peek_n and
+                    (ingestor.parseUniversalLineTimestampNs(peek_buf[first_pos..peek_n], fallback_year) != null);
+                if (!sink.is_time_series and task.mtime_ns > 0) {
+                    const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                    if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                        (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                    {
+                        break :blk (switch (self.local_matcher) {
+                            .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, f, cfg),
+                            .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, m, cfg),
+                            .regex => |*r| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, r, cfg),
+                        } catch null);
+                    }
+                }
+            }
 
             var read_buf: [65536]u8 = undefined;
             var file_reader = file.reader(self.runner.io, &read_buf);
@@ -2282,6 +2553,8 @@ const WorkerContext = struct {
                     else => false,
                 };
                 if (is_plain_literal and
+                    self.runner.time_start_ns == 0 and
+                    self.runner.time_end_ns == 0 and
                     std.mem.eql(u8, self.runner.req.mode, "literal") and
                     !self.runner.req.invert and
                     !self.runner.req.wholeWord and
@@ -2420,6 +2693,10 @@ const FileSink = struct {
     source_name: []const u8 = "",
     case_insensitive: bool = true,
     file_had_match: bool = false,
+    base_line_offset: u64 = 0,
+    is_time_series: bool = false,
+    fallback_year: u16 = 2026,
+    last_line_ns: u64 = 0,
 
     fn toLineEvent(self: *const FileSink, line: libwebgrep.Line) libwebgrep.LineEvent {
         const u16_column = if (line.matches.len > 0)
@@ -2428,7 +2705,7 @@ const FileSink = struct {
             line.u16_column;
         return .{
             .source_id = self.rel_path,
-            .line_number = line.number orelse 0,
+            .line_number = (line.number orelse 0) + self.base_line_offset,
             .column = line.column,
             .u16_column = u16_column,
             .absolute_offset = line.offset,
@@ -2471,6 +2748,16 @@ const FileSink = struct {
                 const line_no = if (line.line_number > 0) line.line_number else 1;
                 if (line_no <= self.task.resume_after_line) {
                     return true;
+                }
+
+                if ((runner.time_start_ns > 0 or runner.time_end_ns > 0) and self.is_time_series) {
+                    const raw_text = if (line.text.len > 0) line.text else line.bytes;
+                    const line_ns = ingestor.parseUniversalLineTimestampNs(raw_text, self.fallback_year) orelse self.last_line_ns;
+                    if (line_ns > 0) {
+                        self.last_line_ns = line_ns;
+                        if (runner.time_start_ns > 0 and line_ns < runner.time_start_ns) return true;
+                        if (runner.time_end_ns > 0 and line_ns > runner.time_end_ns) return true;
+                    }
                 }
 
                 const max_res = runner.req.maxResults;
@@ -3491,4 +3778,196 @@ test "search_job: scoped whole-word modifiers ($w, $cw, $rw, $rcw) on indented l
     }, &cancel, .{ .ctx = &c_contains_w, .sendFn = CountCollector.send });
     // Only `    id: u64 = 1001,` and `\tid = 4096;` have both whole-word `id` and a 4-digit number!
     try std.testing.expectEqual(@as(u64, 2), c_contains_w.matched_lines);
+}
+
+test "search_job: 19-digit nanosecond segment pruning, mmap binary search, and line numbers" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "streams/gw");
+
+    // Segment 1: [1730340001000000000, 1730340003000000000]
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "streams/gw/1730340001000000000-1730340003000000000.log",
+        .data = "1730340001000000000 ERROR old_event_1\n" ++
+            "1730340002000000000 ERROR old_event_2\n" ++
+            "1730340003000000000 ERROR old_event_3\n",
+    });
+
+    // Segment 2: [1730340010000000000, 1730340050000000000]
+    const seg2_data =
+        "1730340010000000000 ERROR mid_event_line1\n" ++
+        "1730340020000000000 ERROR mid_event_line2\n" ++
+        "1730340030000000000 ERROR mid_event_line3\n" ++
+        "1730340040000000000 ERROR mid_event_line4\n" ++
+        "1730340050000000000 ERROR mid_event_line5\n";
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "streams/gw/1730340010000000000-1730340050000000000.log",
+        .data = seg2_data,
+    });
+
+    // Direct unit test on `narrowMmapSliceByTimeRange`
+    const narrowed = narrowMmapSliceByTimeRange(
+        seg2_data,
+        1730340020000000000,
+        1730340040000000000,
+    );
+    try std.testing.expectEqual(@as(u64, 1), narrowed.base_line_offset);
+    try std.testing.expect(std.mem.startsWith(u8, narrowed.sub_slice, "1730340020000000000 ERROR mid_event_line2\n"));
+    try std.testing.expect(std.mem.endsWith(u8, narrowed.sub_slice, "1730340040000000000 ERROR mid_event_line4\n"));
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root_real = try gpa.dupe(u8, path_buf[0..n]);
+    defer gpa.free(root_real);
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, root_real, null);
+    defer reg.deinit(io);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const gw_dir_path = try std.fmt.allocPrint(arena_state.allocator(), "{s}/streams/gw", .{root_real});
+    try reg.upsertSource(arena_state.allocator(), io, .{
+        .kind = "dir",
+        .name = "gw",
+        .path = gw_dir_path,
+        .enabled = true,
+    });
+
+    const LineCollector = struct {
+        allocator: std.mem.Allocator,
+        files_searched: u64 = 0,
+        matched_lines: u64 = 0,
+        first_line_no: u64 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
+                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                if (parsed.value.items.len > 0 and self.first_line_no == 0) {
+                    self.first_line_no = parsed.value.items[0].line;
+                }
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.files_searched = parsed.value.filesSearched;
+                self.matched_lines = parsed.value.matchedLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    var col = LineCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 1,
+        .pattern = "ERROR",
+        .timeStartNs = 1730340020000000000,
+        .timeEndNs = 1730340040000000000,
+    }, &cancel, .{ .ctx = &col, .sendFn = LineCollector.send });
+
+    // Segment 1 was pruned by filename without even opening it (`files_searched == 1`),
+    // and inside Segment 2 only lines 2, 3, 4 matched (`matched_lines == 3`, `first_line_no == 2`)!
+    try std.testing.expectEqual(@as(u64, 1), col.files_searched);
+    try std.testing.expectEqual(@as(u64, 3), col.matched_lines);
+    try std.testing.expectEqual(@as(u64, 2), col.first_line_no);
+}
+
+test "search_job: dual-granularity time filter on ISO-8601/Nginx/JSONL logs (with stack traces) AND code/HTML files via stat.mtime" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "mixed");
+
+    // 1. Existing ISO-8601 / Spring Boot log with multi-line Java stack trace
+    const spring_log =
+        "2026-10-31 10:15:01,000 INFO  [main] Booting service\n" ++
+        "2026-10-31 10:15:02,500 ERROR [worker-1] NullPointerException in PaymentService\n" ++
+        "    at com.example.PaymentService.charge(PaymentService.java:88)\n" ++
+        "    at com.example.OrderController.submit(OrderController.java:42)\n" ++
+        "2026-10-31 10:15:05,000 INFO  [main] Shutdown complete\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "mixed/spring.log", .data = spring_log });
+
+    // 2. Code (.zig) and HTML (.html) files (no line-level timestamps -> filtered by stat.mtime!)
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "mixed/app.zig",
+        .data = "pub fn handlePayment() void {\n    // PaymentService logic\n}\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "mixed/index.html",
+        .data = "<!DOCTYPE html>\n<html><body><div class=\"PaymentService\">Pay</div></body></html>\n",
+    });
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root_real = try gpa.dupe(u8, path_buf[0..n]);
+    defer gpa.free(root_real);
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, root_real, null);
+    defer reg.deinit(io);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const mixed_dir_path = try std.fmt.allocPrint(arena_state.allocator(), "{s}/mixed", .{root_real});
+    try reg.upsertSource(arena_state.allocator(), io, .{
+        .kind = "dir",
+        .name = "mixed",
+        .path = mixed_dir_path,
+        .enabled = true,
+    });
+
+    const SimpleCollector = struct {
+        allocator: std.mem.Allocator,
+        matched_lines: u64 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // A. Search `PaymentService` inside historical log window [2026-10-31T10:15:02Z, 2026-10-31T10:15:03Z]:
+    //    - `spring.log` is a time-series log: matches both line 2 (`ERROR ... PaymentService`) AND line 3 (stack trace `at ... PaymentService.java:88` via lookbehind inheritance)!
+    //    - `app.zig` and `index.html` have `mtime = now` (outside the narrow 1-second window if `timeEndNs` is 10:15:03Z, or inside if `timeEndNs == 0`).
+    const t_start = ingestor.parseTimestampToNs("2026-10-31T10:15:02Z", 2026).?;
+    const t_end = ingestor.parseTimestampToNs("2026-10-31T10:15:03Z", 2026).?;
+
+    var col_log_window = SimpleCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 10,
+        .pattern = "PaymentService",
+        .timeStartNs = t_start,
+        .timeEndNs = t_end,
+    }, &cancel, .{ .ctx = &col_log_window, .sendFn = SimpleCollector.send });
+    try std.testing.expectEqual(@as(u64, 2), col_log_window.matched_lines);
+
+    // B. Search `PaymentService` with `timeStartNs = now - 60s` (`$t(1m)`):
+    //    - `app.zig` and `index.html` were just modified (`mtime >= now - 60s`), so both code and HTML files match (1 line each = 2 lines)!
+    const now_ns = ingestor.currentUnixNano(io);
+    var col_recent = SimpleCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 11,
+        .pattern = "PaymentService",
+        .timeStartNs = now_ns -| (60 * std.time.ns_per_s),
+        .timeEndNs = now_ns +| (60 * std.time.ns_per_s),
+    }, &cancel, .{ .ctx = &col_recent, .sendFn = SimpleCollector.send });
+    try std.testing.expectEqual(@as(u64, 2), col_recent.matched_lines);
 }

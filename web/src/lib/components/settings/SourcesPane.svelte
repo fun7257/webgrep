@@ -1,19 +1,36 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
+  import type { DataSourceEntry } from '$lib/types';
   import Switch from '../ui/Switch.svelte';
   import AddSourceForm from './AddSourceForm.svelte';
-  import { AlertTriangle, Check, FileText, Folder, Plus, Trash2 } from 'lucide-svelte';
+  import StreamGuideCard from './StreamGuideCard.svelte';
+  import {
+    AlertTriangle,
+    Check,
+    FileText,
+    Folder,
+    Plus,
+    Radio,
+    Terminal,
+    Trash2,
+  } from 'lucide-svelte';
 
   const t = $derived(workbench.t.ui);
 
   // Two-step delete: first tap arms (icon turns into a check), second tap confirms.
   let armedId = $state<string | null>(null);
   let armTimer: ReturnType<typeof setTimeout> | null = null;
+  let guideOpenId = $state<string | null>(null);
+
+  function isStreamSource(src: DataSourceEntry): boolean {
+    return src.config?.protocol === 'stream' || src.path.includes('/streams/');
+  }
 
   function onDelete(id: string) {
     if (armedId === id) {
       if (armTimer) clearTimeout(armTimer);
       armedId = null;
+      if (guideOpenId === id) guideOpenId = null;
       void workbench.removeSource(id);
       return;
     }
@@ -63,51 +80,79 @@
   {:else}
     <div class="divide-y divide-border/40">
       {#each workbench.sources as src (src.id)}
-        <div class={`flex min-h-14 items-center gap-3 py-1.5 ${src.enabled ? '' : 'opacity-60'}`}>
-          <span
-            class={`flex h-8 w-8 shrink-0 items-center justify-center ${
-              src.exists ? 'text-muted-foreground' : 'text-status'
-            }`}
-            title={src.exists ? '' : t.missingPath}
-          >
-            {#if !src.exists}
-              <AlertTriangle class="h-4 w-4" />
-            {:else if src.kind === 'file'}
-              <FileText class="h-4 w-4" />
-            {:else}
-              <Folder class="h-4 w-4" />
-            {/if}
-          </span>
+        {@const stream = isStreamSource(src)}
+        <div class="py-1.5">
+          <div class={`flex min-h-12 items-center gap-3 ${src.enabled ? '' : 'opacity-60'}`}>
+            <span
+              class={`flex h-8 w-8 shrink-0 items-center justify-center ${
+                src.exists ? (stream ? 'text-primary' : 'text-muted-foreground') : 'text-status'
+              }`}
+              title={src.exists ? (stream ? t.stream : '') : t.missingPath}
+            >
+              {#if !src.exists}
+                <AlertTriangle class="h-4 w-4" />
+              {:else if stream}
+                <Radio class="h-4 w-4" />
+              {:else if src.kind === 'file'}
+                <FileText class="h-4 w-4" />
+              {:else}
+                <Folder class="h-4 w-4" />
+              {/if}
+            </span>
 
-          <div class="min-w-0 flex-1">
-            <div class="truncate font-medium text-foreground/95">{src.name}</div>
-            <div class="truncate font-mono text-[11.5px] text-muted-foreground" title={src.path}>
-              {src.path}
+            <div class="min-w-0 flex-1">
+              <div class="truncate font-medium text-foreground/95">@{src.name}</div>
+              <div class="truncate font-mono text-[11.5px] text-muted-foreground" title={src.path}>
+                {src.path}
+              </div>
             </div>
+
+            {#if stream}
+              <button
+                type="button"
+                onclick={() => (guideOpenId = guideOpenId === src.id ? null : src.id)}
+                title={t.streamGuideTitle}
+                aria-label={t.streamGuideTitle}
+                aria-pressed={guideOpenId === src.id}
+                class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                  guideOpenId === src.id
+                    ? 'bg-secondary text-foreground'
+                    : 'text-muted-foreground/70 hover:bg-secondary hover:text-foreground'
+                }`}
+              >
+                <Terminal class="h-4 w-4" />
+              </button>
+            {/if}
+
+            <Switch
+              checked={src.enabled}
+              title={src.enabled ? t.enabled : t.disabled}
+              onchange={() => workbench.toggleSourceEnabled(src.id)}
+            />
+            <button
+              type="button"
+              onclick={() => onDelete(src.id)}
+              title={armedId === src.id ? t.confirmDelete : t.delete}
+              aria-label={armedId === src.id ? t.confirmDelete : t.delete}
+              class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                armedId === src.id
+                  ? 'bg-status/15 text-status'
+                  : 'text-muted-foreground/65 hover:bg-secondary hover:text-foreground'
+              }`}
+            >
+              {#if armedId === src.id}
+                <Check class="h-4 w-4" />
+              {:else}
+                <Trash2 class="h-4 w-4" />
+              {/if}
+            </button>
           </div>
 
-          <Switch
-            checked={src.enabled}
-            title={src.enabled ? t.enabled : t.disabled}
-            onchange={() => workbench.toggleSourceEnabled(src.id)}
-          />
-          <button
-            type="button"
-            onclick={() => onDelete(src.id)}
-            title={armedId === src.id ? t.confirmDelete : t.delete}
-            aria-label={armedId === src.id ? t.confirmDelete : t.delete}
-            class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer ${
-              armedId === src.id
-                ? 'bg-status/15 text-status'
-                : 'text-muted-foreground/65 hover:bg-secondary hover:text-foreground'
-            }`}
-          >
-            {#if armedId === src.id}
-              <Check class="h-4 w-4" />
-            {:else}
-              <Trash2 class="h-4 w-4" />
-            {/if}
-          </button>
+          {#if stream && guideOpenId === src.id}
+            <div class="mt-2">
+              <StreamGuideCard serviceName={src.name} showActions={true} />
+            </div>
+          {/if}
         </div>
       {/each}
     </div>

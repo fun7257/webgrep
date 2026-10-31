@@ -154,7 +154,7 @@ class WorkbenchState {
   scrollToActiveTick = $state<number>(0);
   inspectedPath = $state<string | null>(null);
   inspectedLine = $state<number>(1);
-  inspectorContext = $state<number>(0);
+  inspectorContext = $state<number>(20);
   inspectedFile = $state<FileResponse | null>(null);
   inspectorLoading = $state<boolean>(false);
   inspectorError = $state<string | null>(null);
@@ -194,10 +194,13 @@ class WorkbenchState {
   parsedQuery = $derived.by(() => parseSearchQuery(this.pattern));
 
   mode = $derived<SearchMode>(this._baseMode);
-  /** Scoped `$r(…)` / `$c(…)` / `$w(…)` tokens currently present in the query. */
+  /** Scoped `$r(…)` / `$c(…)` / `$w(…)` / `$t(…)` tokens currently present in the query. */
   hasRegexActive = $derived<boolean>(this.parsedQuery.hasScopedRegex);
   hasCaseActive = $derived<boolean>(this.parsedQuery.hasScopedCase);
   hasWordActive = $derived<boolean>(this.parsedQuery.hasScopedWord);
+  hasTimeActive = $derived<boolean>(this.parsedQuery.hasScopedTime);
+  timeStartMs = $derived<number>(this.parsedQuery.timeStartMs);
+  timeEndMs = $derived<number>(this.parsedQuery.timeEndMs);
 
   primaryPattern = $derived<string>(this.parsedQuery.primaryPattern);
   contains = $derived<string[]>(this.parsedQuery.contains);
@@ -211,7 +214,8 @@ class WorkbenchState {
       this.parsedGlobs.length +
       (this.hasRegexActive ? 1 : 0) +
       (this.hasCaseActive ? 1 : 0) +
-      (this.hasWordActive ? 1 : 0)
+      (this.hasWordActive ? 1 : 0) +
+      (this.hasTimeActive ? 1 : 0)
   );
 
   init() {
@@ -230,7 +234,7 @@ class WorkbenchState {
       const s = JSON.parse(raw);
       if (typeof s.liveSearch === 'boolean') this.liveSearch = s.liveSearch;
       if (typeof s.debounceMs === 'number' && Number.isFinite(s.debounceMs)) {
-        this.debounceMs = Math.max(0, Math.min(5000, Math.round(s.debounceMs)));
+        this.debounceMs = s.debounceMs <= 100 ? 60 : s.debounceMs <= 230 ? 150 : 320;
       }
       if (typeof s.respectIgnore === 'boolean') this.respectIgnore = s.respectIgnore;
       if (typeof s.hidden === 'boolean') this.hidden = s.hidden;
@@ -304,7 +308,7 @@ class WorkbenchState {
 
   resetSettings() {
     this.liveSearch = true;
-    this.debounceMs = 120;
+    this.debounceMs = 150;
     this.respectIgnore = false;
     this.hidden = false;
     this.contextLines = 0;
@@ -312,7 +316,7 @@ class WorkbenchState {
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
-    this.inspectorContext = 0;
+    this.inspectorContext = 20;
     this.saveSettings();
     if (this.pattern.trim().length > 0) {
       this.executeSearch();
@@ -491,6 +495,39 @@ class WorkbenchState {
     if (this.pattern.trim().length > 0) {
       this.scheduleSearch(true);
     }
+  }
+
+  async ingestTestLog(serviceName: string, customPayload?: string): Promise<string> {
+    const clean =
+      serviceName
+        .trim()
+        .replace(/^@+/, '')
+        .replace(/[^a-zA-Z0-9._-]/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 64) || 'app-logs';
+    const body =
+      customPayload && customPayload.trim().length > 0
+        ? customPayload.trim()
+        : JSON.stringify({
+            level: 'info',
+            service: clean,
+            msg: 'webgrep stream receiver ready',
+            ts: new Date().toISOString(),
+          });
+    const res = await fetch(`/ingest/${encodeURIComponent(clean)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-ndjson' },
+      body,
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      throw new Error(errData.error || `HTTP ${res.status}`);
+    }
+    await this.fetchSources();
+    if (this.pattern.trim().length > 0) {
+      this.scheduleSearch(true);
+    }
+    return clean;
   }
 
   async toggleSourceEnabled(id: string) {
@@ -822,7 +859,7 @@ class WorkbenchState {
     }
 
     const pat = this.primaryPattern;
-    if (!pat || pat.length === 0) {
+    if ((!pat || pat.length === 0) && !this.hasTimeActive) {
       this.cancelSearch();
       this.resetResultBuffer();
       this.errorMessage = null;
@@ -858,6 +895,11 @@ class WorkbenchState {
           ? Math.min(this.maxResults, 3000)
           : this.maxResults;
 
+    // Re-evaluate time range at search execution time so relative `$t(15m)` uses fresh `Date.now()`
+    const freshPq = this.hasTimeActive ? parseSearchQuery(this.pattern) : this.parsedQuery;
+    const reqTimeStartMs = freshPq.timeStartMs || 0;
+    const reqTimeEndMs = freshPq.timeEndMs || 0;
+
     const payload: WsSearchMessage = {
       type: 'search',
       id: searchId,
@@ -879,6 +921,8 @@ class WorkbenchState {
       hidden: this.hidden,
       respectIgnore: this.respectIgnore,
       maxResults: effectiveMaxResults,
+      timeStartMs: reqTimeStartMs > 0 ? reqTimeStartMs : undefined,
+      timeEndMs: reqTimeEndMs > 0 ? reqTimeEndMs : undefined,
     };
 
     const enabledSourcesSig = this.sources
@@ -902,6 +946,8 @@ class WorkbenchState {
       hid: this.hidden,
       ign: this.respectIgnore,
       max: effectiveMaxResults,
+      ts: reqTimeStartMs > 0 ? Math.floor(reqTimeStartMs / 1000) : 0,
+      te: reqTimeEndMs > 0 ? Math.floor(reqTimeEndMs / 1000) : 0,
     });
     this.activeQueryCacheKey = cacheKey;
 
@@ -1124,24 +1170,30 @@ class WorkbenchState {
         this.detailOpen = true;
         if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
       }
-      // Check if the streaming hit text might have been truncated by the 4096-byte UTF-8 streaming cap
-      // (Note: CJK chars are 3 UTF-8 bytes each, or a JSON line starting with '{' that doesn't end with '}')
-      const trimmed = hit.text.trim();
-      const looksLikeIncompleteJson =
-        (trimmed.startsWith('{') && !trimmed.endsWith('}')) ||
-        (trimmed.startsWith('[') && !trimmed.endsWith(']'));
-      const approxUtf8Bytes = new TextEncoder().encode(hit.text).length;
 
-      if (approxUtf8Bytes < 4000 && !looksLikeIncompleteJson) {
+      const targetCtx = Math.max(20, this.inspectorContext || 20);
+      const existing = this.inspectedFile;
+      if (
+        existing &&
+        existing.path === hit.file &&
+        existing.lines.length > 0 &&
+        existing.lines[0].n <= Math.max(1, hit.line - 6) &&
+        (existing.eof || existing.lines[existing.lines.length - 1].n >= hit.line + 6)
+      ) {
         this.inspectedPath = hit.file;
         this.inspectedLine = hit.line;
-        this.inspectedFile = null;
         this.inspectorLoading = false;
         this.inspectorError = null;
       } else {
-        this.inspectFileAtLine(hit.file, hit.line, 0, forceOpenInspector);
+        void this.inspectFileAtLine(hit.file, hit.line, targetCtx, forceOpenInspector);
       }
     }
+  }
+
+  expandInspectorContext(step = 30) {
+    if (!this.inspectedPath) return;
+    const nextCtx = Math.min(300, Math.max(20, this.inspectorContext) + step);
+    void this.inspectFileAtLine(this.inspectedPath, this.inspectedLine, nextCtx, false);
   }
 
   navigateHits(delta: 1 | -1) {
@@ -1171,9 +1223,12 @@ class WorkbenchState {
     contextRadius = this.inspectorContext,
     forceOpen = true
   ) {
+    if (this.inspectedPath !== filePath) {
+      this.inspectedFile = null;
+    }
     this.inspectedPath = filePath;
     this.inspectedLine = Math.max(1, line);
-    this.inspectorContext = contextRadius;
+    this.inspectorContext = Math.max(1, contextRadius || 20);
     this.inspectorLoading = true;
     this.inspectorError = null;
     if (forceOpen) {
@@ -1186,7 +1241,7 @@ class WorkbenchState {
         tenant: this.tenant,
         path: filePath,
         line: String(Math.max(1, line)),
-        context: String(contextRadius),
+        context: String(this.inspectorContext),
       });
       const res = await fetch(`/api/file?${params.toString()}`);
       if (!res.ok) {

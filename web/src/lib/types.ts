@@ -100,6 +100,8 @@ export interface WsSearchMessage {
   hidden: boolean;
   respectIgnore: boolean;
   maxResults: number;
+  timeStartMs?: number;
+  timeEndMs?: number;
 }
 
 export interface WsCancelMessage {

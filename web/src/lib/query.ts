@@ -20,6 +20,97 @@ export interface ParsedSearchQuery {
   hasScopedRegex: boolean;
   hasScopedCase: boolean;
   hasScopedWord: boolean;
+  hasScopedTime: boolean;
+  timeStartMs: number;
+  timeEndMs: number;
+}
+
+function parseSingleTimePoint(expr: string, nowMs: number, isEnd: boolean): number | null {
+  const s = expr.trim();
+  if (!s) return null;
+
+  // 1. Relative duration: 30s, 5m, 15m, 1h, 6h, 24h, 7d, 2w
+  const rel = /^(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|day|w)$/i.exec(s);
+  if (rel) {
+    const num = Number(rel[1]);
+    const unit = rel[2].toLowerCase();
+    const mult =
+      unit.startsWith('s')
+        ? 1000
+        : unit.startsWith('m')
+          ? 60_000
+          : unit.startsWith('h')
+            ? 3_600_000
+            : unit.startsWith('d')
+              ? 86_400_000
+              : 7 * 86_400_000;
+    return Math.max(1, Math.round(nowMs - num * mult));
+  }
+
+  // 2. Time-of-day only (`HH:MM` or `HH:MM:SS`) -> anchored to today in local time
+  const tod = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (tod) {
+    const d = new Date(nowMs);
+    const hh = Number(tod[1]);
+    const mm = Number(tod[2]);
+    const ss = tod[3] !== undefined ? Number(tod[3]) : isEnd ? 59 : 0;
+    const ms = tod[3] !== undefined ? (isEnd ? 999 : 0) : isEnd ? 999 : 0;
+    d.setHours(hh, mm, ss, ms);
+    return d.getTime();
+  }
+
+  // 3. Date-only (`YYYY-MM-DD`)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const iso = isEnd ? `${s}T23:59:59.999` : `${s}T00:00:00.000`;
+    const parsed = Date.parse(iso);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  // 4. Full ISO date-time or epoch milliseconds / seconds
+  if (/^\d{10,19}$/.test(s)) {
+    if (s.length >= 16) return Math.floor(Number(s.slice(0, 13)));
+    if (s.length >= 13) return Number(s.slice(0, 13));
+    return Number(s) * 1000;
+  }
+
+  const normalizedIso = s.includes(' ') && !s.includes('T') ? s.replace(' ', 'T') : s;
+  const parsed = Date.parse(normalizedIso);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function parseTimeModifierSpec(
+  rawSpec: string,
+  nowMs = Date.now()
+): { startMs: number; endMs: number } | null {
+  const clean = rawSpec.trim();
+  if (!clean) return null;
+
+  // Range syntax: `A..B` or `A~B`
+  const rangeSep = clean.includes('..') ? '..' : clean.includes('~') ? '~' : null;
+  if (rangeSep) {
+    const [leftRaw, rightRaw] = clean.split(rangeSep, 2);
+    const startMs = leftRaw.trim() ? parseSingleTimePoint(leftRaw, nowMs, false) : 0;
+    const endMs = rightRaw.trim() ? parseSingleTimePoint(rightRaw, nowMs, true) : 0;
+    if (startMs === null || endMs === null) return null;
+    if (startMs === 0 && endMs === 0) return null;
+    if (startMs > 0 && endMs > 0 && startMs > endMs) {
+      return { startMs: endMs, endMs: startMs };
+    }
+    return { startMs, endMs };
+  }
+
+  // Date-only `YYYY-MM-DD` covers the entire day `[00:00:00.000, 23:59:59.999]`
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    const startMs = parseSingleTimePoint(clean, nowMs, false);
+    const endMs = parseSingleTimePoint(clean, nowMs, true);
+    if (startMs !== null && endMs !== null) {
+      return { startMs, endMs };
+    }
+  }
+
+  const startMs = parseSingleTimePoint(clean, nowMs, false);
+  if (startMs === null) return null;
+  return { startMs, endMs: 0 };
 }
 
 export function parseDollarFlags(raw: string): ParsedDollarFlags | null {
@@ -47,7 +138,7 @@ export function parseDollarFlags(raw: string): ParsedDollarFlags | null {
   return null;
 }
 
-export function parseSearchQuery(raw: string): ParsedSearchQuery {
+export function parseSearchQuery(raw: string, nowMs = Date.now()): ParsedSearchQuery {
   interface RawToken {
     raw: string;
     quoted: boolean;
@@ -63,11 +154,13 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     const firstCh = raw[i];
     const quoted = firstCh === '"' || firstCh === "'";
 
-    // Check for scoped `$r(xxxxxxx)`, `$c(xxxxxxx)`, `$w(xxxxxxx)`, `$rc(...)`, `$cw(...)`, `$rw(...)`, `$rcw(...)` with balanced parentheses
+    // Check for scoped `$r(xxxxxxx)`, `$c(xxxxxxx)`, `$w(xxxxxxx)`, `$t(...)`, `$rc(...)`, `$cw(...)`, `$rw(...)`, `$rcw(...)` with balanced parentheses
     const scopedMatch = /^([-+!]?)(\$[a-zA-Z.*]+)\(/.exec(raw.slice(i));
     if (scopedMatch) {
+      const flagHead = scopedMatch[2].toLowerCase();
       const dFlags = parseDollarFlags(scopedMatch[2]);
-      if (dFlags) {
+      const isTimeFlag = flagHead === '$t' || flagHead === '$time';
+      if (dFlags || isTimeFlag) {
         const openParenPos = i + scopedMatch[0].length - 1;
         let depth = 1;
         let p = openParenPos + 1;
@@ -243,12 +336,35 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     };
   };
 
-  // Pass 1: Detect scoped `$r(...)`, `$c(...)`, `$w(...)`, `$rc(...)`, `$rw(...)`, `$cw(...)`, `$rcw(...)`
+  const parseScopedTimeToken = (s: string): { raw: string; inner: string } | null => {
+    const m =
+      /^([-+!]?)\$(?:t|time)\(([\s\S]*)\)$/i.exec(s) ??
+      /^([-+!]?)\$(?:t|time)\(([\s\S]*)$/i.exec(s);
+    if (!m) return null;
+    return { raw: s, inner: m[2] };
+  };
+
+  // Pass 1: Detect scoped `$r(...)`, `$c(...)`, `$w(...)`, `$rc(...)`, `$rw(...)`, `$cw(...)`, `$rcw(...)`, and `$t(...)`
   let hasScopedRegex = false;
   let hasScopedCase = false;
   let hasScopedWord = false;
+  let hasScopedTime = false;
+  let timeStartMs = 0;
+  let timeEndMs = 0;
+
   for (const tok of rawTokens) {
     if (tok.quoted) continue;
+    const timeTok = parseScopedTimeToken(tok.raw);
+    if (timeTok) {
+      const tr = parseTimeModifierSpec(timeTok.inner, nowMs);
+      if (tr) {
+        hasScopedTime = true;
+        timeStartMs = tr.startMs;
+        timeEndMs = tr.endMs;
+      }
+      continue;
+    }
+
     const scoped = parseScopedDollarToken(tok.raw);
     if (scoped) {
       if (scoped.inner.length > 0) {
@@ -289,6 +405,19 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
       continue;
     }
 
+    const timeTok = parseScopedTimeToken(tok.raw);
+    if (timeTok) {
+      const tr = parseTimeModifierSpec(timeTok.inner, nowMs);
+      if (tr) {
+        classified.push({
+          raw: tok.raw,
+          kind: 'flag',
+          value: `$t(${timeTok.inner.trim()})`,
+        });
+      }
+      continue;
+    }
+
     const scoped = parseScopedDollarToken(tok.raw);
     if (scoped) {
       if (!scoped.inner) {
@@ -309,7 +438,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     }
 
     if (
-      /^[-+!]?\$$/.test(tok.raw) ||
+      /^[-+!]?\$(?:t|time)?$/i.test(tok.raw) ||
       (tok.raw.startsWith('$') && parseDollarFlags(tok.raw) !== null) ||
       ((tok.raw.startsWith('-$') || tok.raw.startsWith('+$') || tok.raw.startsWith('!$')) &&
         parseDollarFlags(tok.raw.slice(1)) !== null)
@@ -438,6 +567,9 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     hasScopedRegex,
     hasScopedCase,
     hasScopedWord,
+    hasScopedTime,
+    timeStartMs,
+    timeEndMs,
   };
 }
 

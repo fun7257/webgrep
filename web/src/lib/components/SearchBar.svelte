@@ -155,6 +155,14 @@
         aliases: ['w', 'word', 'b', '\\b'],
         disabled: false,
       },
+      {
+        token: '$t()',
+        badge: '⏱',
+        label: workbench.t.searchBar.flagTimeLabel,
+        desc: workbench.t.searchBar.flagTimeDesc,
+        aliases: ['t', 'time', '15m', '1h', '24h'],
+        disabled: false,
+      },
     ];
 
     const comboFlags = [
@@ -218,6 +226,9 @@
       (scopeSuggestions.length > 0 && Boolean(activeAtToken)) ||
       historySuggestions.length > 0
   );
+
+  const showSymbolBar = $derived(workbench.isCompact && isInputFocused);
+  const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
 
   function applyScopeSuggestion(scopeLabel: string) {
     if (!activeAtToken) return;
@@ -474,12 +485,18 @@
 
 <div
   class={hero
-    ? 'flex flex-1 flex-col items-center justify-center px-3 md:px-6 pb-[14vh] select-none'
+    ? `flex flex-1 flex-col items-center px-3 md:px-6 select-none ${
+        showSymbolBar ? 'justify-start pt-4' : 'justify-center pb-[14vh]'
+      }`
     : 'relative px-3 md:px-6 pt-2 md:pt-3 pb-1.5 select-none'}
 >
   {#if hero}
     <!-- Google-Style Centered Brand Wordmark -->
-    <div class="mb-7 flex flex-col items-center gap-2 text-center">
+    <div
+      class={`${
+        showSymbolBar ? 'mb-3' : 'mb-7'
+      } flex flex-col items-center gap-2 text-center`}
+    >
       <h1 class="font-mono text-4xl font-semibold tracking-tight text-foreground">
         webgrep
       </h1>
@@ -502,7 +519,7 @@
       class={`relative flex items-center gap-2.5 border transition-colors min-w-0 ${
         hero ? 'h-12 px-4' : 'h-11 px-3.5'
       } ${
-        hasOpenDropdown
+        hasAttachedPanel
           ? 'rounded-t-[22px] rounded-b-none border-b-transparent border-border bg-card shadow-xl'
           : 'rounded-full border-border/80 bg-card/85 shadow-sm hover:border-border focus-within:border-border focus-within:bg-card focus-within:shadow-md'
       }`}
@@ -576,135 +593,124 @@
       {/if}
     </div>
 
-    <!-- 1. Google-Style Seamlessly Attached Search History Dropdown -->
-    {#if historySuggestions.length > 0}
+    {#if hasAttachedPanel}
       <div
         role="listbox"
         tabindex="-1"
         onmousedown={(e) => e.preventDefault()}
-        class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card pb-2 shadow-2xl"
+        class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card shadow-2xl"
       >
-        <div class="mx-4 border-t border-border/60"></div>
-        <div class="py-1">
-          {#each historySuggestions as entry, idx (`${entry.mode}:${entry.pattern}`)}
-            {@const isSelected = idx === selectedHistoryIdx}
-            <div
-              role="button"
-              tabindex="-1"
-              onmouseenter={() => (selectedHistoryIdx = idx)}
-              onclick={() => selectHistoryItem(entry)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter') selectHistoryItem(entry);
-              }}
-              class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
-                isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
-              }`}
-            >
-              <div class="flex items-center gap-3 min-w-0">
-                <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
-                <span class="font-mono text-[13.5px] text-foreground truncate">
-                  {entry.pattern}
-                </span>
-                {#if entry.mode === 'regex'}
-                  <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
-                    .*
-                  </span>
-                {/if}
-              </div>
+        {#if showSymbolBar}
+          <div class="mx-3 border-t border-border/60"></div>
+          <SymbolBar onInsert={insertSymbol} onBackspace={backspaceToken} />
+        {/if}
 
+        <!-- 1. Google-Style Seamlessly Attached Search History Dropdown -->
+        {#if historySuggestions.length > 0}
+          <div class="mx-3 border-t border-border/60"></div>
+          <div class="max-h-52 md:max-h-64 overflow-y-auto py-1 pb-2">
+            {#each historySuggestions as entry, idx (`${entry.mode}:${entry.pattern}`)}
+              {@const isSelected = idx === selectedHistoryIdx}
+              <div
+                role="button"
+                tabindex="-1"
+                onmouseenter={() => (selectedHistoryIdx = idx)}
+                onclick={() => selectHistoryItem(entry)}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') selectHistoryItem(entry);
+                }}
+                class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
+                  isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
+                }`}
+              >
+                <div class="flex items-center gap-3 min-w-0">
+                  <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
+                  <span class="font-mono text-[13.5px] text-foreground truncate">
+                    {entry.pattern}
+                  </span>
+                  {#if entry.mode === 'regex'}
+                    <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
+                      .*
+                    </span>
+                  {/if}
+                </div>
+
+                <button
+                  type="button"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    workbench.removeHistoryEntry(entry.pattern, entry.mode);
+                  }}
+                  class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground"
+                  title={workbench.t.ui.removeHistory}
+                  aria-label={workbench.t.ui.removeHistory}
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- 2. Seamlessly Attached $flag Mode Autocomplete Dropdown -->
+        {#if flagSuggestions.length > 0 && activeDollarToken}
+          <div class="mx-3 border-t border-border/60"></div>
+          <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
+            {#each flagSuggestions as item, idx (item.token)}
+              {@const isSelected = !item.disabled && idx === effectiveFlagIdx}
               <button
                 type="button"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  workbench.removeHistoryEntry(entry.pattern, entry.mode);
-                }}
-                class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground"
-                title={workbench.t.ui.removeHistory}
-                aria-label={workbench.t.ui.removeHistory}
+                disabled={item.disabled}
+                onclick={() => applyFlagSuggestion(item.token)}
+                class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors ${
+                  item.disabled
+                    ? 'opacity-45 cursor-not-allowed text-muted-foreground'
+                    : isSelected
+                      ? 'bg-secondary text-foreground'
+                      : 'text-foreground hover:bg-secondary/60'
+                }`}
               >
-                <X class="h-3.5 w-3.5" />
+                <div class="flex items-center gap-2.5 min-w-0">
+                  <span class="font-mono text-xs font-semibold text-foreground shrink-0 w-12">
+                    {item.token}
+                  </span>
+                  <span class="text-xs text-muted-foreground truncate">
+                    {item.label}
+                  </span>
+                </div>
+                {#if item.disabled}
+                  <Check class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {/if}
               </button>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
+            {/each}
+          </div>
+        {/if}
 
-    <!-- 2. Seamlessly Attached $flag Mode Autocomplete Dropdown -->
-    {#if flagSuggestions.length > 0 && activeDollarToken}
-      <div
-        role="listbox"
-        tabindex="-1"
-        onmousedown={(e) => e.preventDefault()}
-        class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card p-1.5 pb-2 shadow-2xl"
-      >
-        <div class="mx-2.5 mb-1 border-t border-border/50"></div>
-        <div class="space-y-0.5">
-          {#each flagSuggestions as item, idx (item.token)}
-            {@const isSelected = !item.disabled && idx === effectiveFlagIdx}
-            <button
-              type="button"
-              disabled={item.disabled}
-              onclick={() => applyFlagSuggestion(item.token)}
-              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors ${
-                item.disabled
-                  ? 'opacity-45 cursor-not-allowed text-muted-foreground'
-                  : isSelected
+        <!-- 3. Seamlessly Attached Project-Only @ Autocomplete Dropdown -->
+        {#if scopeSuggestions.length > 0 && activeAtToken}
+          <div class="mx-3 border-t border-border/60"></div>
+          <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
+            {#each scopeSuggestions as item, idx (item.id)}
+              {@const isSelected = idx === selectedSuggestIdx}
+              <button
+                type="button"
+                onmouseenter={() => (selectedSuggestIdx = idx)}
+                onclick={() => applyScopeSuggestion(item.label)}
+                class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 font-mono text-xs text-left transition-colors ${
+                  isSelected
                     ? 'bg-secondary text-foreground'
                     : 'text-foreground hover:bg-secondary/60'
-              }`}
-            >
-              <div class="flex items-center gap-2.5 min-w-0">
-                <span class="font-mono text-xs font-semibold text-foreground shrink-0 w-12">
-                  {item.token}
+                }`}
+              >
+                <span class="truncate font-medium">@{item.label}</span>
+                <span class="truncate text-[11px] text-muted-foreground/60">
+                  {item.path}
                 </span>
-                <span class="text-xs text-muted-foreground truncate">
-                  {item.label}
-                </span>
-              </div>
-              {#if item.disabled}
-                <Check class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              {/if}
-            </button>
-          {/each}
-        </div>
-      </div>
-    {/if}
-
-    <!-- 3. Seamlessly Attached Project-Only @ Autocomplete Dropdown -->
-    {#if scopeSuggestions.length > 0 && activeAtToken}
-      <div
-        role="listbox"
-        tabindex="-1"
-        onmousedown={(e) => e.preventDefault()}
-        class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card p-1.5 pb-2 shadow-2xl"
-      >
-        <div class="mx-2.5 mb-1 border-t border-border/50"></div>
-        <div class="max-h-64 overflow-y-auto space-y-0.5">
-          {#each scopeSuggestions as item, idx (item.id)}
-            {@const isSelected = idx === selectedSuggestIdx}
-            <button
-              type="button"
-              onmouseenter={() => (selectedSuggestIdx = idx)}
-              onclick={() => applyScopeSuggestion(item.label)}
-              class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 font-mono text-xs text-left transition-colors ${
-                isSelected
-                  ? 'bg-secondary text-foreground'
-                  : 'text-foreground hover:bg-secondary/60'
-              }`}
-            >
-              <span class="truncate font-medium">@{item.label}</span>
-              <span class="truncate text-[11px] text-muted-foreground/60">
-                {item.path}
-              </span>
-            </button>
-          {/each}
-        </div>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
 </div>
-
-{#if workbench.isCompact && isInputFocused}
-  <SymbolBar onInsert={insertSymbol} onBackspace={backspaceToken} />
-{/if}

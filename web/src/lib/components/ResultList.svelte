@@ -2,6 +2,7 @@
   import { workbench } from '$lib/state.svelte';
   import type { HitItem } from '$lib/types';
   import {
+    extractLeadingNanoTimestamp,
     getCachedHighlightSegments,
     type HighlightSegment,
   } from '$lib/utils';
@@ -15,6 +16,8 @@
     /** True when the data source differs from the previous hit (breadcrumb only shown on change). */
     showSrc: boolean;
     fileName: string;
+    timeLabel: string;
+    timeNs: string;
   }
 
   let copiedIdx = $state<number>(-1);
@@ -114,6 +117,7 @@
       const prevSlash = prevFile.indexOf('/');
       const prevSrc = prevSlash > 0 ? prevFile.slice(0, prevSlash) : '';
       const lastSlash = it.file.lastIndexOf('/');
+      const tsInfo = extractLeadingNanoTimestamp(it.text);
       items.push({
         showSrc: i === 0 || srcName !== prevSrc,
         fileName: lastSlash >= 0 ? it.file.slice(lastSlash + 1) : it.file,
@@ -121,6 +125,8 @@
         key: `${i}:${it.file}:${it.line}:${it.col}`,
         item: it,
         srcName,
+        timeLabel: tsInfo ? tsInfo.formattedTime : '',
+        timeNs: tsInfo ? tsInfo.nsStr : '',
       });
     }
 
@@ -374,6 +380,14 @@
                       >
                         @{row.srcName}
                       </button>
+                    {/if}
+                    {#if row.timeLabel}
+                      <span
+                        title={row.timeNs}
+                        class="shrink-0 text-muted-foreground/50 tabular-nums"
+                      >
+                        {row.timeLabel}
+                      </span>
                     {/if}
                   </div>
 

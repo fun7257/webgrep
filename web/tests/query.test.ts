@@ -5,7 +5,11 @@ import {
   parseSearchQuery,
   removeInlineModifierFromPattern,
 } from '../src/lib/query.ts';
-import { analyzeStructuredLine, buildHighlightSegments } from '../src/lib/utils.ts';
+import {
+  analyzeStructuredLine,
+  buildHighlightSegments,
+  extractLeadingNanoTimestamp,
+} from '../src/lib/utils.ts';
 
 describe('removeInlineModifierFromPattern (pill removal)', () => {
   it('removes -error from "upstream-error -error" without corrupting upstream-error', () => {
@@ -72,6 +76,28 @@ describe('parseSearchQuery (progressive query syntax)', () => {
       wholeWord: true,
     });
   });
+
+  it('parses $t(...) relative and explicit time range modifiers', () => {
+    const fixedNow = 1730340900000;
+    const qRel = parseSearchQuery('$t(15m) ERROR @payment-api', fixedNow);
+    assert.equal(qRel.primaryPattern, 'ERROR');
+    assert.equal(qRel.hasScopedTime, true);
+    assert.equal(qRel.timeStartMs, fixedNow - 15 * 60 * 1000);
+    assert.equal(qRel.timeEndMs, 0);
+    assert.deepEqual(qRel.globs, ['payment-api']);
+    assert.ok(qRel.modifiers.some((m) => m.kind === 'flag' && m.value === '$t(15m)'));
+
+    const qDay = parseSearchQuery('$t(2026-10-31) timeout', fixedNow);
+    assert.equal(qDay.primaryPattern, 'timeout');
+    assert.equal(qDay.hasScopedTime, true);
+    assert.ok(qDay.timeStartMs > 0);
+    assert.ok(qDay.timeEndMs > qDay.timeStartMs);
+
+    const qWindow = parseSearchQuery('$t(10:00..10:30) ERROR', fixedNow);
+    assert.equal(qWindow.primaryPattern, 'ERROR');
+    assert.equal(qWindow.hasScopedTime, true);
+    assert.equal(qWindow.timeEndMs - qWindow.timeStartMs, 30 * 60 * 1000 + 59999);
+  });
 });
 
 describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting & highlights)', () => {
@@ -101,5 +127,22 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     const containsMatches = segs.filter((s) => s.kind === 'contains-0').map((s) => s.text);
     assert.deepEqual(primaryMatches, ['ErrorCode']);
     assert.deepEqual(containsMatches, ['1001']);
+  });
+
+  it('extracts 19-digit nanosecond timestamp and formats JSON payload cleanly', () => {
+    const line =
+      '1730340905123456789 {"level":"error","service":"payment-api","msg":"upstream timeout"}';
+    const ts = extractLeadingNanoTimestamp(line);
+    assert.ok(ts !== null);
+    assert.equal(ts.nsStr, '1730340905123456789');
+    assert.equal(
+      ts.restText,
+      '{"level":"error","service":"payment-api","msg":"upstream timeout"}'
+    );
+
+    const info = analyzeStructuredLine(line);
+    assert.equal(info.kind, 'json');
+    assert.ok(info.prefix?.includes('1730340905123456789'));
+    assert.ok(info.formattedText.includes('"service": "payment-api"'));
   });
 });
