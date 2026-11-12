@@ -144,6 +144,65 @@ html:not(.dark) textarea::selection {
   border-bottom-style: dotted;
 }
 
+/* Code syntax highlighting (GitHub Primer Light / GitHub Dark Dimmed palette) */
+.syn-comment {
+  color: #6e7781;
+  font-style: italic;
+}
+.syn-keyword {
+  color: #cf222e;
+  font-weight: 500;
+}
+.syn-string {
+  color: #0a3069;
+}
+.syn-number,
+.syn-literal {
+  color: #0550ae;
+}
+.syn-type {
+  color: #953800;
+}
+.syn-builtin,
+.syn-function {
+  color: #8250df;
+}
+.syn-property {
+  color: #0550ae;
+}
+.syn-punctuation {
+  color: hsl(var(--foreground) / 0.68);
+}
+
+.dark .syn-comment {
+  color: #7d8590;
+  font-style: italic;
+}
+.dark .syn-keyword {
+  color: #ff7b72;
+  font-weight: 500;
+}
+.dark .syn-string {
+  color: #a5d6ff;
+}
+.dark .syn-number,
+.dark .syn-literal {
+  color: #79c0ff;
+}
+.dark .syn-type {
+  color: #ffa657;
+}
+.dark .syn-builtin,
+.dark .syn-function {
+  color: #d2a8ff;
+}
+.dark .syn-property {
+  color: #79c0ff;
+}
+.dark .syn-punctuation {
+  color: hsl(var(--foreground) / 0.72);
+}
+
 /* CSS Containment & GPU Compositor Isolation for 120Hz Virtual Scrolling */
 .virtual-row-strict {
   contain: strict;

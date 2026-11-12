@@ -30,6 +30,11 @@ pub const SearchRequest = struct {
     timeEndNs: u64 = 0,
     timeStartMs: u64 = 0,
     timeEndMs: u64 = 0,
+    /// File/path filters from `@*.rs` / `@src/` / `-@*_test.go` (`!` prefix = exclude).
+    /// Matched against each file's source-relative path; positives are OR-ed, negatives always win.
+    fileGlobs: []const []const u8 = &.{},
+    /// Radius of the nearby-lines fallback used when no single line contains every term (0 = disabled).
+    nearbyLines: u32 = 15,
 };
 
 pub const FrameSender = struct {
@@ -51,6 +56,8 @@ pub const HitItem = struct {
     line: u64,
     col: u64,
     text: []const u8,
+    prevText: ?[]const u8 = null,
+    nextText: ?[]const u8 = null,
     replaced: ?[]const u8,
     isContext: bool,
     spans: []const HitSpan,
@@ -83,6 +90,8 @@ pub const DoneFrame = struct {
     limitHit: []const u8,
     searchCount: u64 = 0,
     cacheHit: []const u8 = "none",
+    /// Non-zero when results come from the nearby-lines fallback (terms spread over ±N lines, not one line).
+    nearbyLines: u32 = 0,
 };
 
 pub const ErrorFrame = struct {
@@ -225,14 +234,31 @@ fn parseScopedModifier(
     return null;
 }
 
-/// Computes the SIMD prefilter selectivity score for a compiled regex.
-/// Higher scores indicate stronger fixed-literal anchors (`Finder` at 20+ GB/s),
-/// while unanchored NFAs (`\d+`, `\w+`, `[a-z]+`) with no required literal score 1.
+/// Computes the SIMD prefilter selectivity score for a compiled regex (`libwebgrep v0.4.1`).
+/// Higher scores indicate stronger fixed-literal or Teddy multi-literal anchors (`Finder` / `Multi` at 20+ GB/s)
+/// and Ahead-of-Time determinized `BoundedDfa` tables (`precomputed_dfa`), while unanchored NFAs score 1..3.
 fn computeRegexSelectivity(re: *const libwebgrep.Regex) usize {
     const req_len = if (re.requiredLiteral()) |rl| rl.bytes.len else 0;
     const tail_len = re.tail_literal_bytes.len;
     if (re.req_is_exact) return req_len * 10 + 5;
-    if (req_len > 0) return req_len * 8 + tail_len * 4;
+    if (req_len > 0) {
+        const dfa_bonus: usize = if (re.dfa_is_exact) 4 else if (re.precomputed_dfa != null) 2 else 0;
+        return req_len * 8 + tail_len * 4 + dfa_bonus;
+    }
+    if (re.alt_prefilter != null and re.alt_literal_slices.len > 0) {
+        var min_alt_len: usize = std.math.maxInt(usize);
+        for (re.alt_literal_slices) |branch| {
+            if (branch.len < min_alt_len) min_alt_len = branch.len;
+        }
+        if (min_alt_len != std.math.maxInt(usize) and min_alt_len > 0) {
+            if (re.alt_is_exact) return min_alt_len * 9 + 3;
+            const dfa_bonus: usize = if (re.precomputed_dfa != null) 2 else 0;
+            return min_alt_len * 7 + dfa_bonus;
+        }
+    }
+    if (re.precomputed_dfa != null) {
+        return if (re.dfa_is_exact) 3 else 2;
+    }
     return 1;
 }
 
@@ -590,6 +616,20 @@ pub fn executeSearchWithRegistry(
                         break;
                     }
                 }
+                if (!explicitly_selected) {
+                    for (req.globs) |raw_rule| {
+                        const trimmed = std.mem.trim(u8, raw_rule, " \t");
+                        if (trimmed.len == 0 or trimmed[0] == '!') continue;
+                        var it = std.mem.splitScalar(u8, trimmed, ',');
+                        while (it.next()) |part| {
+                            if (JobRunner.matchesProjectScopeToken(src.id, src.name, part)) {
+                                explicitly_selected = true;
+                                break;
+                            }
+                        }
+                        if (explicitly_selected) break;
+                    }
+                }
                 if (!explicitly_selected) continue;
             }
             if (req.sources.len > 0) {
@@ -598,6 +638,20 @@ pub fn executeSearchWithRegistry(
                     if (std.mem.eql(u8, sid, src.id) or std.ascii.eqlIgnoreCase(sid, src.name)) {
                         matched_src = true;
                         break;
+                    }
+                }
+                if (!matched_src) {
+                    for (req.globs) |raw_rule| {
+                        const trimmed = std.mem.trim(u8, raw_rule, " \t");
+                        if (trimmed.len == 0 or trimmed[0] == '!') continue;
+                        var it = std.mem.splitScalar(u8, trimmed, ',');
+                        while (it.next()) |part| {
+                            if (JobRunner.matchesProjectScopeToken(src.id, src.name, part)) {
+                                matched_src = true;
+                                break;
+                            }
+                        }
+                        if (matched_src) break;
                     }
                 }
                 if (!matched_src) continue;
@@ -699,6 +753,7 @@ pub fn executeSearchWithRegistry(
         .limitHit = limit_hit,
         .searchCount = site_search_count,
         .cacheHit = runner.cache_hit_tier,
+        .nearbyLines = if (runner.nearby_used) req.nearbyLines else 0,
     });
     defer gpa.free(done_json);
     try sender.send(done_json);
@@ -774,6 +829,7 @@ const JobRunner = struct {
     file_tasks: std.ArrayList(FileTask) = .empty,
     active_task_indices: std.ArrayList(usize) = .empty,
     next_task_idx: std.atomic.Value(usize) = .init(0),
+    active_worker_count: u32 = 1,
 
     batches_flushed: std.atomic.Value(u64) = .init(0),
     files_searched: std.atomic.Value(u64) = .init(0),
@@ -788,6 +844,7 @@ const JobRunner = struct {
     last_progress_ts: std.Io.Timestamp,
 
     cache_hit_tier: []const u8 = "none",
+    nearby_used: bool = false,
     pruned_by_negative_cache: std.atomic.Value(bool) = .init(false),
     had_non_exact_line: std.atomic.Value(bool) = .init(false),
     had_scan_error: std.atomic.Value(bool) = .init(false),
@@ -819,6 +876,7 @@ const JobRunner = struct {
         file_size: u64,
         inode: std.Io.File.INode,
     ) !void {
+        if (!self.fileMatchesPathGlobs(rel_path, base_name)) return;
         const parent_copy = if (parent_dir_path) |p| try self.job_arena.dupe(u8, p) else null;
         const sub_copy = try self.job_arena.dupe(u8, open_sub_path);
         const rel_copy = if (std.mem.eql(u8, open_sub_path, rel_path))
@@ -859,31 +917,51 @@ const JobRunner = struct {
         return false;
     }
 
-    fn matchesSingleScopeToken(rel_path: []const u8, base_name: []const u8, token: []const u8) bool {
-        const clean = std.mem.trim(u8, token, " \t");
-        if (clean.len == 0) return true;
-
-        // Fast case-insensitive substring match against full relative path
-        if (!hasGlobMetachar(clean)) {
-            return containsIgnoreCase(rel_path, clean);
-        }
-
-        // Strip leading/trailing '*' if there are no other metacharacters inside
-        if (clean.len >= 2 and clean[0] == '*' and clean[clean.len - 1] == '*') {
-            const inner = clean[1 .. clean.len - 1];
-            if (!hasGlobMetachar(inner)) {
-                return containsIgnoreCase(rel_path, inner);
+    /// Applies `req.fileGlobs` (`@*.rs`, `@src/`, `-@*_test.go`) to a candidate file.
+    /// Positive patterns are OR-ed (at least one must match when any exist); `!` negatives always exclude.
+    fn fileMatchesPathGlobs(self: *const JobRunner, rel_path: []const u8, base_name: []const u8) bool {
+        if (self.req.fileGlobs.len == 0) return true;
+        var has_positive = false;
+        var positive_hit = false;
+        for (self.req.fileGlobs) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            const is_neg = trimmed.len > 0 and trimmed[0] == '!';
+            const body = if (is_neg) trimmed[1..] else trimmed;
+            if (body.len == 0) continue;
+            const hit = matchesPathPattern(rel_path, base_name, body);
+            if (is_neg) {
+                if (hit) return false;
+            } else {
+                has_positive = true;
+                if (hit) positive_hit = true;
             }
         }
-        if (clean.len >= 2 and clean[0] == '*' and !hasGlobMetachar(clean[1..])) {
-            const suffix = clean[1..];
-            return std.ascii.endsWithIgnoreCase(rel_path, suffix) or
-                containsIgnoreCase(rel_path, suffix);
-        }
+        return !has_positive or positive_hit;
+    }
 
-        const g = libwebgrep.walk_glob.classifyWithCase(clean, true);
-        const rules = [_]libwebgrep.walk_glob.Glob{g};
-        return libwebgrep.walk_glob.matchGlobs(&rules, rel_path, base_name, false);
+    /// Matches one `@` file/path pattern (case-insensitive):
+    /// - no glob metacharacters (`@src/`)  → substring of the relative path;
+    /// - no `/` (`@*.rs`, `@*_test.go`)    → glob against the file name;
+    /// - with `/` (`@src/*.rs`)            → glob against the relative path at any depth, since users write
+    ///   paths relative to the project rather than to the index root.
+    fn matchesPathPattern(rel_path: []const u8, base_name: []const u8, pattern: []const u8) bool {
+        const clean = std.mem.trim(u8, pattern, " \t");
+        if (clean.len == 0) return true;
+        if (!hasGlobMetachar(clean)) return containsIgnoreCase(rel_path, clean);
+
+        const glob_lib = libwebgrep.walk_glob;
+        if (std.mem.indexOfScalar(u8, clean, '/') == null) {
+            return glob_lib.matches(glob_lib.classifyWithCase(clean, true), rel_path, base_name, false);
+        }
+        var buf: [512]u8 = undefined;
+        const rooted = std.mem.trimStart(u8, clean, "/");
+        const anywhere = if (std.mem.startsWith(u8, rooted, "**/"))
+            rooted
+        else
+            std.fmt.bufPrint(&buf, "**/{s}", .{rooted}) catch return false;
+        var g = glob_lib.classifyWithCase(anywhere, true);
+        g.anchored = true;
+        return glob_lib.matches(g, rel_path, base_name, false);
     }
 
     /// Checks whether all '-' or '/' separated segments of `expr` appear in order inside `haystack`.
@@ -1216,6 +1294,7 @@ const JobRunner = struct {
 
         const cpu_count = std.Thread.getCpuCount() catch 4;
         const desired_workers = @min(@max(cpu_count, 4), @min(active_count, 8));
+        self.active_worker_count = @intCast(@max(desired_workers, 1));
 
         if (desired_workers <= 1) {
             self.workerThreadMain();
@@ -1660,6 +1739,8 @@ const JobRunner = struct {
                     .line = ci.line,
                     .col = if (spans.len > 0) spans[0].start + 1 else ci.col,
                     .text = self.job_arena.dupe(u8, ci.text) catch return false,
+                    .prevText = if (ci.prevText) |pt| (self.job_arena.dupe(u8, pt) catch null) else null,
+                    .nextText = if (ci.nextText) |nt| (self.job_arena.dupe(u8, nt) catch null) else null,
                     .replaced = null,
                     .isContext = false,
                     .spans = spans,
@@ -1865,18 +1946,25 @@ const JobRunner = struct {
             }
             const f_dup = alloc.dupe(u8, it.file) catch return;
             const t_dup = alloc.dupe(u8, it.text) catch return;
+            const prev_dup = if (it.prevText) |pt| (alloc.dupe(u8, pt) catch null) else null;
+            const next_dup = if (it.nextText) |nt| (alloc.dupe(u8, nt) catch null) else null;
             const r_dup = if (it.replaced) |r| (alloc.dupe(u8, r) catch null) else null;
             items_copy[i] = .{
                 .file = f_dup,
                 .line = it.line,
                 .col = it.col,
                 .text = t_dup,
+                .prevText = prev_dup,
+                .nextText = next_dup,
                 .replaced = r_dup,
                 .isContext = it.isContext,
                 .spans = spans_copy,
                 .raw_item_json = "",
             };
-            approx_bytes += 72 + f_dup.len + t_dup.len + spans_copy.len * 16;
+            approx_bytes += 88 + f_dup.len + t_dup.len +
+                (if (prev_dup) |p| p.len else 0) +
+                (if (next_dup) |n| n.len else 0) +
+                spans_copy.len * 16;
         }
 
         // Zero-copy slice each top-level `{...}` JSON object out of `raw_items_json`
@@ -1966,8 +2054,11 @@ const JobRunner = struct {
         const exact_hash = self.computeExactQueryHash(tasks_fingerprint, heat_epoch);
 
         // Tier L1: Exact Query Frame Replay Cache (< 0.2ms)
+        // Caches only ever hold strict single-line results, so a cached "0 hits" still has to try the
+        // nearby-lines fallback (its results are never cached, keeping L1/L2 invariants exact).
         if (self.tryReplayExactCache(exact_hash, tasks_fingerprint, heat_epoch)) {
             self.cache_hit_tier = "exact";
+            self.tryNearbyFallbackAfterCache();
             return;
         }
 
@@ -1976,6 +2067,7 @@ const JobRunner = struct {
         // Tier L2: Progressive Superset In-Memory Narrowing Cache (< 0.8ms)
         if (self.tryFilterSupersetCache(exact_hash, tasks_fingerprint, heat_epoch)) {
             self.cache_hit_tier = "superset";
+            self.tryNearbyFallbackAfterCache();
             return;
         }
 
@@ -2099,6 +2191,16 @@ const JobRunner = struct {
             self.executeWorkerPass();
         }
 
+        // Block-Proximity Fallback (±15 lines):
+        // When a multi-keyword query (`req.contains.len > 0`, e.g. `pub fn async members`) yields 0 single-line matches
+        // across all candidate files, check whether all query predicates co-occur within a ±15-line code block window.
+        if (self.total_matches.load(.acquire) == 0 and self.canRunBlockProximityFallback()) {
+            if (self.runBlockProximityFallback()) {
+                self.cache_hit_tier = "nearby";
+                return;
+            }
+        }
+
         // Feed observed query match heat back into SourceRegistry for future searches
         if (self.registry) |reg| {
             for (self.file_tasks.items) |t| {
@@ -2124,14 +2226,14 @@ const JobRunner = struct {
         var batch_arena_state = std.heap.ArenaAllocator.init(self.gpa);
         defer batch_arena_state.deinit();
 
-        var search_scratch: []u8 = &.{};
-        defer if (search_scratch.len > 0) self.gpa.free(search_scratch);
+        var scratch_pool = libwebgrep.Scratch.init(self.gpa);
+        defer scratch_pool.deinit();
 
         var worker = WorkerContext{
             .runner = self,
             .local_matcher = self.matcher.*,
             .batch_arena = &batch_arena_state,
-            .search_scratch = &search_scratch,
+            .scratch_pool = &scratch_pool,
             .last_flush_ts = std.Io.Clock.awake.now(self.io),
         };
         defer worker.batch_items.deinit(self.gpa);
@@ -2170,6 +2272,479 @@ const JobRunner = struct {
         self.sender.send(prog_json) catch {
             self.send_failed.store(true, .release);
         };
+    }
+
+    fn canRunBlockProximityFallback(self: *const JobRunner) bool {
+        if (self.shouldStop()) return false;
+        if (self.req.nearbyLines == 0) return false;
+        // Time-filtered searches stay strictly line-based (nearby lines may fall outside the window).
+        if (self.time_start_ns > 0 or self.time_end_ns > 0) return false;
+        if (self.req.invert or self.req.wholeLine) return false;
+        if (self.req.replacement != null and self.req.replacement.?.len > 0) return false;
+        if (self.req.pattern.len == 0) return false;
+        return self.req.contains.len > 0;
+    }
+
+    /// Runs the nearby-lines fallback after an L1/L2 cache tier produced 0 strict single-line hits.
+    /// Fallback results are never committed to L1/L2 (they are not single-line supersets).
+    fn tryNearbyFallbackAfterCache(self: *JobRunner) void {
+        if (self.total_matches.load(.acquire) != 0 or !self.canRunBlockProximityFallback()) return;
+        if (self.runBlockProximityFallback()) {
+            self.should_commit_cache = false;
+            self.cache_hit_tier = "nearby";
+        }
+    }
+
+    fn runBlockProximityFallback(self: *JobRunner) bool {
+        const parsed_case = parseCaseMode(self.req.case);
+        const max_res = self.req.maxResults;
+        const block_radius: usize = @min(@as(usize, self.req.nearbyLines), 200);
+        const max_fallback_file_bytes: u64 = 16 * 1024 * 1024;
+
+        var fallback_hits: std.ArrayList(HitItem) = .empty;
+        var matched_files_count: u64 = 0;
+        var limit_hit = false;
+
+        var regex_scratch = libwebgrep.RegexScratch.init(self.gpa);
+        defer regex_scratch.deinit();
+
+        for (self.file_tasks.items) |*task| {
+            if (self.shouldStop()) break;
+            if (task.file_size == 0 or task.file_size > max_fallback_file_bytes) continue;
+            if (file_api.hasCompressedExtension(task.base_name)) continue;
+
+            const pos_lit_count = task.effective_contains.len;
+            const pos_re_count = self.contains_regexes.len;
+            const total_preds = 1 + pos_lit_count + pos_re_count;
+            if (total_preds <= 1 or total_preds > 32) continue;
+
+            var opened_parent: ?std.Io.Dir = null;
+            defer if (opened_parent) |*d| d.close(self.io);
+
+            const parent_dir: std.Io.Dir = if (task.parent_dir_path) |p| blk: {
+                opened_parent = std.Io.Dir.cwd().openDir(self.io, p, .{}) catch continue;
+                break :blk opened_parent.?;
+            } else self.root_dir;
+
+            var hot_lease: ?search_cache.HotFileLease = null;
+            if (self.registry) |reg| {
+                hot_lease = reg.search_cache.acquireHotFileSlice(
+                    self.io,
+                    task.rel_path,
+                    task.mtime_ns,
+                    task.file_size,
+                    task.inode,
+                    parent_dir,
+                    task.open_sub_path,
+                    search_cache.MAX_HOT_FILE_MAP_BYTES,
+                );
+            }
+            defer if (hot_lease) |lease| {
+                self.registry.?.search_cache.releaseHotFileSlice(self.io, lease.slot_idx);
+            };
+
+            var owned_buf: []u8 = &.{};
+            defer if (owned_buf.len > 0) self.gpa.free(owned_buf);
+
+            const raw_slice: []const u8 = if (hot_lease) |lease|
+                lease.slice
+            else blk_read: {
+                var file = parent_dir.openFile(self.io, task.open_sub_path, .{ .allow_directory = false }) catch continue;
+                defer file.close(self.io);
+                const alloc_len: usize = @intCast(task.file_size);
+                owned_buf = self.gpa.alloc(u8, alloc_len) catch continue;
+                const n = file.readPositionalAll(self.io, owned_buf, 0) catch continue;
+                break :blk_read owned_buf[0..n];
+            };
+            if (raw_slice.len == 0) continue;
+
+            // Fast whole-file precheck: every positive predicate (`self.matcher`, `task.effective_contains`, `self.contains_regexes`)
+            // must appear at least once in `raw_slice`. This prunes >95% of non-matching files in microseconds!
+            const primary_in_file = switch (self.matcher.*) {
+                .literal => |*f| (f.find(raw_slice, 0, .leftmost_first) != null),
+                .multi => |*m| (m.find(raw_slice, 0, .leftmost_first) != null),
+                .regex => |*r| (r.findWithScratch(raw_slice, 0, .leftmost_first, &regex_scratch) != null),
+            };
+            if (!primary_in_file) continue;
+
+            var all_lits_in_file = true;
+            for (task.effective_contains) |inc_lit| {
+                if (inc_lit.len == 0) continue;
+                const ci = switch (parsed_case) {
+                    .insensitive => true,
+                    .sensitive => false,
+                    .smart => !hasAsciiUpper(inc_lit),
+                };
+                const found = if (ci)
+                    containsIgnoreCase(raw_slice, inc_lit)
+                else
+                    (std.mem.indexOf(u8, raw_slice, inc_lit) != null);
+                if (!found) {
+                    all_lits_in_file = false;
+                    break;
+                }
+            }
+            if (!all_lits_in_file) continue;
+
+            var all_res_in_file = true;
+            for (self.contains_regexes) |*inc_re| {
+                if (inc_re.findWithScratch(raw_slice, 0, .leftmost_first, &regex_scratch) == null) {
+                    all_res_in_file = false;
+                    break;
+                }
+            }
+            if (!all_res_in_file) continue;
+
+            const LineInfo = struct {
+                text: []const u8,
+                mask: u32,
+                excluded: bool,
+                matches_user_primary: bool,
+            };
+            var lines: std.ArrayList(LineInfo) = .empty;
+            defer lines.deinit(self.gpa);
+
+            const required_mask: u32 = if (total_preds == 32)
+                std.math.maxInt(u32)
+            else
+                (@as(u32, 1) << @intCast(total_preds)) - 1;
+
+            var pos: usize = 0;
+            while (pos < raw_slice.len) {
+                const nl = std.mem.indexOfScalarPos(u8, raw_slice, pos, '\n') orelse raw_slice.len;
+                var line_text = raw_slice[pos..nl];
+                if (line_text.len > 0 and line_text[line_text.len - 1] == '\r') {
+                    line_text = line_text[0 .. line_text.len - 1];
+                }
+                pos = if (nl < raw_slice.len) nl + 1 else raw_slice.len;
+
+                var excluded = false;
+                for (task.effective_excludes) |ex_lit| {
+                    if (ex_lit.len == 0) continue;
+                    const ci = switch (parsed_case) {
+                        .insensitive => true,
+                        .sensitive => false,
+                        .smart => !hasAsciiUpper(ex_lit),
+                    };
+                    if (if (ci) containsIgnoreCase(line_text, ex_lit) else (std.mem.indexOf(u8, line_text, ex_lit) != null)) {
+                        excluded = true;
+                        break;
+                    }
+                }
+                if (!excluded) {
+                    for (self.excludes_regexes) |*ex_re| {
+                        if (ex_re.findWithScratch(line_text, 0, .leftmost_first, &regex_scratch) != null) {
+                            excluded = true;
+                            break;
+                        }
+                    }
+                }
+
+                var mask: u32 = 0;
+                const m0 = switch (self.matcher.*) {
+                    .literal => |*f| (f.find(line_text, 0, .leftmost_first) != null),
+                    .multi => |*m| (m.find(line_text, 0, .leftmost_first) != null),
+                    .regex => |*r| (r.findWithScratch(line_text, 0, .leftmost_first, &regex_scratch) != null),
+                };
+                if (m0) mask |= 1;
+
+                for (task.effective_contains, 0..) |inc_lit, li| {
+                    const bit_idx: u5 = @intCast(1 + li);
+                    if (inc_lit.len == 0) {
+                        mask |= (@as(u32, 1) << bit_idx);
+                        continue;
+                    }
+                    const ci = switch (parsed_case) {
+                        .insensitive => true,
+                        .sensitive => false,
+                        .smart => !hasAsciiUpper(inc_lit),
+                    };
+                    if (if (ci) containsIgnoreCase(line_text, inc_lit) else (std.mem.indexOf(u8, line_text, inc_lit) != null)) {
+                        mask |= (@as(u32, 1) << bit_idx);
+                    }
+                }
+
+                for (self.contains_regexes, 0..) |*inc_re, ri| {
+                    const bit_idx: u5 = @intCast(1 + pos_lit_count + ri);
+                    if (inc_re.findWithScratch(line_text, 0, .leftmost_first, &regex_scratch) != null) {
+                        mask |= (@as(u32, 1) << bit_idx);
+                    }
+                }
+
+                const matches_user_primary = if (self.swapped_primary_regex_first and self.contains_regexes.len > 0)
+                    ((mask & (@as(u32, 1) << @intCast(1 + pos_lit_count))) != 0)
+                else if (self.swapped_primary_finder) |*pf|
+                    (pf.find(line_text, 0, .leftmost_first) != null)
+                else
+                    m0;
+
+                lines.append(self.gpa, .{
+                    .text = line_text,
+                    .mask = mask,
+                    .excluded = excluded,
+                    .matches_user_primary = matches_user_primary,
+                }) catch break;
+            }
+
+            const line_items = lines.items;
+            if (line_items.len == 0) continue;
+
+            var file_emitted: u64 = 0;
+            var last_emitted_idx: ?usize = null;
+
+            for (line_items, 0..) |li, idx| {
+                if (li.excluded or li.mask == 0) continue;
+                const w_start = idx -| block_radius;
+                const w_end = @min(line_items.len, idx + block_radius + 1);
+
+                var union_mask: u32 = 0;
+                for (line_items[w_start..w_end]) |w_li| {
+                    if (!w_li.excluded) {
+                        union_mask |= w_li.mask;
+                    }
+                }
+                if ((union_mask & required_mask) != required_mask) continue;
+
+                // Prefer emitting anchor lines that either match at least 2 query terms (e.g. `pub(crate) async fn`)
+                // or match the rarest term (`m0`) when no multi-term anchor was just emitted within 12 lines.
+                const pop = @popCount(li.mask);
+                const is_strong_anchor = (pop >= 2) or ((li.mask & 1) != 0 and total_preds == 2);
+                if (!is_strong_anchor) continue;
+
+                if (last_emitted_idx) |prev_idx| {
+                    if (idx - prev_idx <= 4 and pop <= @popCount(line_items[prev_idx].mask)) {
+                        continue;
+                    }
+                }
+                last_emitted_idx = idx;
+
+                const safe_text = file_api.sanitizeUtf8Truncated(self.job_arena, li.text, 4096) catch continue;
+                const text_duped = if (safe_text.ptr == li.text.ptr)
+                    (self.job_arena.dupe(u8, safe_text) catch continue)
+                else
+                    safe_text;
+
+                var raw_prev: ?[]const u8 = null;
+                {
+                    var p = idx;
+                    while (p > w_start) {
+                        p -= 1;
+                        if (!line_items[p].excluded and (line_items[p].mask & ~li.mask) != 0) {
+                            raw_prev = line_items[p].text;
+                            break;
+                        }
+                    }
+                    if (raw_prev == null) {
+                        var b_steps: usize = 0;
+                        var bp = idx;
+                        while (bp > 0 and b_steps < 3) : (b_steps += 1) {
+                            bp -= 1;
+                            if (std.mem.trim(u8, line_items[bp].text, " \t\r").len > 0) {
+                                raw_prev = line_items[bp].text;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                var raw_next: ?[]const u8 = null;
+                {
+                    var n = idx + 1;
+                    while (n < w_end) : (n += 1) {
+                        if (!line_items[n].excluded and (line_items[n].mask & ~li.mask) != 0) {
+                            raw_next = line_items[n].text;
+                            break;
+                        }
+                    }
+                    if (raw_next == null) {
+                        var f_steps: usize = 0;
+                        var fn_idx = idx + 1;
+                        while (fn_idx < line_items.len and f_steps < 3) : ({
+                            fn_idx += 1;
+                            f_steps += 1;
+                        }) {
+                            if (std.mem.trim(u8, line_items[fn_idx].text, " \t\r").len > 0) {
+                                raw_next = line_items[fn_idx].text;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                const prev_duped: ?[]const u8 = if (raw_prev) |rp| blk: {
+                    const sp = file_api.sanitizeUtf8Truncated(self.job_arena, rp, 240) catch break :blk null;
+                    break :blk if (sp.ptr == rp.ptr) (self.job_arena.dupe(u8, sp) catch null) else sp;
+                } else null;
+
+                const next_duped: ?[]const u8 = if (raw_next) |rn| blk: {
+                    const sn = file_api.sanitizeUtf8Truncated(self.job_arena, rn, 240) catch break :blk null;
+                    break :blk if (sn.ptr == rn.ptr) (self.job_arena.dupe(u8, sn) catch null) else sn;
+                } else null;
+
+                var spans_list: std.ArrayList(HitSpan) = .empty;
+                self.collectAllQueryTermSpans(task, text_duped, parsed_case, &spans_list);
+
+                const col: u64 = if (spans_list.items.len > 0)
+                    @intCast(spans_list.items[0].start + 1)
+                else
+                    1;
+
+                fallback_hits.append(self.job_arena, .{
+                    .file = self.job_arena.dupe(u8, task.rel_path) catch continue,
+                    .line = @intCast(idx + 1),
+                    .col = col,
+                    .text = text_duped,
+                    .prevText = prev_duped,
+                    .nextText = next_duped,
+                    .replaced = null,
+                    .isContext = false,
+                    .spans = spans_list.items,
+                }) catch break;
+
+                file_emitted += 1;
+                if (max_res > 0 and fallback_hits.items.len >= max_res) {
+                    limit_hit = true;
+                    break;
+                }
+            }
+
+            if (file_emitted > 0) {
+                matched_files_count += 1;
+                task.emitted_in_file = file_emitted;
+            }
+            if (limit_hit) break;
+        }
+
+        if (fallback_hits.items.len == 0) return false;
+
+        const total_emitted: u64 = @intCast(fallback_hits.items.len);
+        self.files_matched.store(matched_files_count, .release);
+        self.total_matches.store(total_emitted, .release);
+        self.matched_lines.store(total_emitted, .release);
+        self.hit_max_results.store(limit_hit, .release);
+        self.nearby_used = true;
+
+        self.flushItemsSliceToSender(fallback_hits.items);
+        return true;
+    }
+
+    fn collectAllQueryTermSpans(
+        self: *JobRunner,
+        task: *const FileTask,
+        text: []const u8,
+        parsed_case: libwebgrep.CaseMode,
+        spans_list: *std.ArrayList(HitSpan),
+    ) void {
+        const RawByteSpan = struct {
+            start: usize,
+            end: usize,
+        };
+        var raw_spans: std.ArrayList(RawByteSpan) = .empty;
+        defer raw_spans.deinit(self.gpa);
+
+        // 1. Primary matcher spans
+        switch (self.matcher.*) {
+            .literal => |f_val| {
+                var f = f_val;
+                var bpos: usize = 0;
+                while (bpos <= text.len) {
+                    const hit = f.find(text, bpos, .leftmost_first) orelse break;
+                    if (hit.start < bpos or hit.end > text.len) break;
+                    if (hit.end > hit.start) {
+                        raw_spans.append(self.gpa, .{ .start = hit.start, .end = hit.end }) catch break;
+                    }
+                    if (hit.end <= bpos) break;
+                    bpos = hit.end;
+                }
+            },
+            .multi => |*m| {
+                var bpos: usize = 0;
+                while (bpos <= text.len) {
+                    const hit = m.find(text, bpos, .leftmost_first) orelse break;
+                    if (hit.start < bpos or hit.end > text.len) break;
+                    if (hit.end > hit.start) {
+                        raw_spans.append(self.gpa, .{ .start = hit.start, .end = hit.end }) catch break;
+                    }
+                    if (hit.end <= bpos) break;
+                    bpos = hit.end;
+                }
+            },
+            .regex => |*r| {
+                var bpos: usize = 0;
+                while (bpos <= text.len) {
+                    const hit = r.findReadOnly(text, bpos, .leftmost_first) orelse break;
+                    if (hit.start < bpos or hit.end > text.len) break;
+                    if (hit.end > hit.start) {
+                        raw_spans.append(self.gpa, .{ .start = hit.start, .end = hit.end }) catch break;
+                    }
+                    if (hit.end <= bpos) break;
+                    bpos = hit.end;
+                }
+            },
+        }
+
+        // 2. Literal `effective_contains` spans
+        for (task.effective_contains) |inc_lit| {
+            if (inc_lit.len == 0) continue;
+            var f = libwebgrep.Finder.init(inc_lit, .{ .case = parsed_case }) catch continue;
+            var bpos: usize = 0;
+            while (bpos <= text.len) {
+                const hit = f.find(text, bpos, .leftmost_first) orelse break;
+                if (hit.start < bpos or hit.end > text.len) break;
+                if (hit.end > hit.start) {
+                    raw_spans.append(self.gpa, .{ .start = hit.start, .end = hit.end }) catch break;
+                }
+                if (hit.end <= bpos) break;
+                bpos = hit.end;
+            }
+        }
+
+        // 3. Regex `contains_regexes` spans
+        for (self.contains_regexes) |*inc_re| {
+            var bpos: usize = 0;
+            while (bpos <= text.len) {
+                const hit = inc_re.findReadOnly(text, bpos, .leftmost_first) orelse break;
+                if (hit.start < bpos or hit.end > text.len) break;
+                if (hit.end > hit.start) {
+                    raw_spans.append(self.gpa, .{ .start = hit.start, .end = hit.end }) catch break;
+                }
+                if (hit.end <= bpos) break;
+                bpos = hit.end;
+            }
+        }
+
+        if (raw_spans.items.len == 0) return;
+
+        // Sort and merge overlapping byte spans
+        const SortCtx = struct {
+            pub fn lessThan(_: void, a: RawByteSpan, b: RawByteSpan) bool {
+                if (a.start != b.start) return a.start < b.start;
+                return a.end < b.end;
+            }
+        };
+        std.mem.sort(RawByteSpan, raw_spans.items, {}, SortCtx.lessThan);
+
+        var merged_end: usize = 0;
+        for (raw_spans.items, 0..) |sp, i| {
+            if (i == 0) {
+                spans_list.append(self.job_arena, .{
+                    .start = FileSink.utf8ByteToUtf16Offset(text, sp.start),
+                    .end = FileSink.utf8ByteToUtf16Offset(text, sp.end),
+                }) catch return;
+                merged_end = sp.end;
+            } else if (sp.start < merged_end) {
+                if (sp.end > merged_end) {
+                    merged_end = sp.end;
+                    spans_list.items[spans_list.items.len - 1].end = FileSink.utf8ByteToUtf16Offset(text, merged_end);
+                }
+            } else {
+                spans_list.append(self.job_arena, .{
+                    .start = FileSink.utf8ByteToUtf16Offset(text, sp.start),
+                    .end = FileSink.utf8ByteToUtf16Offset(text, sp.end),
+                }) catch return;
+                merged_end = sp.end;
+            }
+        }
     }
 };
 
@@ -2349,7 +2924,7 @@ const WorkerContext = struct {
     local_matcher: MatcherUnion,
     batch_arena: *std.heap.ArenaAllocator,
     batch_items: std.ArrayList(HitItem) = .empty,
-    search_scratch: *[]u8,
+    scratch_pool: *libwebgrep.Scratch,
     last_flush_ts: std.Io.Timestamp,
 
     fn searchOneTask(self: *WorkerContext, task: *FileTask) void {
@@ -2403,14 +2978,15 @@ const WorkerContext = struct {
             .excludes_regexes = self.runner.excludes_regexes,
             .replacement = replacement,
             .context = @min(self.runner.req.context, libwebgrep.SearchConfig.context_lines_hard_cap),
-            .buffer_size = 256 * 1024,
+            .buffer_size = libwebgrep.SearchConfig.optimalBufferSize(self.runner.active_worker_count),
             .progress_interval = 512 * 1024,
             .max_source_bytes = null,
             .max_request_bytes = null,
             .max_output_bytes = null,
             .time_budget_ns = null,
+            .allocator = self.runner.gpa,
             .decode_allocator = self.runner.gpa,
-            .scratch = self.search_scratch,
+            .scratch_pool = self.scratch_pool,
             .cancel = self.runner.cancel_flag,
         };
 
@@ -2452,6 +3028,7 @@ const WorkerContext = struct {
 
         const maybe_res = if (hot_lease) |lease| blk_mmap: {
             var active_slice = lease.slice;
+            sink.full_slice = lease.slice;
             if (has_time_filter) {
                 const narrowed = narrowMmapSliceByTimeRangeWithYear(
                     lease.slice,
@@ -2473,6 +3050,12 @@ const WorkerContext = struct {
                     }
                 }
             }
+            if (active_slice.len > 0 and
+                @intFromPtr(active_slice.ptr) >= @intFromPtr(lease.slice.ptr) and
+                @intFromPtr(active_slice.ptr) <= @intFromPtr(lease.slice.ptr) + lease.slice.len)
+            {
+                sink.active_slice_offset = @intFromPtr(active_slice.ptr) - @intFromPtr(lease.slice.ptr);
+            }
             break :blk_mmap (switch (self.local_matcher) {
                 .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, f, cfg),
                 .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, m, cfg),
@@ -2484,6 +3067,9 @@ const WorkerContext = struct {
                 return;
             };
             defer file.close(self.runner.io);
+            if (compression == .none) {
+                sink.open_file = file;
+            }
 
             if (has_time_filter and compression == .none) {
                 var peek_buf: [256]u8 = undefined;
@@ -2655,12 +3241,16 @@ const WorkerContext = struct {
                             self.runner.collected_hits_overflow = true;
                             break;
                         };
+                        const prev_dup = if (it.prevText) |pt| (j_arena.dupe(u8, pt) catch null) else null;
+                        const next_dup = if (it.nextText) |nt| (j_arena.dupe(u8, nt) catch null) else null;
                         const rep_dup = if (it.replaced) |r| (j_arena.dupe(u8, r) catch null) else null;
                         self.runner.collected_hits.append(j_arena, .{
                             .file = file_dup,
                             .line = it.line,
                             .col = it.col,
                             .text = text_dup,
+                            .prevText = prev_dup,
+                            .nextText = next_dup,
                             .replaced = rep_dup,
                             .isContext = it.isContext,
                             .spans = spans_dup,
@@ -2685,6 +3275,58 @@ const WorkerContext = struct {
     }
 };
 
+const NeighborLines = struct {
+    prev: ?[]const u8 = null,
+    next: ?[]const u8 = null,
+};
+
+fn extractNeighborLines(slice: []const u8, pos_in_line: usize, partial_head: bool, partial_tail: bool) NeighborLines {
+    if (slice.len == 0 or pos_in_line > slice.len) return .{};
+    const line_start = findLineStartAtOrBefore(slice, pos_in_line);
+    if (line_start == 0 and partial_head) return .{};
+    const line_end = std.mem.indexOfScalarPos(u8, slice, line_start, '\n') orelse slice.len;
+
+    var prev_line: ?[]const u8 = null;
+    var cur_end = line_start;
+    var b_steps: usize = 0;
+    while (cur_end > 0 and b_steps < 3) : (b_steps += 1) {
+        const p_end = cur_end - 1;
+        const p_start = findLineStartAtOrBefore(slice, p_end);
+        if (p_start == 0 and partial_head) break;
+        const cand = std.mem.trimEnd(u8, slice[p_start..p_end], "\r");
+        if (std.mem.trim(u8, cand, " \t").len > 0) {
+            prev_line = cand;
+            break;
+        }
+        cur_end = p_start;
+    }
+
+    var next_line: ?[]const u8 = null;
+    var cur_start = if (line_end < slice.len) line_end + 1 else slice.len;
+    var f_steps: usize = 0;
+    while (cur_start < slice.len and f_steps < 3) : (f_steps += 1) {
+        const n_end_opt = std.mem.indexOfScalarPos(u8, slice, cur_start, '\n');
+        if (n_end_opt == null and partial_tail) break;
+        const n_end = n_end_opt orelse slice.len;
+        const cand = std.mem.trimEnd(u8, slice[cur_start..n_end], "\r");
+        if (std.mem.trim(u8, cand, " \t").len > 0) {
+            next_line = cand;
+            break;
+        }
+        cur_start = if (n_end < slice.len) n_end + 1 else slice.len;
+    }
+
+    return .{ .prev = prev_line, .next = next_line };
+}
+
+fn unwrapOffset(val: anytype) u64 {
+    return switch (@typeInfo(@TypeOf(val))) {
+        .optional => val orelse 0,
+        .int, .comptime_int => @intCast(val),
+        else => 0,
+    };
+}
+
 const FileSink = struct {
     worker: *WorkerContext,
     task: *FileTask,
@@ -2697,6 +3339,9 @@ const FileSink = struct {
     is_time_series: bool = false,
     fallback_year: u16 = 2026,
     last_line_ns: u64 = 0,
+    full_slice: ?[]const u8 = null,
+    active_slice_offset: usize = 0,
+    open_file: ?std.Io.File = null,
 
     fn toLineEvent(self: *const FileSink, line: libwebgrep.Line) libwebgrep.LineEvent {
         const u16_column = if (line.matches.len > 0)
@@ -2840,9 +3485,51 @@ const FileSink = struct {
             break :blk if (safe_rep.ptr == rep.ptr) try arena.dupe(u8, safe_rep) else safe_rep;
         } else null;
 
+        var prev_duped: ?[]const u8 = null;
+        var next_duped: ?[]const u8 = null;
+
         var spans_list: std.ArrayList(HitSpan) = .empty;
         const runner = self.worker.runner;
         if (!is_context) {
+            const raw_off_u64 = blk_off: {
+                const r_off = unwrapOffset(line.raw_offset);
+                break :blk_off if (r_off > 0) r_off else unwrapOffset(line.absolute_offset);
+            };
+            var win_buf: [1536]u8 = undefined;
+            const neighbors: NeighborLines = if (self.full_slice) |full| blk_full: {
+                const slice_start = @intFromPtr(full.ptr);
+                const slice_end = slice_start + full.len;
+                const bytes_ptr = @intFromPtr(line.bytes.ptr);
+                const approx_pos: usize = if (line.bytes.len > 0 and bytes_ptr >= slice_start and bytes_ptr <= slice_end)
+                    bytes_ptr - slice_start
+                else
+                    @min(full.len, self.active_slice_offset + @as(usize, @intCast(raw_off_u64)));
+                break :blk_full extractNeighborLines(full, approx_pos, false, false);
+            } else if (self.open_file) |f| blk_file: {
+                const win_start: u64 = raw_off_u64 -| 512;
+                const n = f.readPositionalAll(runner.io, &win_buf, win_start) catch 0;
+                if (n > 0 and raw_off_u64 >= win_start and (raw_off_u64 - win_start) <= n) {
+                    break :blk_file extractNeighborLines(
+                        win_buf[0..n],
+                        @intCast(raw_off_u64 - win_start),
+                        win_start > 0,
+                        n == win_buf.len,
+                    );
+                }
+                break :blk_file .{};
+            } else .{};
+
+            if (neighbors.prev) |rp| {
+                if (file_api.sanitizeUtf8Truncated(arena, rp, 240)) |sp| {
+                    prev_duped = if (sp.ptr == rp.ptr) (arena.dupe(u8, sp) catch null) else sp;
+                } else |_| {}
+            }
+            if (neighbors.next) |rn| {
+                if (file_api.sanitizeUtf8Truncated(arena, rn, 240)) |sn| {
+                    next_duped = if (sn.ptr == rn.ptr) (arena.dupe(u8, sn) catch null) else sn;
+                } else |_| {}
+            }
+
             if (runner.swapped_primary_regex_first and runner.contains_regexes.len > 0) {
                 const primary_re = &runner.contains_regexes[0];
                 var bpos: usize = 0;
@@ -2895,6 +3582,8 @@ const FileSink = struct {
             .line = if (line.line_number > 0) line.line_number else 1,
             .col = col,
             .text = text_duped,
+            .prevText = prev_duped,
+            .nextText = next_duped,
             .replaced = replaced_duped,
             .isContext = is_context,
             .spans = spans_list.items,
@@ -3970,4 +4659,144 @@ test "search_job: dual-granularity time filter on ISO-8601/Nginx/JSONL logs (wit
         .timeEndNs = now_ns +| (60 * std.time.ns_per_s),
     }, &cancel, .{ .ctx = &col_recent, .sendFn = SimpleCollector.send });
     try std.testing.expectEqual(@as(u64, 2), col_recent.matched_lines);
+}
+
+test "search_job: $@(zedis-rust) pub fn async members falls back to ±15-line block proximity when terms span doc-comment and function signature" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "zedis-rust/states/server");
+    const set_rs =
+        "/// Performs the initial load of a Redis SET value.\n" ++
+        "///\n" ++
+        "/// Fetches the total cardinality (SCARD) and loads the first batch of members (up to 100).\n" ++
+        "///\n" ++
+        "/// # Arguments\n" ++
+        "/// * `conn` - Redis asynchronous connection\n" ++
+        "/// * `key` - The SET key to load\n" ++
+        "pub(crate) async fn first_load_set_value(conn: &mut RedisAsyncConn, key: &str) -> Result<RedisValue> {\n" ++
+        "    // Get total number of members in the SET\n" ++
+        "    let size: usize = cmd(\"SCARD\").arg(key).query_async(conn).await?;\n" ++
+        "}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "zedis-rust/states/server/set.rs", .data = set_rs });
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root_real = try gpa.dupe(u8, path_buf[0..n]);
+    defer gpa.free(root_real);
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, root_real, null);
+    defer reg.deinit(io);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const zedis_dir_path = try std.fmt.allocPrint(arena_state.allocator(), "{s}/zedis-rust", .{root_real});
+    try reg.upsertSource(arena_state.allocator(), io, .{
+        .kind = "dir",
+        .name = "zedis-rust",
+        .path = zedis_dir_path,
+        .enabled = true,
+    });
+
+    const BlockCollector = struct {
+        allocator: std.mem.Allocator,
+        matched_lines: u64 = 0,
+        first_line_no: u64 = 0,
+        span_count: usize = 0,
+        nearby_lines: u32 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
+                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                if (parsed.value.items.len > 0 and self.first_line_no == 0) {
+                    self.first_line_no = parsed.value.items[0].line;
+                    self.span_count = parsed.value.items[0].spans.len;
+                }
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+                self.nearby_lines = parsed.value.nearbyLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    var col = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 99,
+        .pattern = "pub",
+        .contains = &.{ "fn", "async", "members" },
+        .globs = &.{"zedis-rust"},
+        .sources = &.{"other-unrelated-source"},
+    }, &cancel, .{ .ctx = &col, .sendFn = BlockCollector.send });
+
+    try std.testing.expect(col.matched_lines >= 1);
+    try std.testing.expectEqual(@as(u64, 8), col.first_line_no);
+    try std.testing.expect(col.span_count >= 3);
+    try std.testing.expectEqual(@as(u32, 15), col.nearby_lines);
+
+    // Same query again: L1/L2 must not have cached the fallback hits as strict single-line results,
+    // and the nearby fallback must still kick in (previously a cached "0 hits" could be replayed).
+    var col_again = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 100,
+        .pattern = "pub",
+        .contains = &.{ "fn", "async", "members" },
+        .globs = &.{"zedis-rust"},
+    }, &cancel, .{ .ctx = &col_again, .sendFn = BlockCollector.send });
+    try std.testing.expectEqual(col.matched_lines, col_again.matched_lines);
+    try std.testing.expectEqual(@as(u32, 15), col_again.nearby_lines);
+
+    // `nearbyLines = 0` keeps the search strictly single-line.
+    var col_strict = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 101,
+        .pattern = "pub",
+        .contains = &.{ "fn", "async", "members" },
+        .nearbyLines = 0,
+    }, &cancel, .{ .ctx = &col_strict, .sendFn = BlockCollector.send });
+    try std.testing.expectEqual(@as(u64, 0), col_strict.matched_lines);
+    try std.testing.expectEqual(@as(u32, 0), col_strict.nearby_lines);
+
+    // `fileGlobs`: `@*.rs` keeps set.rs, `-@*.rs` drops it.
+    var col_glob = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 102,
+        .pattern = "SCARD",
+        .fileGlobs = &.{"server/*.rs"},
+    }, &cancel, .{ .ctx = &col_glob, .sendFn = BlockCollector.send });
+    try std.testing.expectEqual(@as(u64, 2), col_glob.matched_lines);
+
+    var col_glob_neg = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 103,
+        .pattern = "SCARD",
+        .fileGlobs = &.{"!*.rs"},
+    }, &cancel, .{ .ctx = &col_glob_neg, .sendFn = BlockCollector.send });
+    try std.testing.expectEqual(@as(u64, 0), col_glob_neg.matched_lines);
+}
+
+test "search_job: libwebgrep v0.4.1 alt_prefilter & precomputed_dfa selectivity planner" {
+    const gpa = std.testing.allocator;
+
+    var re_alt = try libwebgrep.Regex.init(gpa, "ERROR_CRITICAL|FATAL_PANIC", .{ .case = .sensitive });
+    defer re_alt.deinit();
+    try std.testing.expect(re_alt.alt_prefilter != null);
+    // An 11-char exact alternation (`min_alt_len = 11`) must outscore a weak 2-char literal `in` (`25`).
+    try std.testing.expect(computeRegexSelectivity(&re_alt) > computeLiteralSelectivity("in"));
+
+    var re_dfa = try libwebgrep.Regex.init(gpa, "\\d{4}", .{ .case = .sensitive });
+    defer re_dfa.deinit();
+    // Unanchored digit regex has no literal prefilter and must still score lower than any 2+ char literal.
+    try std.testing.expect(computeRegexSelectivity(&re_dfa) < computeLiteralSelectivity("fn"));
 }

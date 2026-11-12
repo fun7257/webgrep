@@ -1,15 +1,25 @@
 <script lang="ts">
-  import { parseDollarFlags, workbench } from '$lib/state.svelte';
+  import { workbench } from '$lib/state.svelte';
   import type { SearchHistoryEntry } from '$lib/types';
   import {
-    Check,
     Clock,
+    Lightbulb,
     FolderGit2,
     Loader2,
     Search,
     X,
   } from 'lucide-svelte';
   import SymbolBar from './SymbolBar.svelte';
+  import {
+    buildVocabulary,
+    collectPlaces,
+    computeCompletion,
+    describeQuery,
+    ghostSuffix,
+    historyGhost,
+    queryTips,
+    type Suggestion,
+  } from '$lib/suggest';
 
   interface Props {
     inputEl?: HTMLInputElement | null;
@@ -17,72 +27,88 @@
   }
 
   let { inputEl = $bindable(null), hero = false }: Props = $props();
-  let selectedSuggestIdx = $state(0);
+  let selectedSuggestIdx = $state(-1);
   let selectedHistoryIdx = $state(-1);
   let suggestDismissed = $state(true);
   let isInputFocused = $state(false);
   let cursorPos = $state(-1);
+  /** Input text wider than the box (ghost text would be misaligned, so it is hidden). */
+  let inputOverflowing = $state(false);
 
   function syncCursorPos() {
     if (inputEl && typeof inputEl.selectionStart === 'number') {
       cursorPos = inputEl.selectionStart;
+      inputOverflowing = inputEl.scrollWidth > inputEl.clientWidth + 1;
     } else {
       cursorPos = workbench.pattern.length;
     }
   }
 
-  interface ScopeSuggestItem {
-    id: string;
-    label: string;
-    path: string;
-    enabled: boolean;
-  }
+  // Smart completion & hints (pure logic in `$lib/suggest`).
+  let places = $derived(collectPlaces(workbench.fileGroups.map((g) => g.file)));
+  let vocabulary = $derived(
+    workbench.flatHits.length > 0 ? buildVocabulary(workbench.flatHits.map((h) => h.text)) : null
+  );
+  let historyPatterns = $derived(workbench.searchHistory.map((h) => h.pattern));
 
-  // Detect if the active token at cursor (or end of input) is an @project query
-  let activeAtToken = $derived.by(() => {
-    const raw = workbench.pattern;
-    const head =
-      cursorPos >= 0 && cursorPos <= raw.length ? raw.slice(0, cursorPos) : raw;
-    const tail =
-      cursorPos >= 0 && cursorPos <= raw.length ? raw.slice(cursorPos) : '';
-    if (tail.length > 0 && !/^\s/.test(tail)) return null;
+  let completion = $derived.by(() => {
+    const empty = { token: null, items: [] as Suggestion[], autoSelect: false };
+    if (suggestDismissed || !isInputFocused) return empty;
+    return computeCompletion({
+      pattern: workbench.pattern,
+      cursor: cursorPos,
+      sources: workbench.sources,
+      places,
+      vocabulary,
+      starters: workbench.searchHistory.length === 0,
+      t: workbench.t.suggest,
+    });
+  });
+  let activeToken = $derived(completion.token);
 
-    const match = /(?:^|\s)([-!]?@)([^\s]*)$/.exec(head);
-    if (!match) return null;
-    const tokenStart = match.index + (head[match.index] === ' ' ? 1 : 0);
-    return {
-      prefix: match[1],
-      rawQuery: match[2],
-      query: match[2].toLowerCase(),
-      tokenStart,
-      tokenEnd: head.length,
-    };
+  let effectiveSuggestIdx = $derived(
+    completion.items.length === 0
+      ? -1
+      : selectedSuggestIdx >= 0
+        ? Math.min(selectedSuggestIdx, completion.items.length - 1)
+        : completion.autoSelect
+          ? 0
+          : -1
+  );
+
+  /** Item that Tab / → would take: the highlighted one, else the first. */
+  let tabItem = $derived(completion.items[Math.max(0, effectiveSuggestIdx)] ?? null);
+
+  /** Fish-style ghost text after the cursor (only when the cursor is at the end and the text fits). */
+  let ghost = $derived.by((): { text: string; item: Suggestion | null } => {
+    const pat = workbench.pattern;
+    if (!isInputFocused || inputOverflowing || (cursorPos >= 0 && cursorPos < pat.length)) {
+      return { text: '', item: null };
+    }
+    if (tabItem && activeToken) {
+      const text = ghostSuffix(tabItem.insert, activeToken.text);
+      if (text) return { text, item: tabItem };
+    }
+    if (completion.items.length === 0 && !suggestDismissed) {
+      const text = historyGhost(pat, historyPatterns);
+      if (text) return { text, item: null };
+    }
+    return { text: '', item: null };
   });
 
-  // Detect if the active token at cursor (or end of input) is a scoped $ modifier query (e.g. "$", "$r", "$c", "$w", "$rc")
-  let activeDollarToken = $derived.by(() => {
-    const raw = workbench.pattern;
-    const head =
-      cursorPos >= 0 && cursorPos <= raw.length ? raw.slice(0, cursorPos) : raw;
-    const tail =
-      cursorPos >= 0 && cursorPos <= raw.length ? raw.slice(cursorPos) : '';
-    if (tail.length > 0 && !/^\s/.test(tail)) return null;
+  let parsedForTips = $derived(workbench.parsedQuery);
+  let tips = $derived(
+    isInputFocused && !suggestDismissed && workbench.pattern.trim()
+      ? queryTips(workbench.pattern, parsedForTips, workbench.sources, workbench.t.suggest)
+      : []
+  );
+  let explanation = $derived(
+    isInputFocused && !suggestDismissed ? describeQuery(parsedForTips, workbench.t.suggest) : ''
+  );
 
-    const match = /(?:^|\s)([-+!]?\$)([^\s(]*)$/.exec(head);
-    if (!match) return null;
-    const tokenStart = match.index + (head[match.index] === ' ' ? 1 : 0);
-    return {
-      prefix: match[1],
-      query: match[2].toLowerCase(),
-      tokenStart,
-      tokenEnd: head.length,
-    };
-  });
-
-  // Google-style search history suggestions:
-  // Shown when input is focused, neither @scope nor $flag autocomplete is active, and not dismissed.
+  // Google-style search history suggestions (only when no completion is showing).
   let historySuggestions = $derived.by((): SearchHistoryEntry[] => {
-    if (!isInputFocused || suggestDismissed || activeAtToken || activeDollarToken) {
+    if (!isInputFocused || suggestDismissed || completion.items.length > 0) {
       return [];
     }
     const all = workbench.searchHistory;
@@ -100,191 +126,124 @@
       .slice(0, 6);
   });
 
-  // Project-only @ autocomplete: only recognizes configured projects (by name or UUID)
-  let scopeSuggestions = $derived.by((): ScopeSuggestItem[] => {
-    if (!activeAtToken || suggestDismissed) return [];
-    const q = activeAtToken.query.replace(/^[/\\-]+/, '');
-    const out: ScopeSuggestItem[] = [];
-    const maxItems = 12;
-
-    for (const src of workbench.sources) {
-      if (out.length >= maxItems) break;
-      if (
-        !q ||
-        src.name.toLowerCase().includes(q) ||
-        src.id.toLowerCase().includes(q)
-      ) {
-        out.push({
-          id: src.id,
-          label: src.name,
-          path: src.path,
-          enabled: src.enabled,
-        });
-      }
-    }
-
-    return out;
-  });
-
-  let flagSuggestions = $derived.by(() => {
-    if (!activeDollarToken || suggestDismissed) return [];
-    const q = activeDollarToken.query;
-
-    const primaryFlags = [
-      {
-        token: '$r()',
-        badge: '.*',
-        label: workbench.t.searchBar.flagRegexLabel,
-        desc: workbench.t.searchBar.flagRegexDesc,
-        aliases: ['r', 're', 'regex', '.*'],
-        disabled: false,
-      },
-      {
-        token: '$c()',
-        badge: 'Aa',
-        label: workbench.t.searchBar.flagCaseLabel,
-        desc: workbench.t.searchBar.flagCaseDesc,
-        aliases: ['c', 'case', 'aa', 's'],
-        disabled: false,
-      },
-      {
-        token: '$w()',
-        badge: '\\b',
-        label: workbench.t.searchBar.flagWordLabel,
-        desc: workbench.t.searchBar.flagWordDesc,
-        aliases: ['w', 'word', 'b', '\\b'],
-        disabled: false,
-      },
-      {
-        token: '$t()',
-        badge: '⏱',
-        label: workbench.t.searchBar.flagTimeLabel,
-        desc: workbench.t.searchBar.flagTimeDesc,
-        aliases: ['t', 'time', '15m', '1h', '24h'],
-        disabled: false,
-      },
-    ];
-
-    const comboFlags = [
-      {
-        token: '$rc()',
-        badge: '.* Aa',
-        label:
-          workbench.t.ui.comboRc,
-        desc: '',
-        aliases: ['rc', 'cr'],
-        disabled: false,
-      },
-      {
-        token: '$rw()',
-        badge: '.* \\b',
-        label:
-          workbench.t.ui.comboRw,
-        desc: '',
-        aliases: ['rw', 'wr'],
-        disabled: false,
-      },
-      {
-        token: '$cw()',
-        badge: 'Aa \\b',
-        label:
-          workbench.t.ui.comboCw,
-        desc: '',
-        aliases: ['cw', 'wc'],
-        disabled: false,
-      },
-      {
-        token: '$rcw()',
-        badge: '.* Aa \\b',
-        label:
-          workbench.t.ui.comboRcw,
-        desc: '',
-        aliases: ['rcw', 'rwc', 'crw', 'cwr', 'wrc', 'wcr'],
-        disabled: false,
-      },
-    ];
-
-    if (!q) return primaryFlags;
-    const allFlags = [...primaryFlags, ...comboFlags];
-    return allFlags.filter(
-      (item) =>
-        item.token.slice(1, -2).startsWith(q) ||
-        item.aliases.some((a) => a.startsWith(q)) ||
-        item.label.toLowerCase().includes(q)
-    );
-  });
-
-  let effectiveFlagIdx = $derived.by(() => {
-    if (flagSuggestions.length === 0) return -1;
-    const candidate = flagSuggestions[selectedSuggestIdx];
-    if (candidate && !candidate.disabled) return selectedSuggestIdx;
-    return flagSuggestions.findIndex((item) => !item.disabled);
-  });
-
   const hasOpenDropdown = $derived(
-    (flagSuggestions.length > 0 && Boolean(activeDollarToken)) ||
-      (scopeSuggestions.length > 0 && Boolean(activeAtToken)) ||
-      historySuggestions.length > 0
+    completion.items.length > 0 || historySuggestions.length > 0 || tips.length > 0 || explanation !== ''
   );
 
   const showSymbolBar = $derived(workbench.isCompact && isInputFocused);
   const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
 
-  function applyScopeSuggestion(scopeLabel: string) {
-    if (!activeAtToken) return;
-    const before = workbench.pattern.slice(0, activeAtToken.tokenStart);
-    const after = workbench.pattern.slice(activeAtToken.tokenEnd);
-    const inserted = `${activeAtToken.prefix}${scopeLabel} `;
-    workbench.pattern = `${before}${inserted}${after.replace(/^\s+/, '')}`;
-    const nextCursor = before.length + inserted.length;
-    cursorPos = nextCursor;
+  function setPatternAndCursor(next: string, cursor: number, search: boolean) {
+    workbench.pattern = next;
+    cursorPos = cursor;
     suggestDismissed = false;
-    selectedSuggestIdx = 0;
-    workbench.scheduleSearch(true);
+    selectedSuggestIdx = -1;
+    if (search) workbench.scheduleSearch(true);
     requestAnimationFrame(() => {
       inputEl?.focus();
-      inputEl?.setSelectionRange(nextCursor, nextCursor);
+      inputEl?.setSelectionRange(cursor, cursor);
+      syncCursorPos();
     });
   }
 
-  function applyFlagSuggestion(flagToken: string) {
-    if (!activeDollarToken) return;
-    const before = workbench.pattern.slice(0, activeDollarToken.tokenStart);
-    const after = workbench.pattern.slice(activeDollarToken.tokenEnd);
-    const signPrefix = activeDollarToken.prefix.startsWith('-')
-      ? '-'
-      : activeDollarToken.prefix.startsWith('+')
-        ? '+'
-        : activeDollarToken.prefix.startsWith('!')
-          ? '!'
-          : '';
-    const inserted = `${signPrefix}${flagToken}`;
-    workbench.pattern = `${before}${inserted}${after}`;
-    const nextCursor = before.length + inserted.length - 1;
-    cursorPos = nextCursor;
-    suggestDismissed = false;
-    selectedSuggestIdx = 0;
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.setSelectionRange(nextCursor, nextCursor);
-    });
+  function applySuggestion(item: Suggestion) {
+    if (!activeToken) return;
+    const before = workbench.pattern.slice(0, activeToken.start);
+    const after = workbench.pattern.slice(activeToken.end);
+    const inserted = item.complete ? `${item.insert} ` : item.insert;
+    setPatternAndCursor(
+      `${before}${inserted}${item.complete ? after.replace(/^\s+/, '') : after}`,
+      before.length + inserted.length,
+      item.complete
+    );
+  }
+
+  /** Accepts the ghost text: the suggestion it came from, or the rest of a history query. */
+  function acceptGhost(): boolean {
+    if (!ghost.text) return false;
+    if (ghost.item) {
+      applySuggestion(ghost.item);
+    } else {
+      const next = `${workbench.pattern}${ghost.text}`;
+      setPatternAndCursor(next, next.length, true);
+    }
+    return true;
+  }
+
+  function applyTipFix(next: string) {
+    setPatternAndCursor(next, next.length, true);
   }
 
   function insertSymbol(sym: string) {
     if (!inputEl) return;
     const raw = workbench.pattern;
-    const pos = Math.min(inputEl.selectionStart ?? raw.length, raw.length);
+    const selStart = Math.min(inputEl.selectionStart ?? raw.length, raw.length);
+    const selEnd = Math.min(inputEl.selectionEnd ?? selStart, raw.length);
+
+    // Smart in-place wrapping for paired tokens (`//` regex via Alt+R, `""` phrase):
+    // 1. If text is selected in `<input>`, wrap the selection in-place: `/selected/ `
+    // 2. If cursor is on/at the end of a plain word `foo|`, wrap `foo` in-place: `/foo/ `
+    const pair: [string, string] | null = sym.endsWith('()')
+      ? [sym.slice(0, -1), ')']
+      : sym === '//'
+        ? ['/', '/']
+        : sym === '""' || sym === '"'
+          ? ['"', '"']
+          : null;
+    if (pair) {
+      const [open, close] = pair;
+      if (selStart < selEnd) {
+        const selected = raw.slice(selStart, selEnd);
+        const before = raw.slice(0, selStart);
+        const after = raw.slice(selEnd);
+        const wrapped = `${open}${selected}${close} `;
+        workbench.pattern = `${before}${wrapped}${after.replace(/^\s+/, '')}`;
+        const nextCursor = before.length + wrapped.length;
+        cursorPos = nextCursor;
+        suggestDismissed = true;
+        workbench.scheduleSearch(true);
+        requestAnimationFrame(() => {
+          inputEl?.focus();
+          inputEl?.setSelectionRange(nextCursor, nextCursor);
+        });
+        return;
+      }
+
+      // Check if cursor is touching/inside an existing plain word (not starting with `$`)
+      let wStart = selStart;
+      let wEnd = selStart;
+      while (wStart > 0 && !/\s/.test(raw[wStart - 1])) wStart--;
+      while (wEnd < raw.length && !/\s/.test(raw[wEnd])) wEnd++;
+      const word = raw.slice(wStart, wEnd);
+      if (word.length > 0 && !/^-?[$"/@]/.test(word)) {
+        const before = raw.slice(0, wStart);
+        const after = raw.slice(wEnd);
+        const wrapped = `${open}${word}${close} `;
+        workbench.pattern = `${before}${wrapped}${after.replace(/^\s+/, '')}`;
+        const nextCursor = before.length + wrapped.length;
+        cursorPos = nextCursor;
+        suggestDismissed = true;
+        workbench.scheduleSearch(true);
+        requestAnimationFrame(() => {
+          inputEl?.focus();
+          inputEl?.setSelectionRange(nextCursor, nextCursor);
+        });
+        return;
+      }
+    }
+
+    const pos = selStart;
     const before = raw.slice(0, pos);
     const after = raw.slice(pos);
     const needSpace = before.length > 0 && !/\s$/.test(before);
-    // Tokens that come in pairs ( `"` → `""`, `$r()` ) put the cursor between the pair.
-    const paired = sym === '"' || sym.endsWith('()');
+    // Tokens that come in pairs ( `"` → `""`, `//` ) put the cursor between the pair.
+    const paired = pair !== null;
     const inserted = `${needSpace ? ' ' : ''}${sym === '"' ? '""' : sym}`;
     workbench.pattern = `${before}${inserted}${after}`;
     const nextCursor = before.length + inserted.length - (paired ? 1 : 0);
     cursorPos = nextCursor;
     suggestDismissed = false;
-    selectedSuggestIdx = 0;
+    selectedSuggestIdx = -1;
     workbench.scheduleSearch();
     requestAnimationFrame(() => {
       inputEl?.focus();
@@ -318,83 +277,38 @@
   }
 
   function handleMainKeydown(e: KeyboardEvent) {
-    // Auto-pair `$r(` / `$c(` / `$w(` / `$rc(` -> `$r(|)` / `$c(|)` / `$w(|)` when typing `(`
-    if (e.key === '(' && activeDollarToken && activeDollarToken.query) {
-      const df = parseDollarFlags(`$${activeDollarToken.query}`);
-      if (df) {
+    // → at the end of the input accepts the ghost text (fish-style)
+    if (e.key === 'ArrowRight' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && ghost.text) {
+      const pos = inputEl?.selectionStart ?? workbench.pattern.length;
+      if (pos === workbench.pattern.length && acceptGhost()) {
         e.preventDefault();
-        const before = workbench.pattern.slice(0, activeDollarToken.tokenStart);
-        const after = workbench.pattern.slice(activeDollarToken.tokenEnd);
-        const inserted = `${activeDollarToken.prefix}${activeDollarToken.query}()`;
-        workbench.pattern = `${before}${inserted}${after}`;
-        const nextCursor = before.length + inserted.length - 1;
-        cursorPos = nextCursor;
-        suggestDismissed = false;
-        selectedSuggestIdx = 0;
-        requestAnimationFrame(() => {
-          inputEl?.focus();
-          inputEl?.setSelectionRange(nextCursor, nextCursor);
-        });
         return;
       }
     }
-
-    if (flagSuggestions.length > 0 && activeDollarToken) {
-      const enabledIndices = flagSuggestions
-        .map((item, idx) => (item.disabled ? -1 : idx))
-        .filter((idx) => idx >= 0);
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (enabledIndices.length > 0) {
-          const curPos = enabledIndices.indexOf(effectiveFlagIdx);
-          selectedSuggestIdx = enabledIndices[(curPos + 1) % enabledIndices.length];
-        }
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (enabledIndices.length > 0) {
-          const curPos = enabledIndices.indexOf(effectiveFlagIdx);
-          selectedSuggestIdx =
-            enabledIndices[(curPos - 1 + enabledIndices.length) % enabledIndices.length];
-        }
-        return;
-      }
-      if (e.key === 'Tab' || e.key === 'Enter') {
-        if (effectiveFlagIdx >= 0) {
-          const chosen = flagSuggestions[effectiveFlagIdx];
-          if (chosen && !chosen.disabled) {
-            e.preventDefault();
-            applyFlagSuggestion(chosen.token);
-            return;
-          }
-        }
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        suggestDismissed = true;
-        return;
-      }
+    // Tab with only a history ghost (no dropdown items)
+    if (e.key === 'Tab' && !e.shiftKey && completion.items.length === 0 && ghost.text && acceptGhost()) {
+      e.preventDefault();
+      return;
     }
-
-    if (scopeSuggestions.length > 0 && activeAtToken) {
+    const items = completion.items;
+    if (items.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        selectedSuggestIdx = (selectedSuggestIdx + 1) % scopeSuggestions.length;
+        selectedSuggestIdx = (effectiveSuggestIdx + 1) % items.length;
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         selectedSuggestIdx =
-          (selectedSuggestIdx - 1 + scopeSuggestions.length) % scopeSuggestions.length;
+          effectiveSuggestIdx <= 0 ? items.length - 1 : effectiveSuggestIdx - 1;
         return;
       }
-      if (e.key === 'Tab' || e.key === 'Enter') {
-        const chosen = scopeSuggestions[selectedSuggestIdx] ?? scopeSuggestions[0];
+      // Tab always takes a suggestion; Enter only when one is selected (plain words keep Enter = search).
+      if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && effectiveSuggestIdx >= 0)) {
+        const chosen = items[Math.max(0, effectiveSuggestIdx)];
         if (chosen) {
           e.preventDefault();
-          applyScopeSuggestion(chosen.label);
+          applySuggestion(chosen);
           return;
         }
       }
@@ -409,8 +323,6 @@
     if (
       e.key === 'ArrowDown' &&
       suggestDismissed &&
-      !activeAtToken &&
-      !activeDollarToken &&
       workbench.searchHistory.length > 0 &&
       workbench.flatHits.length === 0
     ) {
@@ -540,6 +452,17 @@
       </div>
 
       <!-- Main Search Input -->
+      <!-- Input + fish-style ghost completion overlay (same font metrics, never intercepts pointer events) -->
+      <div class="relative h-full min-w-0 flex-1">
+      {#if ghost.text}
+        <div
+          aria-hidden="true"
+          title={workbench.t.searchBar.acceptGhost}
+          class="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-1 font-mono text-[14.5px]"
+        >
+          <span class="invisible">{workbench.pattern}</span><span class="text-muted-foreground/45">{ghost.text}</span>
+        </div>
+      {/if}
       <input
         bind:this={inputEl}
         type="text"
@@ -562,7 +485,7 @@
         oninput={() => {
           syncCursorPos();
           suggestDismissed = false;
-          selectedSuggestIdx = 0;
+          selectedSuggestIdx = -1;
           selectedHistoryIdx = -1;
           workbench.scheduleSearch();
         }}
@@ -572,8 +495,9 @@
           : workbench.t.searchBar.placeholderLiteral}
         spellcheck="false"
         autocomplete="off"
-        class="h-full min-w-0 flex-1 bg-transparent px-1 font-mono text-[14.5px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
+        class="relative h-full w-full min-w-0 bg-transparent px-1 font-mono text-[14.5px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
       />
+      </div>
 
       <!-- Clear Button -->
       {#if workbench.pattern}
@@ -652,62 +576,57 @@
           </div>
         {/if}
 
-        <!-- 2. Seamlessly Attached $flag Mode Autocomplete Dropdown -->
-        {#if flagSuggestions.length > 0 && activeDollarToken}
+        <!-- 2. Unified completion: in: (data sources / file types / directories), time:, and word → qualifier -->
+        {#if completion.items.length > 0}
           <div class="mx-3 border-t border-border/60"></div>
           <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
-            {#each flagSuggestions as item, idx (item.token)}
-              {@const isSelected = !item.disabled && idx === effectiveFlagIdx}
+            {#each completion.items as item, idx (item.key)}
+              {@const isSelected = idx === effectiveSuggestIdx}
               <button
                 type="button"
-                disabled={item.disabled}
-                onclick={() => applyFlagSuggestion(item.token)}
+                onmouseenter={() => (selectedSuggestIdx = idx)}
+                onclick={() => applySuggestion(item)}
                 class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors ${
-                  item.disabled
-                    ? 'opacity-45 cursor-not-allowed text-muted-foreground'
-                    : isSelected
-                      ? 'bg-secondary text-foreground'
-                      : 'text-foreground hover:bg-secondary/60'
+                  isSelected ? 'bg-secondary text-foreground' : 'text-foreground hover:bg-secondary/60'
                 }`}
               >
-                <div class="flex items-center gap-2.5 min-w-0">
-                  <span class="font-mono text-xs font-semibold text-foreground shrink-0 w-12">
-                    {item.token}
-                  </span>
-                  <span class="text-xs text-muted-foreground truncate">
-                    {item.label}
-                  </span>
-                </div>
-                {#if item.disabled}
-                  <Check class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                {/if}
+                <span class="flex items-center gap-2.5 min-w-0">
+                  <span class="truncate font-mono text-xs font-medium">{item.label}</span>
+                  {#if item.hint}
+                    <span class="truncate text-[11px] text-muted-foreground/70">{item.hint}</span>
+                  {/if}
+                </span>
+                <span class="shrink-0 text-[10px] text-muted-foreground/60">{item.kind}</span>
               </button>
             {/each}
           </div>
         {/if}
 
-        <!-- 3. Seamlessly Attached Project-Only @ Autocomplete Dropdown -->
-        {#if scopeSuggestions.length > 0 && activeAtToken}
+        <!-- 3. Tips (one-click fixes) and a plain-language reading of the query -->
+        {#if tips.length > 0 || explanation}
           <div class="mx-3 border-t border-border/60"></div>
-          <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
-            {#each scopeSuggestions as item, idx (item.id)}
-              {@const isSelected = idx === selectedSuggestIdx}
-              <button
-                type="button"
-                onmouseenter={() => (selectedSuggestIdx = idx)}
-                onclick={() => applyScopeSuggestion(item.label)}
-                class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 font-mono text-xs text-left transition-colors ${
-                  isSelected
-                    ? 'bg-secondary text-foreground'
-                    : 'text-foreground hover:bg-secondary/60'
-                }`}
-              >
-                <span class="truncate font-medium">@{item.label}</span>
-                <span class="truncate text-[11px] text-muted-foreground/60">
-                  {item.path}
-                </span>
-              </button>
+          <div class="space-y-0.5 px-4 py-2 text-[11.5px] text-muted-foreground">
+            {#each tips as tip (tip.key)}
+              <div class="flex items-center gap-2 min-w-0">
+                <Lightbulb class="h-3 w-3 shrink-0 text-status/80" />
+                <span class="truncate">{tip.text}</span>
+                {#if tip.fix}
+                  {@const fix = tip.fix}
+                  <button
+                    type="button"
+                    onclick={() => applyTipFix(fix.pattern)}
+                    class="touch-target shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:bg-primary/20 transition-colors"
+                  >
+                    {fix.label}
+                  </button>
+                {/if}
+              </div>
             {/each}
+            {#if explanation}
+              <div class="truncate font-mono text-[11px] text-muted-foreground/60" title={explanation}>
+                {explanation}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>

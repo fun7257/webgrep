@@ -33,6 +33,8 @@ export interface HitItem {
   line: number;
   col: number;
   text: string;
+  prevText?: string | null;
+  nextText?: string | null;
   replaced?: string | null;
   isContext?: boolean;
   spans: HitSpan[];
@@ -83,23 +85,22 @@ export interface WsSearchMessage {
   type: 'search';
   id: number;
   tenant: string;
+  /** Wire terms produced by `parseSearchQuery` (`$c(…)` / `$r(…)` encode case & regex per term). */
   pattern: string;
   mode: SearchMode;
   case: CaseMode;
-  wholeWord: boolean;
-  wholeLine: boolean;
-  invert: boolean;
   contains: string[];
   excludes: string[];
-  replacement: string;
   context: number;
-  sources: string[];
-  paths: string[];
+  /** Data source names from `@src` / `-@src` (`!` = exclude). */
   globs: string[];
-  types: string[];
+  /** File / path patterns from `@*.rs` / `@src/` (`!` = exclude). */
+  fileGlobs: string[];
   hidden: boolean;
   respectIgnore: boolean;
   maxResults: number;
+  /** Nearby-lines fallback radius when no single line contains every term (0 = strict single line). */
+  nearbyLines: number;
   timeStartMs?: number;
   timeEndMs?: number;
 }
@@ -135,6 +136,7 @@ export type WsIncomingMessage =
       limitHit: string | boolean;
       searchCount?: number;
       cacheHit?: string;
+      nearbyLines?: number;
     }
   | {
       type: 'error';
@@ -154,7 +156,7 @@ export interface SearchHistoryEntry {
   mode: SearchMode;
   contains: string[];
   excludes: string[];
-  replacement: string;
+  replacement?: string;
   timestamp: number;
 }
 

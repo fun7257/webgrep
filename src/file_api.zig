@@ -146,7 +146,7 @@ pub fn sanitizeUtf8Truncated(arena: std.mem.Allocator, input: []const u8, max_by
 pub const MetaResponse = struct {
     rootLabel: []const u8,
     root: []const u8,
-    engine: []const u8 = "libwebgrep 0.1.0",
+    engine: []const u8 = "libwebgrep 0.4.1 · SIMD",
     types: []const []const u8 = &builtin_types,
     scopes: []const []const u8 = &.{},
 };

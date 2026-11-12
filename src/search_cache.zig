@@ -18,6 +18,8 @@ pub const CachedHitItem = struct {
     line: u64,
     col: u64,
     text: []const u8,
+    prevText: ?[]const u8 = null,
+    nextText: ?[]const u8 = null,
     replaced: ?[]const u8,
     isContext: bool,
     spans: []const CachedSpan,

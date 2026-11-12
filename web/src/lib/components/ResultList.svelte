@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { workbench } from '$lib/state.svelte';
+  import { NEARBY_LINES, workbench } from '$lib/state.svelte';
+  import { zeroResultFixes } from '$lib/suggest';
   import type { HitItem } from '$lib/types';
   import {
+    copyTextToClipboard,
     extractLeadingNanoTimestamp,
-    getCachedHighlightSegments,
+    getCachedHitSnippet,
     type HighlightSegment,
   } from '$lib/utils';
-  import { AtSign, Ban, Check, Copy, Loader2, RefreshCw } from 'lucide-svelte';
+  import { FolderSearch, Ban, Check, Copy, Loader2, RefreshCw } from 'lucide-svelte';
 
   interface VirtualHitRow {
     idx: number;
@@ -15,6 +17,10 @@
     srcName: string;
     /** True when the data source differs from the previous hit (breadcrumb only shown on change). */
     showSrc: boolean;
+    /** True when the file differs from the previous hit (full path shown; otherwise just `:line`). */
+    fileChanged: boolean;
+    /** Parent folders inside the data source (last two levels), e.g. `states/server/`. */
+    dirLabel: string;
     fileName: string;
     timeLabel: string;
     timeNs: string;
@@ -30,6 +36,7 @@
   const BREADCRUMB_H = 22;
   let lockedSearchId = -1;
   let lockedMaxLines = 1;
+  let lockedSnippetLines = 1;
 
   // Reset scroll position and monotonic line-height lock when a new search starts
   $effect(() => {
@@ -37,6 +44,7 @@
     if (id !== lockedSearchId) {
       lockedSearchId = id;
       lockedMaxLines = 1;
+      lockedSnippetLines = 1;
     }
     scrollTop = 0;
     if (scrollerEl) {
@@ -44,13 +52,13 @@
     }
   });
 
-  // O(1) Plan B Compact Snippet Stream Layout (Google / Linear Reading Experience)
+  // O(1) Plan B Compact Snippet Stream Layout (Google / Linear 3-Line Reading Experience)
   const streamLayout = $derived.by(() => {
     const hits = workbench.flatHits;
     const hLen = hits.length;
     const fontPx = workbench.codeFontSize;
-    const lineHeight = Math.round(fontPx * 1.65);
-    const baseHitPad = workbench.resultDensity === 'compact' ? 14 : 22;
+    const lineHeight = Math.round(fontPx * 1.56);
+    const baseHitPad = workbench.resultDensity === 'compact' ? 12 : 18;
     const wrapEnabled = workbench.wordWrap;
 
     if (hLen === 0) {
@@ -62,12 +70,23 @@
       };
     }
 
-    let maxLines = 1;
-    if (wrapEnabled) {
+    const sampleCount = Math.min(hLen, 24);
+    let hasNeighbors = false;
+    for (let i = 0; i < sampleCount; i++) {
+      if (hits[i].prevText || hits[i].nextText) {
+        hasNeighbors = true;
+        break;
+      }
+    }
+    if (hasNeighbors && lockedSnippetLines < 3) {
+      lockedSnippetLines = 3;
+    }
+
+    let maxLines = lockedSnippetLines;
+    if (!hasNeighbors && lockedSnippetLines === 1 && wrapEnabled) {
       const availTextWidth = Math.max(300, scrollerWidth - 64);
       const charsPerLine = Math.max(40, Math.floor(availTextWidth / (fontPx * 0.6)));
       let maxSampleLen = 0;
-      const sampleCount = Math.min(hLen, 24);
       for (let i = 0; i < sampleCount; i++) {
         const len = hits[i].text.length;
         if (len > maxSampleLen) maxSampleLen = len;
@@ -118,8 +137,11 @@
       const prevSrc = prevSlash > 0 ? prevFile.slice(0, prevSlash) : '';
       const lastSlash = it.file.lastIndexOf('/');
       const tsInfo = extractLeadingNanoTimestamp(it.text);
+      const dirParts = it.file.slice(slash > 0 ? slash + 1 : 0, Math.max(0, lastSlash)).split('/').filter(Boolean);
       items.push({
         showSrc: i === 0 || srcName !== prevSrc,
+        fileChanged: i === 0 || it.file !== prevFile,
+        dirLabel: dirParts.length > 2 ? `…/${dirParts.slice(-2).join('/')}/` : dirParts.length ? `${dirParts.join('/')}/` : '',
         fileName: lastSlash >= 0 ? it.file.slice(lastSlash + 1) : it.file,
         idx: i,
         key: `${i}:${it.file}:${it.line}:${it.col}`,
@@ -234,13 +256,16 @@
 
   function copyFromMenu() {
     if (!menuRow) return;
-    navigator.clipboard?.writeText(menuRow.item.text);
+    copyTextToClipboard(menuRow.item.text);
     menuRow = null;
   }
 
   function scopeFromMenu(exclude: boolean) {
     if (!menuRow || !menuRow.srcName) return;
-    const token = `${exclude ? '-' : ''}@${menuRow.srcName}`;
+    const name = menuRow.srcName;
+    const token = /^[^\s,"]+$/.test(name)
+      ? `${exclude ? '-' : ''}in:${name}`
+      : `${exclude ? '$-@' : '$@'}(${name})`;
     const cur = workbench.pattern.trim();
     workbench.pattern = cur ? `${cur} ${token}` : token;
     workbench.scheduleSearch(true);
@@ -249,7 +274,7 @@
 
   function copyLineText(e: MouseEvent, idx: number, text: string) {
     e.stopPropagation();
-    navigator.clipboard?.writeText(text);
+    copyTextToClipboard(text);
     copiedIdx = idx;
     setTimeout(() => {
       if (copiedIdx === idx) copiedIdx = -1;
@@ -260,6 +285,17 @@
   const isRegexMode = $derived(workbench.mode === 'regex');
   const segmentCacheKey = $derived(
     `${workbench.mode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}`
+  );
+
+  const zeroFixes = $derived(
+    !workbench.isSearching && workbench.totalMatches === 0
+      ? zeroResultFixes(
+          workbench.pattern,
+          workbench.parsedQuery,
+          { strictLine: workbench.strictLine, nearbyLines: NEARBY_LINES },
+          workbench.t.suggest
+        )
+      : []
   );
 </script>
 
@@ -273,6 +309,22 @@
       <mark class="match-span-contains-1">{seg.text}</mark>
     {:else if seg.kind === 'contains-2'}
       <mark class="match-span-contains-2">{seg.text}</mark>
+    {:else}
+      <span>{seg.text}</span>
+    {/if}
+  {/each}
+{/snippet}
+
+{#snippet renderContextSegments(segments: HighlightSegment[])}
+  {#each segments as seg}
+    {#if seg.kind === 'primary'}
+      <mark class="match-span-primary opacity-80">{seg.text}</mark>
+    {:else if seg.kind === 'contains-0'}
+      <mark class="match-span-contains-0 opacity-80">{seg.text}</mark>
+    {:else if seg.kind === 'contains-1'}
+      <mark class="match-span-contains-1 opacity-80">{seg.text}</mark>
+    {:else if seg.kind === 'contains-2'}
+      <mark class="match-span-contains-2 opacity-80">{seg.text}</mark>
     {:else}
       <span>{seg.text}</span>
     {/if}
@@ -312,7 +364,7 @@
           {#each visibleSlice.items as row (row.key)}
             {@const item = row.item}
             {@const active = row.idx === workbench.activeHitIndex}
-            {@const segments = getCachedHighlightSegments(
+            {@const snippet = getCachedHitSnippet(
               item,
               workbench.contains,
               isCaseInsensitive,
@@ -360,26 +412,33 @@
                       : 'hover:bg-secondary/35'
                 }`}
               >
-                <!-- Layer 1: Subtle Project Attribution (@project) + Hover Copy Button -->
+                <!-- Layer 1: Subtle Project Attribution (@project) + File:Line + Copy Button -->
                 <div class="flex h-[18px] shrink-0 items-center justify-between gap-3 select-none">
                   <div class="flex items-center gap-1.5 min-w-0 font-mono text-[11px] leading-none">
-                    {#if workbench.isCompact}
-                      {#if row.showSrc && row.srcName}
-                        <span class="shrink-0 text-muted-foreground/70">@{row.srcName}</span>
+                    {#if row.showSrc && row.srcName}
+                      {#if workbench.isCompact}
+                        <span class="shrink-0 text-muted-foreground/70">{row.srcName}</span>
+                      {:else}
+                        <button
+                          type="button"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            workbench.toggleScopeToken(row.srcName);
+                          }}
+                          title={`只在 ${row.srcName} 中搜 (in:${row.srcName})`}
+                          class="shrink-0 text-muted-foreground/45 hover:text-foreground transition-colors cursor-pointer"
+                        >
+                          {row.srcName}
+                        </button>
                       {/if}
-                      <span class="truncate text-muted-foreground/60">{row.fileName}:{item.line}</span>
-                    {:else if row.showSrc && row.srcName}
-                      <button
-                        type="button"
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          workbench.toggleScopeToken(row.srcName);
-                        }}
-                        title={`点击限定项目 @${row.srcName}`}
-                        class="shrink-0 text-muted-foreground/45 hover:text-foreground transition-colors cursor-pointer"
-                      >
-                        @{row.srcName}
-                      </button>
+                    {/if}
+                    <!-- file:line — full path when the file changes, otherwise only the line number -->
+                    {#if row.fileChanged}
+                      <span class="min-w-0 truncate" title={item.file}>
+                        <span class="text-muted-foreground/45">{row.dirLabel}</span><span class="text-foreground/75">{row.fileName}</span><span class="text-muted-foreground/60">:{item.line}</span>
+                      </span>
+                    {:else}
+                      <span class="shrink-0 text-muted-foreground/50 tabular-nums" title={item.file}>:{item.line}</span>
                     {/if}
                     {#if row.timeLabel}
                       <span
@@ -406,19 +465,31 @@
                   </button>
                 </div>
 
-                <!-- Layer 2: 100% Complete Matched Content -->
+                <!-- Layer 2: 3-Line Inline Snippet ("上一行 + 高亮命中行 + 下一行") -->
                 <div class="w-full min-w-0 overflow-hidden">
+                  {#if snippet.prev}
+                    <div class="truncate whitespace-pre pl-2.5 text-muted-foreground/60 leading-[1.5]">
+                      {@render renderContextSegments(snippet.prev)}
+                    </div>
+                  {/if}
                   <div
                     class={`${
-                      workbench.wordWrap
-                        ? visibleSlice.maxLines === 2
-                          ? 'line-clamp-2 break-all'
-                          : 'line-clamp-1 break-all'
-                        : 'truncate whitespace-pre'
-                    } leading-[1.6] text-foreground`}
+                      snippet.prev || snippet.next
+                        ? 'truncate whitespace-pre border-l-2 border-primary bg-primary/[0.06] pl-2 pr-1 rounded-r leading-[1.55]'
+                        : workbench.wordWrap
+                          ? visibleSlice.maxLines === 2
+                            ? 'line-clamp-2 break-all leading-[1.6]'
+                            : 'line-clamp-1 break-all leading-[1.6]'
+                          : 'truncate whitespace-pre leading-[1.6]'
+                    } text-foreground`}
                   >
-                    {@render renderSegments(segments)}
+                    {@render renderSegments(snippet.match)}
                   </div>
+                  {#if snippet.next}
+                    <div class="truncate whitespace-pre pl-2.5 text-muted-foreground/60 leading-[1.5]">
+                      {@render renderContextSegments(snippet.next)}
+                    </div>
+                  {/if}
                 </div>
               </div>
             </div>
@@ -442,7 +513,17 @@
         {workbench.t.ui.finishedIn(workbench.elapsedMs.toFixed(2))}
       </p>
       <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
-        {#if workbench.activeFilterCount > 0 || workbench.selectedPaths.length > 0}
+        <!-- One-click ways out of an empty result (drop a term / scope, ignore case, nearby lines) -->
+        {#each zeroFixes as fix (fix.key)}
+          <button
+            type="button"
+            onclick={() => workbench.applyResultFix(fix)}
+            class="touch-target rounded-lg bg-primary/10 px-3 py-1.5 font-mono text-[12.5px] text-primary hover:bg-primary/20 transition-colors"
+          >
+            {fix.label}
+          </button>
+        {/each}
+        {#if workbench.activeFilterCount > 0}
           <button
             type="button"
             onclick={() => {
@@ -489,17 +570,17 @@
           <button
             type="button"
             onclick={() => scopeFromMenu(false)}
-            aria-label={`@${menuRow.srcName}`}
-            title={`@${menuRow.srcName}`}
+            aria-label={`in:${menuRow.srcName}`}
+            title={`in:${menuRow.srcName}`}
             class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
           >
-            <AtSign class="h-5 w-5" />
+            <FolderSearch class="h-5 w-5" />
           </button>
           <button
             type="button"
             onclick={() => scopeFromMenu(true)}
-            aria-label={`-@${menuRow.srcName}`}
-            title={`-@${menuRow.srcName}`}
+            aria-label={`-in:${menuRow.srcName}`}
+            title={`-in:${menuRow.srcName}`}
             class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
           >
             <Ban class="h-5 w-5" />

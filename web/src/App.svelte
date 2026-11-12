@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { workbench } from '$lib/state.svelte';
+  import { copyTextToClipboard } from '$lib/utils';
   import Header from '$lib/components/Header.svelte';
   import SearchBar from '$lib/components/SearchBar.svelte';
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
@@ -81,19 +82,9 @@
   function handleGlobalKeydown(e: KeyboardEvent) {
     // Alt + letter toggles (use e.code: on macOS Alt+letter yields special chars in e.key)
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
-      if (e.code === 'KeyC') {
-        e.preventDefault();
-        workbench.insertToken?.('$c()');
-        return;
-      }
-      if (e.code === 'KeyW') {
-        e.preventDefault();
-        workbench.insertToken?.('$w()');
-        return;
-      }
       if (e.code === 'KeyR') {
         e.preventDefault();
-        workbench.insertToken?.('$r()');
+        workbench.insertToken?.('//');
         return;
       }
     }
@@ -144,7 +135,7 @@
       const hit = workbench.activeHit;
       if (sel.length === 0 && hit) {
         e.preventDefault();
-        navigator.clipboard?.writeText(hit.text);
+        copyTextToClipboard(hit.text);
       }
       return;
     }

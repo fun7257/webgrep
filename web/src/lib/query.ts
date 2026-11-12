@@ -1,3 +1,20 @@
+/**
+ * Query language — three operators plus two qualifiers:
+ *
+ *   a b c        every term must appear (AND, order-independent)
+ *   -x           exclude results containing x
+ *   "a b"        exact phrase (spaces & symbols kept); `"-O3"` searches a literal leading dash
+ *   in:x         where to search: a data source name, a file pattern (`in:*.rs`, `in:.rs`), or a path
+ *                (`in:src/`, `in:server`); `-in:x` excludes, `in:a,b` means a OR b
+ *   time:x       when: `time:15m`, `time:today`, `time:10:00..10:30`, `time:2026-10-31`
+ *   /re/         regular expression for that term only
+ *   Smart case:  all-lowercase terms ignore case, any uppercase letter makes that term case-sensitive.
+ *
+ * Legacy `@source`, `$()`, `$-()`, `$@()`, `$t()`, `$r()`, `$c()`, `$w()` are still understood but no longer
+ * advertised. Terms are translated into backend wire terms (`$c(…)`, `$r(…)`, `$rc(…)`), data sources into
+ * `globs` and file/path patterns into `fileGlobs`, so the server needs no knowledge of the surface syntax.
+ */
+
 export interface ParsedDollarFlags {
   regex: boolean;
   caseSensitive: boolean;
@@ -5,17 +22,24 @@ export interface ParsedDollarFlags {
 }
 
 export interface ClassifiedQueryToken {
+  /** Exact token text as typed (used to strip / toggle it inside the input string). */
   raw: string;
   kind: 'primary' | 'include' | 'exclude' | 'file' | 'exclude-file' | 'flag';
+  /** Human-facing label (`"a b"`, `/re/`, `word`, source name, `*.rs`, `$t(15m)`). */
   value: string;
-  forceLiteral?: boolean;
 }
 
 export interface ParsedSearchQuery {
+  /** Wire value of the first positive term. */
   primaryPattern: string;
+  /** Raw text of the first positive term as typed. */
+  primaryRaw: string;
   contains: string[];
   excludes: string[];
+  /** Data source names (`!` prefix = exclude). */
   globs: string[];
+  /** File / path patterns (`!` prefix = exclude). */
+  fileGlobs: string[];
   modifiers: ClassifiedQueryToken[];
   hasScopedRegex: boolean;
   hasScopedCase: boolean;
@@ -85,6 +109,17 @@ export function parseTimeModifierSpec(
   const clean = rawSpec.trim();
   if (!clean) return null;
 
+  // Named days: `today`, `yesterday` (local time)
+  const named = clean.toLowerCase();
+  if (named === 'today' || named === '今天' || named === 'yesterday' || named === '昨天') {
+    const d = new Date(nowMs);
+    d.setHours(0, 0, 0, 0);
+    if (named === 'today' || named === '今天') return { startMs: d.getTime(), endMs: 0 };
+    const end = d.getTime() - 1;
+    d.setDate(d.getDate() - 1);
+    return { startMs: d.getTime(), endMs: end };
+  }
+
   // Range syntax: `A..B` or `A~B`
   const rangeSep = clean.includes('..') ? '..' : clean.includes('~') ? '~' : null;
   if (rangeSep) {
@@ -138,213 +173,260 @@ export function parseDollarFlags(raw: string): ParsedDollarFlags | null {
   return null;
 }
 
-export function parseSearchQuery(raw: string, nowMs = Date.now()): ParsedSearchQuery {
-  interface RawToken {
-    raw: string;
-    quoted: boolean;
-  }
-  const rawTokens: RawToken[] = [];
-  let i = 0;
-  const n = raw.length;
+export interface KnownSourceRef {
+  id?: string;
+  name: string;
+}
 
+const REGEX_META = /[\\.*+?^$()[\]{}|]/;
+const LEGACY_FUNC_HEAD = /^(?:(\$[-!]?@(?:)|\b)|([-+!]?\$[a-zA-Z.*]*|\$[-!]?))\(/;
+
+function escapeRegex(s: string): string {
+  return s.replace(/[\\.*+?^${}()|[\]]/g, '\\$&');
+}
+
+/** Smart case: an ASCII uppercase letter (outside regex escapes such as `\D`) makes a term case-sensitive. */
+function hasSmartUpper(s: string, isRegex: boolean): boolean {
+  return /[A-Z]/.test(isRegex ? s.replace(/\\./g, '') : s);
+}
+
+/** Wire form of a literal term (smart case → `$c(…)`). */
+function wireLiteral(value: string, forceCase = false, wholeWord = false): string {
+  const cased = forceCase || hasSmartUpper(value, false);
+  const flags = `${cased ? 'c' : ''}${wholeWord ? 'w' : ''}`;
+  // Literal text that itself looks like a `$x(` modifier is regex-escaped so the server never reinterprets it.
+  if (/^\$[a-zA-Z.*]*\(/.test(value)) {
+    return `$r${flags}(${escapeRegex(value)})`;
+  }
+  return flags ? `$${flags}(${value})` : value;
+}
+
+/** Wire form of a regex term (smart case → `$rc(…)`). */
+function wireRegex(body: string, forceCase = false, wholeWord = false): string {
+  const cased = forceCase || hasSmartUpper(body, true);
+  return `$r${cased ? 'c' : ''}${wholeWord ? 'w' : ''}(${body})`;
+}
+
+interface RawToken {
+  raw: string;
+  kind: 'legacy' | 'phrase' | 'regex' | 'word';
+  neg: boolean;
+  body: string;
+}
+
+/** Returns the end index of a legacy `$x(…)` function token starting at `i`, or -1. */
+function scanLegacyFunc(raw: string, i: number): number {
+  const m = LEGACY_FUNC_HEAD.exec(raw.slice(i));
+  if (!m) return -1;
+  const head = m[0].slice(0, -1);
+  const norm = /^[-+!]/.test(head) ? `$${head[0]}${head.slice(2)}` : head;
+  const body = norm.slice(1).toLowerCase();
+  const valid =
+    ['', '-', '!', '@', '-@', '!@', 't', 'time'].includes(body) ||
+    parseDollarFlags(`$${body.replace(/^[-!+]/, '')}`) !== null;
+  if (!valid) return -1;
+
+  const n = raw.length;
+  const isRegexLike = body.includes('r') || body.includes('.*');
+  let depth = 1;
+  let p = i + m[0].length;
+  let inClass = false;
+  let classStart = -1;
+  while (p < n && depth > 0) {
+    const c = raw[p];
+    if (c === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (isRegexLike && inClass) {
+      if (
+        c === ']' &&
+        p > classStart + 1 &&
+        !(p === classStart + 2 && (raw[classStart + 1] === '^' || raw[classStart + 1] === '!'))
+      ) {
+        inClass = false;
+      }
+      p++;
+      continue;
+    }
+    if (isRegexLike && c === '[') {
+      inClass = true;
+      classStart = p;
+    } else if (c === '(') {
+      depth++;
+    } else if (c === ')') {
+      depth--;
+    }
+    p++;
+  }
+  return p;
+}
+
+/** Plain word: ends at whitespace; balanced `(...)` (e.g. `@Vector(64, u8)`) and `\ ` stay inside. */
+function scanWord(raw: string, i: number): number {
+  const n = raw.length;
+  let depth = 0;
+  while (i < n) {
+    const ch = raw[i];
+    if (ch === '\\' && i + 1 < n && /\s/.test(raw[i + 1])) {
+      i += 2;
+      continue;
+    }
+    if (ch === '(' && hasClosingParen(raw, i)) {
+      depth++;
+    } else if (ch === ')' && depth > 0) {
+      depth--;
+    } else if (/\s/.test(ch) && depth === 0) {
+      break;
+    }
+    i++;
+  }
+  return i;
+}
+
+function hasClosingParen(raw: string, open: number): boolean {
+  let depth = 0;
+  for (let p = open; p < raw.length; p++) {
+    const c = raw[p];
+    if (c === '\\' && p + 1 < raw.length) {
+      p++;
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')' && --depth <= 0) return true;
+  }
+  return false;
+}
+
+/**
+ * `/re/` scanner starting at the opening slash `j`. A regex must contain a regex metacharacter, so plain
+ * paths such as `/api/` or `/usr/lib` stay literal. While typing, an unclosed `/re` (up to the next
+ * whitespace, without inner `/`) is already treated as a regex.
+ */
+function scanRegex(raw: string, j: number): { end: number; body: string } | null {
+  const n = raw.length;
+  for (let k = j + 1; k < n; k++) {
+    if (raw[k] === '\\' && k + 1 < n) {
+      k++;
+      continue;
+    }
+    if (raw[k] === '/' && (k + 1 >= n || /\s/.test(raw[k + 1]))) {
+      const body = raw.slice(j + 1, k);
+      return body && REGEX_META.test(body) ? { end: k + 1, body } : null;
+    }
+  }
+  let e = j + 1;
+  while (e < n && !/\s/.test(raw[e])) e++;
+  const body = raw.slice(j + 1, e);
+  if (body && !body.includes('/') && REGEX_META.test(body)) return { end: e, body };
+  return null;
+}
+
+function tokenize(raw: string): RawToken[] {
+  const out: RawToken[] = [];
+  const n = raw.length;
+  let i = 0;
   while (i < n) {
     while (i < n && /\s/.test(raw[i])) i++;
     if (i >= n) break;
     const start = i;
-    const firstCh = raw[i];
-    const quoted = firstCh === '"' || firstCh === "'";
 
-    // Check for scoped `$r(xxxxxxx)`, `$c(xxxxxxx)`, `$w(xxxxxxx)`, `$t(...)`, `$rc(...)`, `$cw(...)`, `$rw(...)`, `$rcw(...)` with balanced parentheses
-    const scopedMatch = /^([-+!]?)(\$[a-zA-Z.*]+)\(/.exec(raw.slice(i));
-    if (scopedMatch) {
-      const flagHead = scopedMatch[2].toLowerCase();
-      const dFlags = parseDollarFlags(scopedMatch[2]);
-      const isTimeFlag = flagHead === '$t' || flagHead === '$time';
-      if (dFlags || isTimeFlag) {
-        const openParenPos = i + scopedMatch[0].length - 1;
-        let depth = 1;
-        let p = openParenPos + 1;
-        let inCharClass = false;
-        let classStart = -1;
-        while (p < n && depth > 0) {
-          const c = raw[p];
-          if (c === '\\' && p + 1 < n) {
-            p += 2;
-            continue;
-          }
-          if (inCharClass) {
-            if (
-              c === ']' &&
-              p > classStart + 1 &&
-              !(
-                p === classStart + 2 &&
-                (raw[classStart + 1] === '^' || raw[classStart + 1] === '!')
-              )
-            ) {
-              inCharClass = false;
-            }
-            p++;
-            continue;
-          }
-          if (c === '[') {
-            inCharClass = true;
-            classStart = p;
-          } else if (c === '(') {
-            depth++;
-          } else if (c === ')') {
-            depth--;
-          }
-          p++;
+    const legacyEnd = scanLegacyFunc(raw, i);
+    if (legacyEnd > i) {
+      out.push({ raw: raw.slice(start, legacyEnd), kind: 'legacy', neg: false, body: '' });
+      i = legacyEnd;
+      continue;
+    }
+
+    const neg = raw[i] === '-' && (raw[i + 1] === '"' || raw[i + 1] === '/');
+    const j = neg ? i + 1 : i;
+
+    if (raw[j] === '"') {
+      let k = j + 1;
+      let closed = false;
+      while (k < n) {
+        if (raw[k] === '\\' && k + 1 < n) {
+          k += 2;
+          continue;
         }
-        i = p;
-        rawTokens.push({ raw: raw.slice(start, i), quoted: false });
+        if (raw[k] === '"') {
+          closed = true;
+          break;
+        }
+        k++;
+      }
+      const unescape = (s: string) => s.replace(/\\(["\\])/g, '$1');
+      if (!closed) {
+        // Still typing the phrase: everything after the quote belongs to it.
+        out.push({ raw: raw.slice(start), kind: 'phrase', neg, body: unescape(raw.slice(j + 1)) });
+        break;
+      }
+      if (k + 1 >= n || /\s/.test(raw[k + 1])) {
+        out.push({ raw: raw.slice(start, k + 1), kind: 'phrase', neg, body: unescape(raw.slice(j + 1, k)) });
+        i = k + 1;
+        continue;
+      }
+      // `"status":` — quotes are part of the text, fall through to a plain word.
+    }
+
+    if (raw[j] === '/') {
+      const re = scanRegex(raw, j);
+      if (re) {
+        out.push({ raw: raw.slice(start, re.end), kind: 'regex', neg, body: re.body });
+        i = re.end;
         continue;
       }
     }
 
-    let inQuote: string | null = null;
-    let inBracket = false;
-    let bracketStart = -1;
-    let parenDepth = 0;
-
-    // Pre-check if any '[' or '(' from `start` has a matching closing delimiter before end of string
-    const hasClosingFrom = (openPos: number, openCh: string, closeCh: string): boolean => {
-      let depth = 0;
-      for (let p = openPos; p < n; p++) {
-        const c = raw[p];
-        if (c === '\\' && p + 1 < n) {
-          p++;
-          continue;
-        }
-        if (c === openCh) depth++;
-        else if (c === closeCh) {
-          depth--;
-          if (depth <= 0) return true;
-        }
-      }
-      return false;
-    };
-
-    while (i < n) {
-      const ch = raw[i];
-      if (inQuote) {
-        if (ch === '\\' && i + 1 < n) {
-          i += 2;
-          continue;
-        }
-        if (ch === inQuote) {
-          inQuote = null;
-        }
-        i++;
-      } else if (inBracket) {
-        if (ch === '\\' && i + 1 < n) {
-          i += 2;
-          continue;
-        }
-        // In regex `[...]`, a `]` immediately after `[` or `[^` is a literal `]`, not closing the class
-        if (
-          ch === ']' &&
-          i > bracketStart + 1 &&
-          !(
-            i === bracketStart + 2 &&
-            (raw[bracketStart + 1] === '^' || raw[bracketStart + 1] === '!')
-          )
-        ) {
-          inBracket = false;
-        }
-        i++;
-      } else {
-        // Escaped whitespace (`\ `) stays inside the current token
-        if (ch === '\\' && i + 1 < n && /\s/.test(raw[i + 1])) {
-          i += 2;
-          continue;
-        }
-        if (ch === '"' || ch === "'") {
-          inQuote = ch;
-          i++;
-        } else if (ch === '[' && hasClosingFrom(i, '[', ']')) {
-          inBracket = true;
-          bracketStart = i;
-          i++;
-        } else if (ch === '(' && hasClosingFrom(i, '(', ')')) {
-          parenDepth++;
-          i++;
-        } else if (ch === ')' && parenDepth > 0) {
-          parenDepth--;
-          i++;
-        } else if (/\s/.test(ch) && parenDepth === 0) {
-          break;
-        } else {
-          i++;
-        }
-      }
-    }
-    rawTokens.push({ raw: raw.slice(start, i), quoted });
+    i = scanWord(raw, start);
+    out.push({ raw: raw.slice(start, i), kind: 'word', neg: false, body: raw.slice(start, i) });
   }
+  return out;
+}
 
-  const stripQuotes = (s: string): string => {
-    if (
-      s.length >= 2 &&
-      ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))
-    ) {
-      return s.slice(1, -1);
+function splitList(val: string): string[] {
+  const items: string[] = [];
+  let cur = '';
+  let brace = 0;
+  for (const ch of val) {
+    if (ch === '{') brace++;
+    else if (ch === '}' && brace > 0) brace--;
+    if (brace === 0 && ch === ',') {
+      if (cur.trim()) items.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
     }
-    return s;
+  }
+  if (cur.trim()) items.push(cur.trim());
+  return items;
+}
+
+export function parseSearchQuery(
+  raw: string,
+  nowMs = Date.now(),
+  knownSources: readonly (string | KnownSourceRef)[] = []
+): ParsedSearchQuery {
+  const sourceRefs = knownSources.map((s) =>
+    typeof s === 'string' ? { id: '', name: s.toLowerCase() } : { id: (s.id ?? '').toLowerCase(), name: s.name.toLowerCase() }
+  );
+  const findSource = (name: string) => {
+    const q = name.toLowerCase();
+    return sourceRefs.find((s) => s.name === q || (s.id && s.id === q));
   };
 
-  const normalizeGlobItem = (body: string, negate: boolean): string => {
-    const clean = body.trim();
-    if (!clean) return '';
-    const neg = negate || clean.startsWith('!') ? '!' : '';
-    const core = clean.startsWith('!') ? clean.slice(1) : clean;
-    if (!core) return '';
-    return `${neg}${core}`;
-  };
-
-  const splitGlobList = (val: string): string[] => {
-    const items: string[] = [];
-    let cur = '';
-    let braceDepth = 0;
-    for (let j = 0; j < val.length; j++) {
-      const ch = val[j];
-      if (ch === '{') braceDepth++;
-      else if (ch === '}' && braceDepth > 0) braceDepth--;
-      if (braceDepth === 0 && ch === ',') {
-        if (cur.trim()) items.push(cur.trim());
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    if (cur.trim()) items.push(cur.trim());
-    return items;
-  };
-
-  const parseScopedDollarToken = (
-    s: string
-  ): { prefix: string; flags: ParsedDollarFlags; inner: string } | null => {
-    const m =
-      /^([-+!]?)(\$[a-zA-Z.*]+)\(([\s\S]*)\)$/.exec(s) ??
-      /^([-+!]?)(\$[a-zA-Z.*]+)\(([\s\S]*)$/.exec(s);
-    if (!m) return null;
-    const df = parseDollarFlags(m[2]);
-    if (!df) return null;
-    return {
-      prefix: m[1],
-      flags: df,
-      inner: m[3],
-    };
-  };
-
-  const parseScopedTimeToken = (s: string): { raw: string; inner: string } | null => {
-    const m =
-      /^([-+!]?)\$(?:t|time)\(([\s\S]*)\)$/i.exec(s) ??
-      /^([-+!]?)\$(?:t|time)\(([\s\S]*)$/i.exec(s);
-    if (!m) return null;
-    return { raw: s, inner: m[2] };
-  };
-
-  // Pass 1: Detect scoped `$r(...)`, `$c(...)`, `$w(...)`, `$rc(...)`, `$rw(...)`, `$cw(...)`, `$rcw(...)`, and `$t(...)`
+  interface Term {
+    raw: string;
+    wire: string;
+    label: string;
+    /** Came from a bare `-word`; turned back into a literal search when there is no positive term. */
+    fromMinus?: boolean;
+  }
+  const positives: Term[] = [];
+  const negatives: Term[] = [];
+  const globs: string[] = [];
+  const fileGlobs: string[] = [];
+  const scopeMods: ClassifiedQueryToken[] = [];
   let hasScopedRegex = false;
   let hasScopedCase = false;
   let hasScopedWord = false;
@@ -352,217 +434,122 @@ export function parseSearchQuery(raw: string, nowMs = Date.now()): ParsedSearchQ
   let timeStartMs = 0;
   let timeEndMs = 0;
 
-  for (const tok of rawTokens) {
-    if (tok.quoted) continue;
-    const timeTok = parseScopedTimeToken(tok.raw);
-    if (timeTok) {
-      const tr = parseTimeModifierSpec(timeTok.inner, nowMs);
-      if (tr) {
-        hasScopedTime = true;
-        timeStartMs = tr.startMs;
-        timeEndMs = tr.endMs;
+  const addTerm = (neg: boolean, term: Term) => (neg ? negatives : positives).push(term);
+  /**
+   * `in:` value resolution (per comma-separated item):
+   * 1. exact data source name / id     → `globs` (data source filter)
+   * 2. `.rs`                           → `fileGlobs` `*.rs`
+   * 3. anything else (`*.rs`, `src/`, `server`) → `fileGlobs` (glob, or path substring without wildcards)
+   */
+  const addScope = (rawTok: string, value: string, neg: boolean) => {
+    let added = false;
+    // The backend ANDs separate `globs` entries and ORs comma-separated names inside one entry,
+    // so positive sources from one `in:a,b` token are joined into a single entry (a OR b).
+    const orSources: string[] = [];
+    for (const item of splitList(value)) {
+      const clean = item.replace(/^[-!@]+/, '').trim();
+      if (!clean) continue;
+      const bang = neg || /^[-!]/.test(item) ? '!' : '';
+      if (findSource(clean)) {
+        if (bang) globs.push(`!${clean}`);
+        else orSources.push(clean);
+      } else if (/^\.[^/*?]+$/.test(clean)) {
+        fileGlobs.push(`${bang}*${clean}`);
+      } else {
+        fileGlobs.push(`${bang}${clean}`);
       }
-      continue;
+      added = true;
     }
-
-    const scoped = parseScopedDollarToken(tok.raw);
-    if (scoped) {
-      if (scoped.inner.length > 0) {
-        if (scoped.flags.regex) hasScopedRegex = true;
-        if (scoped.flags.caseSensitive) hasScopedCase = true;
-        if (scoped.flags.wholeWord) hasScopedWord = true;
-      }
-      continue;
+    if (orSources.length > 0) globs.push(orSources.join(','));
+    if (added) {
+      scopeMods.push({ raw: rawTok, kind: neg ? 'exclude-file' : 'file', value: value.replace(/^[-!@]+/, '') });
     }
-  }
-
-  const normalizeUnquotedValue = (s: string): string => {
-    // In literal mode, unescape leading `\-`, `\+`, `\@`, `\$` and inline escaped spaces `\ `
-    let out = s.replace(/\\(\s)/g, '$1');
-    if (/^\\[-+@$]/.test(out)) {
-      out = out.slice(1);
-    }
-    return out;
+  };
+  const addTime = (rawTok: string, spec: string) => {
+    // Bare numbers (`time:1` while typing `time:15m`) would otherwise parse as a calendar year.
+    if (/^\d{1,9}$/.test(spec.trim())) return;
+    const tr = parseTimeModifierSpec(spec, nowMs);
+    if (!tr) return;
+    hasScopedTime = true;
+    timeStartMs = tr.startMs;
+    timeEndMs = tr.endMs;
+    scopeMods.push({ raw: rawTok, kind: 'flag', value: spec.trim() });
   };
 
-  const classified: ClassifiedQueryToken[] = [];
+  for (const tok of tokenize(raw)) {
+    if (tok.kind === 'phrase') {
+      if (tok.body) addTerm(tok.neg, { raw: tok.raw, wire: wireLiteral(tok.body), label: `"${tok.body}"` });
+      continue;
+    }
+    if (tok.kind === 'regex') {
+      hasScopedRegex = true;
+      addTerm(tok.neg, { raw: tok.raw, wire: wireRegex(tok.body), label: `/${tok.body}/` });
+      continue;
+    }
+    if (tok.kind === 'legacy') {
+      classifyLegacy(tok.raw);
+      continue;
+    }
 
-  for (const tok of rawTokens) {
-    if (tok.quoted) {
-      const inner = stripQuotes(tok.raw);
-      const hasDoubledQuotes =
-        (tok.raw.startsWith('""') && tok.raw.endsWith('""')) ||
-        (tok.raw.startsWith("''") && tok.raw.endsWith("''"));
-      const v = hasDoubledQuotes ? inner : inner || tok.raw;
-      if (v) {
-        classified.push({
-          raw: tok.raw,
-          kind: 'primary',
-          value: v,
-          forceLiteral: hasDoubledQuotes,
-        });
+    const w = tok.raw;
+    // Bare operators while the user is still typing (`-`, `$`) are ignored.
+    if (/^(?:-|\$[-!]?@?|\$(?:t|time)|[-+!]?\$[rcw]{0,3})$/i.test(w)) continue;
+
+    // Qualifiers: `in:x` / `-in:x` (where) and `time:x` (when). Empty values are still being typed.
+    const qual = /^(-?)(in|time):(.*)$/is.exec(w);
+    if (qual) {
+      const [, sign, key, value] = qual;
+      if (key.toLowerCase() === 'in') {
+        addScope(w, value, sign === '-');
+      } else if (!sign) {
+        addTime(w, value);
       }
       continue;
     }
 
-    const timeTok = parseScopedTimeToken(tok.raw);
-    if (timeTok) {
-      const tr = parseTimeModifierSpec(timeTok.inner, nowMs);
-      if (tr) {
-        classified.push({
-          raw: tok.raw,
-          kind: 'flag',
-          value: `$t(${timeTok.inner.trim()})`,
-        });
-      }
+    // Legacy `@source` / `-@source`: only an exact configured source name (`@Vector` stays literal).
+    const legacyAt = /^(-?)@(.+)$/.exec(w);
+    if (legacyAt && findSource(legacyAt[2])) {
+      addScope(w, legacyAt[2], legacyAt[1] === '-');
       continue;
     }
 
-    const scoped = parseScopedDollarToken(tok.raw);
-    if (scoped) {
-      if (!scoped.inner) {
-        continue;
-      }
-      const flagCode =
-        `${scoped.flags.regex ? 'r' : ''}${scoped.flags.caseSensitive ? 'c' : ''}${scoped.flags.wholeWord ? 'w' : ''}` ||
-        'r';
-      const canonicalScoped = `$${flagCode}(${scoped.inner})`;
-      if (scoped.prefix === '-' || scoped.prefix === '!') {
-        classified.push({ raw: tok.raw, kind: 'exclude', value: canonicalScoped });
-      } else if (scoped.prefix === '+') {
-        classified.push({ raw: tok.raw, kind: 'include', value: canonicalScoped });
-      } else {
-        classified.push({ raw: tok.raw, kind: 'primary', value: canonicalScoped });
-      }
+    if (/^-[\p{L}\p{N}_]/u.test(w)) {
+      const body = normalizeLiteral(w.slice(1));
+      negatives.push({ raw: w, wire: wireLiteral(body), label: body, fromMinus: true });
       continue;
     }
 
-    if (
-      /^[-+!]?\$(?:t|time)?$/i.test(tok.raw) ||
-      (tok.raw.startsWith('$') && parseDollarFlags(tok.raw) !== null) ||
-      ((tok.raw.startsWith('-$') || tok.raw.startsWith('+$') || tok.raw.startsWith('!$')) &&
-        parseDollarFlags(tok.raw.slice(1)) !== null)
-    ) {
-      continue;
-    }
-
-    const atMatch = /^@(.+)$/.exec(tok.raw);
-    if (atMatch) {
-      const v = stripQuotes(atMatch[1]);
-      if (v) classified.push({ raw: tok.raw, kind: 'file', value: v });
-      continue;
-    }
-
-    const negAtMatch = /^[-!]@(.+)$/.exec(tok.raw);
-    if (negAtMatch) {
-      const v = stripQuotes(negAtMatch[1]);
-      if (v) classified.push({ raw: tok.raw, kind: 'exclude-file', value: v });
-      continue;
-    }
-
-    const fileMatch = /^(?:f|file)[:：](.*)$/i.exec(tok.raw);
-    if (fileMatch) {
-      const v = stripQuotes(fileMatch[1]);
-      if (v) classified.push({ raw: tok.raw, kind: 'file', value: v });
-      continue;
-    }
-
-    const negFileMatch = /^(?:[-!]f|[-!]file)[:：](.*)$/i.exec(tok.raw);
-    if (negFileMatch) {
-      const v = stripQuotes(negFileMatch[1]);
-      if (v) classified.push({ raw: tok.raw, kind: 'exclude-file', value: v });
-      continue;
-    }
-
-    if (tok.raw === '@' || tok.raw === '-@' || tok.raw === '!@') {
-      continue;
-    }
-
-    if (tok.raw.startsWith('+')) {
-      const v = normalizeUnquotedValue(stripQuotes(tok.raw.slice(1)));
-      if (v) classified.push({ raw: tok.raw, kind: 'include', value: v });
-      continue;
-    }
-
-    if (tok.raw.startsWith('-')) {
-      const v = normalizeUnquotedValue(stripQuotes(tok.raw.slice(1)));
-      if (v) classified.push({ raw: tok.raw, kind: 'exclude', value: v });
-      continue;
-    }
-
-    classified.push({
-      raw: tok.raw,
-      kind: 'primary',
-      value: normalizeUnquotedValue(tok.raw),
-    });
+    const value = normalizeLiteral(w);
+    positives.push({ raw: w, wire: wireLiteral(value), label: value });
   }
 
-  const hasPrimary = classified.some((c) => c.kind === 'primary');
-  if (
-    !hasPrimary &&
-    classified.length > 0 &&
-    (classified[0].kind === 'include' || classified[0].kind === 'exclude')
-  ) {
-    classified[0] = {
-      raw: classified[0].raw,
-      kind: 'primary',
-      value: classified[0].raw,
-    };
-  }
-
-  const primaryTokens: { token: ClassifiedQueryToken }[] = [];
-  const contains: string[] = [];
-  const excludes: string[] = [];
-  const globs: string[] = [];
-  const modifiers: ClassifiedQueryToken[] = [];
-
-  for (const c of classified) {
-    if (c.kind === 'primary') {
-      primaryTokens.push({ token: c });
-    } else if (c.kind === 'include') {
-      contains.push(c.value);
-      modifiers.push(c);
-    } else if (c.kind === 'exclude') {
-      excludes.push(c.value);
-      modifiers.push(c);
-    } else if (c.kind === 'file') {
-      for (const item of splitGlobList(c.value)) {
-        const norm = normalizeGlobItem(item, false);
-        if (norm) globs.push(norm);
-      }
-      modifiers.push(c);
-    } else if (c.kind === 'exclude-file') {
-      for (const item of splitGlobList(c.value)) {
-        const norm = normalizeGlobItem(item, true);
-        if (norm) globs.push(norm);
-      }
-      modifiers.push(c);
-    } else if (c.kind === 'flag') {
-      modifiers.push(c);
+  // `-O3` / `-v` typed on their own are searches, not exclusions.
+  if (positives.length === 0 && negatives.some((t) => t.fromMinus)) {
+    for (let k = negatives.length - 1; k >= 0; k--) {
+      const t = negatives[k];
+      if (!t.fromMinus) continue;
+      negatives.splice(k, 1);
+      const value = normalizeLiteral(t.raw);
+      positives.unshift({ raw: t.raw, wire: wireLiteral(value), label: value });
     }
   }
 
-  let finalPrimary = '';
-  if (primaryTokens.length > 0) {
-    const primaryIdx = 0;
-    finalPrimary = primaryTokens[primaryIdx].token.value;
-    for (let k = 0; k < primaryTokens.length; k++) {
-      if (k === primaryIdx) continue;
-      const pt = primaryTokens[k].token;
-      contains.push(pt.value);
-      modifiers.push({
-        raw: pt.raw,
-        kind: 'include',
-        value: pt.value,
-      });
-    }
+  const modifiers: ClassifiedQueryToken[] = [...scopeMods];
+  for (let k = 1; k < positives.length; k++) {
+    modifiers.push({ raw: positives[k].raw, kind: 'include', value: positives[k].label });
+  }
+  for (const t of negatives) {
+    modifiers.push({ raw: t.raw, kind: 'exclude', value: t.label });
   }
 
   return {
-    primaryPattern: finalPrimary,
-    contains,
-    excludes,
+    primaryPattern: positives[0]?.wire ?? '',
+    primaryRaw: positives[0]?.raw ?? '',
+    contains: positives.slice(1).map((t) => t.wire),
+    excludes: negatives.map((t) => t.wire),
     globs,
+    fileGlobs,
     modifiers,
     hasScopedRegex,
     hasScopedCase,
@@ -571,10 +558,55 @@ export function parseSearchQuery(raw: string, nowMs = Date.now()): ParsedSearchQ
     timeStartMs,
     timeEndMs,
   };
+
+  function normalizeLiteral(s: string): string {
+    const out = s.replace(/\\(\s)/g, '$1');
+    return out.startsWith('\\$') ? out.slice(1) : out;
+  }
+
+  /** Legacy `$()` / `$-()` / `$@()` / `$t()` / `$r()` / `$c()` / `$w()` tokens. */
+  function classifyLegacy(tokRaw: string) {
+    const phrase = /^\$\(([\s\S]*?)\)?$/.exec(tokRaw);
+    if (phrase) {
+      if (phrase[1]) addTerm(false, { raw: tokRaw, wire: wireLiteral(phrase[1]), label: `"${phrase[1]}"` });
+      return;
+    }
+    const exclude = /^\$[-!]\(([\s\S]*?)\)?$/.exec(tokRaw);
+    if (exclude) {
+      if (exclude[1]) addTerm(true, { raw: tokRaw, wire: wireLiteral(exclude[1]), label: exclude[1] });
+      return;
+    }
+    const source = /^(?:\$([-!]?)@|([-!])\$@)\(([\s\S]*?)\)?$/.exec(tokRaw);
+    if (source) {
+      const value = source[3].trim();
+      const neg = Boolean(source[1] || source[2]) || /^[-!]/.test(value);
+      if (value.replace(/^[-!@]+/, '')) addScope(tokRaw, value, neg);
+      return;
+    }
+    const time = /^[-+!]?\$(?:t|time)\(([\s\S]*?)\)?$/i.exec(tokRaw)?.[1];
+    if (time !== undefined) {
+      addTime(tokRaw, time);
+      return;
+    }
+    const mode = /^(?:\$([-+!]?)([a-zA-Z.*]+)|([-+!]?)\$([a-zA-Z.*]+))\(([\s\S]*?)\)?$/.exec(tokRaw);
+    if (mode) {
+      const sign = mode[1] || mode[3] || '';
+      const df = parseDollarFlags(`$${mode[2] || mode[4] || ''}`);
+      const body = mode[5];
+      if (!df || !body) return;
+      if (df.regex) hasScopedRegex = true;
+      if (df.caseSensitive) hasScopedCase = true;
+      if (df.wholeWord) hasScopedWord = true;
+      const wire = df.regex
+        ? wireRegex(body, df.caseSensitive, df.wholeWord)
+        : wireLiteral(body, df.caseSensitive, df.wholeWord);
+      addTerm(sign === '-' || sign === '!', { raw: tokRaw, wire, label: tokRaw.replace(/^[-+!]/, '') });
+    }
+  }
 }
 
 /**
- * Removes a single inline modifier token from `pattern` using whitespace/start/end boundary anchors
+ * Removes a single token from `pattern` using whitespace/start/end boundary anchors
  * so substrings inside other tokens (e.g. removing `-error` from `upstream-error -error`) are never corrupted.
  */
 export function removeInlineModifierFromPattern(pattern: string, rawToken: string): string {
@@ -587,4 +619,26 @@ export function removeInlineModifierFromPattern(pattern: string, rawToken: strin
     .split(/\s+/)
     .filter((t) => t !== rawToken)
     .join(' ');
+}
+
+/** Formats free text (e.g. a selection in the inspector) as a single search term. */
+export function formatSearchTerm(text: string): string {
+  const clean = text.trim();
+  if (!clean) return '';
+  const needsQuotes =
+    /[\s"]/.test(clean) || /^[-@/$]/.test(clean) || /^(?:in|time):/i.test(clean);
+  return needsQuotes ? `"${clean.replace(/(["\\])/g, '\\$1')}"` : clean;
+}
+
+/** Flips a term between "must contain" and "exclude" (`foo` ⇄ `-foo`, `"a b"` ⇄ `-"a b"`). */
+export function toggleTermExclusion(rawToken: string): string {
+  const t = rawToken.trim();
+  const legacyExclude = /^\$[-!]\(([\s\S]*)\)$/.exec(t);
+  if (legacyExclude) return formatSearchTerm(legacyExclude[1]);
+  const legacyPhrase = /^\$\(([\s\S]*)\)$/.exec(t);
+  if (legacyPhrase) return `-${formatSearchTerm(legacyPhrase[1])}`;
+  const negLegacyMode = /^[-!](\$[a-zA-Z.*]+\([\s\S]*\))$/.exec(t);
+  if (negLegacyMode) return negLegacyMode[1];
+  if (/^-(?:["/@]|[\p{L}\p{N}_])/u.test(t)) return t.slice(1);
+  return `-${t}`;
 }

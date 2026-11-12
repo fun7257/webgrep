@@ -9,16 +9,13 @@
 
   let { onInsert, onBackspace }: Props = $props();
 
-  // Each tap inserts a NEW scoped `$x()` token (multiple scoped modes can coexist);
-  // the highlight only reflects that a mode is currently active.
-  const toggles = $derived([
-    { label: '$r', token: '$r()', active: workbench.hasRegexActive },
-    { label: '$c', token: '$c()', active: workbench.hasCaseActive },
-    { label: '$w', token: '$w()', active: workbench.hasWordActive },
-    { label: '$t', token: '$t()', active: workbench.hasTimeActive },
-  ]);
-
-  const symbols = ['@', '-', '"'];
+  // Everything beyond plain words: exclude, phrase, where (`in:`), when (`time:`), regex.
+  const symbols = ['-', '"', 'in:', 'time:', '//'];
+  const active = $derived({
+    'in:': workbench.parsedGlobs.length + workbench.fileGlobs.length > 0,
+    'time:': workbench.hasTimeActive,
+    '//': workbench.hasRegexActive,
+  } as Record<string, boolean>);
 
   // Keep input focus (and the soft keyboard) while tapping toolbar buttons.
   function keepFocus(e: Event) {
@@ -36,19 +33,17 @@
   onpointerdown={keepFocus}
   class="flex items-center gap-1 px-2.5 py-1.5"
 >
-  {#each toggles as tg (tg.label)}
+  {#each symbols as sym (sym)}
     <button
       type="button"
-      onclick={() => onInsert(tg.token)}
-      class={`${btn} ${tg.active ? 'bg-primary/15 text-primary font-medium' : 'text-foreground'}`}
+      onclick={() => onInsert(sym)}
+      class={`${btn} ${
+        active[sym]
+          ? 'bg-primary/15 text-primary font-medium'
+          : 'text-foreground'
+      }`}
     >
-      {tg.label}
-    </button>
-  {/each}
-  <span class="mx-0.5 h-4 w-px bg-border"></span>
-  {#each symbols as sym (sym)}
-    <button type="button" onclick={() => onInsert(sym)} class={`${btn} text-foreground`}>
-      {sym}
+      {sym === '//' ? '/…/' : sym}
     </button>
   {/each}
   <button

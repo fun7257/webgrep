@@ -1,7 +1,7 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
   import { formatMs } from '$lib/utils';
-  import { AlertTriangle, Hash, Loader2, Square, Timer, X } from 'lucide-svelte';
+  import { AlertTriangle, Hash, Loader2, Rows3, Square, Timer, X } from 'lucide-svelte';
 
   const CONTAINS_CHIP_CLASSES = [
     'bg-primary/10 text-primary hover:bg-primary/20',
@@ -14,6 +14,11 @@
   );
   let excludeModifiers = $derived(
     workbench.inlineModifiers.filter((m) => m.kind === 'exclude')
+  );
+  let scopeAndTimeModifiers = $derived(
+    workbench.inlineModifiers.filter(
+      (m) => m.kind === 'file' || m.kind === 'exclude-file' || m.kind === 'flag'
+    )
   );
 </script>
 
@@ -59,6 +64,20 @@
           </span>
         {/if}
 
+        {#if workbench.nearbyLines > 0 && !workbench.isSearching}
+          <!-- Results come from the nearby-lines fallback: say so, and let the user go back to strict lines -->
+          <button
+            type="button"
+            onclick={() => workbench.disableNearbyLines()}
+            title={workbench.t.telemetry.nearbyTitle(workbench.nearbyLines)}
+            class="touch-target inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-1 font-mono text-[11px] text-primary hover:bg-primary/20 transition-colors shrink-0 cursor-pointer"
+          >
+            <Rows3 class="h-3 w-3" />
+            <span>{workbench.t.telemetry.nearbyChip(workbench.nearbyLines)}</span>
+            <X class="h-2.5 w-2.5 opacity-60" />
+          </button>
+        {/if}
+
         {#if workbench.limitHit}
           <span
             class="inline-flex items-center text-status shrink-0"
@@ -68,32 +87,73 @@
           </span>
         {/if}
 
-        <!-- Borderless Active Drill-Down Chips (+word / -word) -->
-        {#if includeModifiers.length > 0 || excludeModifiers.length > 0}
+        <!-- Borderless Active Drill-Down Chips (@source / $t / +word / -word) -->
+        {#if scopeAndTimeModifiers.length > 0 || includeModifiers.length > 0 || excludeModifiers.length > 0}
           <div class="flex flex-wrap items-center gap-1 ml-1">
-            {#each includeModifiers as mod, idx (`inc:${idx}:${mod.raw}`)}
+            {#each scopeAndTimeModifiers as mod, idx (`st:${idx}:${mod.raw}`)}
               <button
                 type="button"
-                title={`点击移除 "${mod.value}"`}
+                title={workbench.t.telemetry.removeChip(mod.raw)}
                 onclick={() => workbench.removeInlineModifier(mod.raw)}
-                class={`touch-target inline-flex items-center gap-1 rounded px-1.5 py-1 font-mono text-[11px] transition-colors cursor-pointer ${
-                  CONTAINS_CHIP_CLASSES[idx % CONTAINS_CHIP_CLASSES.length]
-                }`}
+                class="touch-target inline-flex items-center gap-1 rounded bg-secondary/50 px-1.5 py-1 font-mono text-[11px] text-foreground/85 hover:bg-secondary transition-colors cursor-pointer"
               >
-                <span class="truncate max-w-[140px]">+{mod.value}</span>
+                <span class="truncate max-w-[140px]">
+                  {mod.kind === 'file'
+                    ? `in:${mod.value}`
+                    : mod.kind === 'exclude-file'
+                      ? `-in:${mod.value}`
+                      : `time:${mod.value}`}
+                </span>
                 <X class="h-2.5 w-2.5 opacity-60" />
               </button>
             {/each}
-            {#each excludeModifiers as mod, idx (`exc:${idx}:${mod.raw}`)}
-              <button
-                type="button"
-                title={`点击移除 "${mod.value}"`}
-                onclick={() => workbench.removeInlineModifier(mod.raw)}
-                class="touch-target inline-flex items-center gap-1 rounded bg-secondary/50 px-1.5 py-1 font-mono text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            {#each includeModifiers as mod, idx (`inc:${idx}:${mod.raw}`)}
+              <span
+                class={`inline-flex items-center rounded font-mono text-[11px] transition-colors ${
+                  CONTAINS_CHIP_CLASSES[idx % CONTAINS_CHIP_CLASSES.length]
+                }`}
               >
-                <span class="truncate max-w-[140px]">-{mod.value}</span>
-                <X class="h-2.5 w-2.5 opacity-60" />
-              </button>
+                <button
+                  type="button"
+                  title={workbench.t.telemetry.toExclude(mod.value)}
+                  onclick={() => workbench.toggleInlineModifierExclude(mod.raw)}
+                  class="touch-target pl-1.5 pr-1 py-1 truncate max-w-[140px] cursor-pointer"
+                >
+                  +{mod.value}
+                </button>
+                <button
+                  type="button"
+                  title={workbench.t.telemetry.removeChip(mod.value)}
+                  aria-label={workbench.t.telemetry.removeChip(mod.value)}
+                  onclick={() => workbench.removeInlineModifier(mod.raw)}
+                  class="touch-target pr-1.5 pl-0.5 py-1 opacity-60 hover:opacity-100 cursor-pointer"
+                >
+                  <X class="h-2.5 w-2.5" />
+                </button>
+              </span>
+            {/each}
+            {#each excludeModifiers as mod, idx (`exc:${idx}:${mod.raw}`)}
+              <span
+                class="inline-flex items-center rounded bg-secondary/50 font-mono text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <button
+                  type="button"
+                  title={workbench.t.telemetry.toInclude(mod.value)}
+                  onclick={() => workbench.toggleInlineModifierExclude(mod.raw)}
+                  class="touch-target pl-1.5 pr-1 py-1 truncate max-w-[140px] cursor-pointer"
+                >
+                  -{mod.value}
+                </button>
+                <button
+                  type="button"
+                  title={workbench.t.telemetry.removeChip(mod.value)}
+                  aria-label={workbench.t.telemetry.removeChip(mod.value)}
+                  onclick={() => workbench.removeInlineModifier(mod.raw)}
+                  class="touch-target pr-1.5 pl-0.5 py-1 opacity-60 hover:opacity-100 cursor-pointer"
+                >
+                  <X class="h-2.5 w-2.5" />
+                </button>
+              </span>
             {/each}
           </div>
         {/if}
