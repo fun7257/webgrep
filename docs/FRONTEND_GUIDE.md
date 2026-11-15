@@ -53,24 +53,26 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
   - **不做打字实时检索（Zero Live-Search）**：输入或切换筛选开关时仅编辑草稿，绝不在按键期间发请求或污染搜索历史；按 **`Enter` 键**或点击左侧搜索按钮执行搜索，并像 Google Search 一样将当前输入词与 `Aa`/`ab`/`.*` 开关留在单文本框内，方便微调重搜；当查询未变化且再次按 `Enter` 时强制穿透本地缓存向后端发起最新磁盘检索（`forceRefresh: true`）。
 - **无限层级同行收敛搜索（Infinite-Level Same-Line Convergence）**：
   - 点击搜索框右侧 **`+ 继续筛选`（`+ Filter`）** 或按 **`Shift + Enter`**，即可将当前输入文本连同 `Aa` / `ab` / `.*` 及同行 `+` 包含 / `-` 排除状态锁定为条件链中的下一层级（`#1` → `#2` → `#3` → …），同时将主搜索框重置为空白单文本框以输入下一层筛选条件。
-  - **零 CLS 条件链条（Condition Chain Bar）**：位于独立范围栏 `ScopeBar` 下方，按序展示已锁定的各级条件（`#1` → `#2` → `#3` …）及其 `Aa` / `ab` / `.*` 标记：
+  - **零 CLS 条件链条（Condition Chain Bar）**：位于搜索框下方，按序展示已锁定的各级条件（`#1` → `#2` → `#3` …）及其 `Aa` / `ab` / `.*` 标记：
     - 点击第 2 层及以后层级的 `+` / `-` 按钮可原地切换同行「包含 / 排除」；
     - 点击任意层级的文本可将该层条件连同开关状态原位取回单文本搜索框重新编辑；
     - 点击 `×` 移除该层级，末尾提供「清空条件链」一键重置。
-- **独立范围栏 [`ScopeBar.svelte`](../web/src/lib/components/ScopeBar.svelte) + 数据源选择器 [`SourcePickerModal.svelte`](../web/src/lib/components/SourcePickerModal.svelte)（Decoupled Scope Bar）**：
-  - 数据源、时间范围与文本内容彻底解耦，位于搜索框正下方两个对称紧凑胶囊中（不在主界面平铺罗列一排数据源），**搜索框内不解析 `in:` 或 `time:` 等任何内联修饰词**（`in:foo`、`-O3`、`@Vector` 一律作为 100% 纯字面量内容检索）；**不再提供文件类型筛选入口**。
-  - 包含两大正交维度：`数据源`（主界面仅保留单个紧凑汇总胶囊——默认显示「全部数据源」，选中单源时显示该源图标与名称，多选/排除时显示计数，右侧带 `×` 一键恢复全部；点击胶囊弹出响应式 [`SourcePickerModal.svelte`](../web/src/lib/components/SourcePickerModal.svelte)，桌面双列宽弹窗、移动端可下拉关闭底部抽屉，支持按名称/路径/容器实时搜索、`全部/目录/单文件/Docker` 分类过滤、置顶「全部数据源」、默认点击卡片直接单选切换并关闭，也可点左侧勾选框或开启 `多选模式` 批量勾选/排除与一次性应用）与 `时间范围`（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)：纯粹的时间段选择器，提供 `15m` / `1h` / `6h` / `24h` / `今天` / `昨天` / `7d` / `30d` 快捷预设、可视化区间日历、`起/止` 日期与时分秒精准输入、开放「现在」上界与 20+ 种日志时间戳粘贴直解析，顶部附带一行只读「当前数据源时间基准摘要 + 数据源配置入口」而**不在搜索栏提供维度切换**；实际时间筛选依据采用**按数据源独立不叠加**的 `timeMode: 'source'` 模型——默认普通目录/文件源仅按文件 `stat.mtime` 筛选、配置了 `config.timeFormat` 为 `'auto'`（作为 `内容时间` 下的默认第一选项，内置 20+ 种常见时间格式零分配自动嗅探）或自定义 `yyyy-MM-dd` / `yyyy-hm` 日期图像、传统 `strftime`、`json:<field>`、`regex:<pattern>` 的日志源及 `docker` 零落盘容器日志源（默认 `'auto'`，也可显式切为 `文件修改时间`）则仅按行内解析时间戳 + 堆栈续行回溯筛选，且在添加/编辑数据源时通过 [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) 二分开关（`文件修改时间` | `内容时间`）结合 `POST /api/time/preview` 随时对自动识别或自定义格式实时测试样例日志），修改任一范围会基于当前有效条件自动执行/更新（或点击 `清除范围` 重置）。
+- **搜索框左侧双内嵌正交范围选择器（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) + [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)，Decoupled Source & Time Scope）**：
+  - 数据源、时间范围与文本内容彻底解耦，**搜索框内不解析 `in:` 或 `time:` 等任何内联修饰词**（`in:foo`、`-O3`、`@Vector` 一律作为 100% 纯字面量内容检索）；**不再提供文件类型筛选入口**，也不再在搜索框下方单独占据一行 `ScopeBar`。
+  - 放大镜图标紧邻右侧、细竖线左侧依次内嵌两大正交维度，与下方同源弹窗系统高度一致：
+    1. **数据源（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte)）**：默认显示简洁的「全部」，单源时显示对应类型图标与源名（桌面带一键重置 `×`），多选时显示 `已选 N`；点击弹出与 `bg-popover` 主题同源的列表勾选浮层——桌面端锚定于触发器正下方并自动视口裁边、自动聚焦顶部**模糊搜索**输入框（支持子序列与空格多词匹配及 `text-primary` 字符高亮）、仅在存在 2 种及以上源类型时渐进渲染单色分类键帽、置顶 `[✓] 全部数据源`、整行点击实时切换勾选且保持列表展开方便连续多选、全部取消勾选自动回到「全部」、支持 `Alt+点击` 排除、`仅看` 单源直达与 `↑↓`/`Enter`/`Tab`/`Esc` 键盘流；移动端为可下拉关闭底部面板；
+    2. **时间范围（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)）**：桌面端默认显示「不限」与下拉箭头、窄屏（`< 640px`）空闲态自动收拢为纯净时钟图标以守住 `<input>` 宽度预算（选定后高亮显示紧凑时长如 `45m`/`今天`/`11-14..`）；点击弹出与 `SourcePickerPopover` 1:1 同源的 `bg-popover` 主题面板（移动端为可下拉关闭底部面板），顶部提供自动聚焦的高自由度快捷输入栏（支持模糊过滤内置预设、`45m` / `2h` / `最近10分钟` 等任意相对时长及整行日志/时间戳/区间直接粘贴解析，按回车 1 键直达并实时联动下方槽位）；默认态顶部置顶 `[✓] 全部时间` 与一行紧凑「当前数据源时间基准摘要 + 配置跳转」；主体为按排障时间尺度分层的 3×4 快捷矩阵（`5m` / `15m` / `30m` / `1h`、`3h` / `6h` / `12h` / `24h`、`今天` / `昨天` / `7d` / `30d`），悬停/键盘移动与重开面板时自动实时同步至下方分段槽位；下方为默认预填好的 `起 / 止` 分段式 `年 月 日 | 时:分:秒` 槽位输入框（支持点击整段高亮、智能自动跳格、`↑↓` 步进微调、`现在` 开放上界切换、以及整行日志与 20+ 种时间戳/区间直接粘贴提取）；实际时间筛选依据采用**按数据源独立不叠加**的 `timeMode: 'source'` 模型——默认普通目录/文件源仅按文件 `stat.mtime` 筛选、配置了 `config.timeFormat` 为 `'auto'`（作为 `内容时间` 下的默认第一选项，内置 20+ 种常见时间格式零分配自动嗅探）或自定义 `yyyy-MM-dd` / `yyyy-hm` 日期图像、传统 `strftime`、`json:<field>`、`regex:<pattern>` 的日志源及 `docker` 零落盘容器日志源（默认 `'auto'`，也可显式切为 `文件修改时间`）则仅按行内解析时间戳 + 堆栈续行回溯筛选，且在添加/编辑数据源时通过 [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) 二分开关（`文件修改时间` | `内容时间`）结合 `POST /api/time/preview` 随时对自动识别或自定义格式实时测试样例日志），修改任一范围会基于当前有效条件自动执行/更新（或点击 `×` / `全部时间` 重置）。
 
 ### 2.2 查询模型、严格单行匹配与前端缓存规范（[`query.ts`](../web/src/lib/query.ts) / [`state.svelte.ts`](../web/src/lib/state.svelte.ts) / [`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）
 
-> **显式回车执行；多层级递进 = 同一行同行收敛（`+` 包含 / `-` 排除）；范围归 `ScopeBar`；搜索框 100% 纯文本内容；严格单行视图。**
+> **显式回车执行；多层级递进 = 同一行同行收敛（`+` 包含 / `-` 排除）；范围归内嵌 `ScopeFilter`；搜索框 100% 纯文本内容；严格单行视图。**
 > 设计依据：搜索框内部消除一切隐式语法、空格切分与打字实时抖动，前端将结构化 `QueryStep[]` + `ScopeFilter` 编译为后端 `libwebgrep` 线上词（`$c`/`$w`/`$r`/`$rcw`）与独立范围字段，从根本上解决引号转义冲突与缓存键失真问题。
 
 | 维度 / 操作 | 规范说明 | 边界与实现 |
 |------|------|----------|
 | 多层级条件链 + 当前输入 | 所有条件必须在**同一行**同时满足（AND 管道），每个条件内部空格保留为字面量空格 | 正向条件首位作为 `primaryPattern`、其余作 `contains`，否定条件作 `excludes`（第 2 层及以后可通过 `+`/`-` 切换，或只保留至少 1 个正向词/时间范围） |
 | `Aa` / `ab` / `.*` 显式开关 | 分别控制当前步骤区分大小写（`$c`）、全词匹配（`$w`）、正则模式（`$r`），可任意组合为 `$rc` / `$rw` / `$cw` / `$rcw` | 默认全关；纯文本恰好形如 `$x(...)` 时在编译期用 `$r(...)` 转义防止后端误解析为修饰符；正则编译失败直接报错诊断，严禁静默退化 |
-| 独立范围筛选（`ScopeBar`） | `sources`、`excludedSources`（编码为 `globs: ["!id"]`）、`timePreset`（内置预设或自定义 `开始..结束` 区间，编译为 `timeStartMs` / `timeEndMs`）、`timeMode: 'source'`（按数据源 `config.timeFormat` 与流路径自动决定 `mtime` 或行内时间戳，**互不叠加**）、`sourceTimeFormatsSig` 与 `tzOffsetMin` | 与文本检索解耦，不占用搜索框字符（`types` 已从界面移除并固定为空数组）；无文本输入时单独选择 `timePreset` 亦可触发按时间过滤检索（`mtime` 源空关键字按单文件 1 条摘要输出，内容时间源按行内时间戳流式返回且不叠加文件 `mtime` 预裁剪）；上述字段及数据源格式签名均纳入前端 L0 与后端 L1/L2 缓存键完全隔离 |
+| 独立范围筛选（`ScopeFilter`） | `sources`、`excludedSources`（编码为 `globs: ["!id"]`）、`timePreset`（内置预设或自定义 `开始..结束` 区间，编译为 `timeStartMs` / `timeEndMs`）、`timeMode: 'source'`（按数据源 `config.timeFormat` 与流路径自动决定 `mtime` 或行内时间戳，**互不叠加**）、`sourceTimeFormatsSig` 与 `tzOffsetMin` | 与文本检索解耦，不占用搜索框字符（`types` 已从界面移除并固定为空数组）；无文本输入时单独选择 `timePreset` 亦可触发按时间过滤检索（`mtime` 源空关键字按单文件 1 条摘要输出，内容时间源按行内时间戳流式返回且不叠加文件 `mtime` 预裁剪）；上述字段及数据源格式签名均纳入前端 L0 与后端 L1/L2 缓存键完全隔离 |
 | 严格单行匹配（`nearbyLines = 0`） | 前后端强制 `nearbyLines = 0`、`strictLine = true`，界面不再提供跨行邻近兜底 | 确保每条命中都在同一行内同时满足全部 `+`/`-` 条件 |
 | 4 层缓存与持久化体系 | `localStorage` 结构化历史/设置 + 内存 L0 步骤 LRU 精确缓存 + 16 槽位上下文预览 LRU | **搜索历史**（`MAX_SEARCH_HISTORY = 30`）仅在用户显式点击/回车执行后按 `historyId` 去重写入；**L0 结果缓存**（`MAX_L0_ENTRIES = 24`、单条 `<= 20,000`、总行预算 `<= 50,000`、`30s` TTL）键包含 `tenant`、`sourceRevision`、生效源列表、`ScopeFilter`、`QueryStep[]` 与 `timeBucket`，命中后真正短路零网络请求并重建 `groupIndexByFile` 索引同时保留 `HitItem` 对象引用以命中 `WeakMap` 缓存；**预览 LRU** 配合 `AbortController` + `inspectSeq` 序号守卫防旧响应竞态 |
 - **单条记录纯粹预览（[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）**：
@@ -82,7 +84,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
   - **灰色补全（ghost text）**：光标在末尾时优先展示单词补全剩余部分，否则在单步非正则模式下展示匹配的正面单条历史文本（`historyGhost`）；`Tab` / `→` 接受；
   - **正则疑似提醒**：关闭 `.*` 时若输入含明显正则元字符（`\d+`、`.*`、`^foo` 等），在下拉底部提示一键「开启 `.*` 正则」；
   - **无结果兜底**：结果为空时给出最多 5 个一键修正（关闭 `Aa`、关闭 `ab`、搜全部数据源、不限时间、移除最后一层条件），点击即生效并自动执行重搜。
-- 结果行上点击数据源名或长按菜单可按数据源聚焦/排除（同步至 `ScopeBar`）；预览面板划词点击「+ 筛选」「- 排除」「搜该词」直接操作结构化步骤链。
+- 结果行上点击数据源名或长按菜单可按数据源聚焦/排除（同步至 `ScopeFilter` / 搜索框内嵌触发器）；预览面板划词点击「+ 筛选」「- 排除」「搜该词」直接操作结构化步骤链。
 
 ---
 
@@ -178,17 +180,24 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
   2. 搜索框底边显示 `1.5px` 的 GPU 流光进度条（`.search-progress-shimmer`），提供非侵入式的“正在扫描”反馈；
   3. 当新搜索的首屏聚合数据到达（或 `done` 消息到达）时，在 `flushPendingHitsSync()` 内部**同一渲染帧内原子替换**旧数据。
 
-### 5.2 两阶段流式节拍器与 VSync 帧边界对齐（[`state.svelte.ts`](../web/src/lib/state.svelte.ts)）
-后端多线程引擎在毫秒级即可吐出分片。如果前端以 16ms（60Hz）毫无节制地刷新列表高度与计数，用户眼睛看到的将是一团无法阅读的跳动残影。
+### 5.2 自适应帧率与 VSync 整帧分频节拍器（60Hz–240Hz，[`frame.ts`](../web/src/lib/frame.ts) + [`state.svelte.ts`](../web/src/lib/state.svelte.ts)）
+后端多线程引擎在毫秒级即可吐出分片。固定 60ms/80ms 节奏在 60Hz 显示器（`16.67ms`/帧）上既不是帧周期整倍数、又未补偿 `setTimeout + requestAnimationFrame` 的 +1 帧滑移，会导致 4 帧/5 帧（`66.7ms / 83.3ms`）pulldown 抖动；同时 60Hz 的单帧 CPU 预算本身是 120Hz 的 2 倍，但多等一帧的视觉代价也是 2 倍。
 
-- **阶段一：首屏聚合窗口（`60ms`）**：
-  - 当 `awaitingFirstChunk === true` 时，收到首个 `hits` 分片后开启 `60ms` 聚合窗口（`scheduleFlushHits(60)`）。
-  - 若搜索在 `60ms` 内完成（如常见的 `20ms–55ms` 快搜），`done` 帧直接触发一次性全量渲染——**整个搜索生命周期 DOM 只更新 1 次**，彻底消灭 `1条 -> 17条 -> 81条 -> 546条` 的碎片跳动。
-  - 若搜索耗时超过 `60ms`（如扫描数 GB 日志），在 `60ms` 到期时已攒够铺满整个首屏视口的命中行，一次性平滑替换首屏。
-- **阶段二：稳态流式节拍（`80ms` + `requestAnimationFrame`）**：
-  - 首屏铺满后，后续分片以 `80ms`（约 12.5fps 的舒适阅读节奏）合并，并通过 `requestAnimationFrame` 对齐到浏览器下一帧 VSync 起点统一提交。
-- **高频交互事件全面 rAF 锁流**：
-  - 虚拟列表 `onscroll`（[`ResultList.svelte`](../web/src/lib/components/ResultList.svelte)）与右侧详情栏宽度拖拽 `pointermove`（[`App.svelte`](../web/src/App.svelte)，使用 Pointer Events + `setPointerCapture`，不再使用 `mouse*` 事件，以兼容触屏与笔）必须经过 `requestAnimationFrame` 节流，保证每帧最多触发 1 次状态变更。
+- **自适应屏幕刷新率探测（0 常驻开销）**：
+  - [`frame.ts`](../web/src/lib/frame.ts) 在启动、标签页重新可见（`visibilitychange`）或跨屏 DPI 切换（`dppx` 变化）时执行一次 10 帧短突发 `requestAnimationFrame` 采样并自动停止（日常 0 rAF 占用），吸附识别 60 / 75 / 90 / 100 / 120 / 144 / 165 / 240Hz，并同步更新 CSS 变量 `--frame-ms`、`--motion-switch`、`--motion-sheet`。
+- **阶段一：首屏聚合与 `-0.5` 帧提前唤醒**：
+  - 收到首个 `hits` 分片后按当前刷新率计算目标整数帧窗口（60Hz 为 `3` 帧 ≈ `50ms`，120Hz 为 `6` 帧 = `50ms`），并以 `(targetFrames - 0.5) * frameMs`（`41ms` @ 60Hz / `45ms` @ 120Hz）提前半帧唤醒 `requestAnimationFrame`，精确命中目标 VSync 边界，不滑帧也不闪白。
+- **阶段二：稳态流式整帧分频（`15fps` 舒适节拍）**：
+  - 首屏铺满后按整数帧分频合并（60Hz 为 `4` 帧 = `66.7ms` 精确 1/4 分频，90Hz 为 `6` 帧，120Hz 为 `8` 帧 = `66.7ms` 精确 1/8 分频，144Hz 为 `10` 帧），彻底消除 `60/80ms` 在 60Hz 上的帧率不整除抽动。
+- **高频交互最新样本 rAF 合并（Latest-Sample Coalescing）**：
+  - 虚拟列表 `onscroll`（[`ResultList.svelte`](../web/src/lib/components/ResultList.svelte)）与右侧详情栏宽度拖拽 `pointermove`（[`App.svelte`](../web/src/App.svelte)，使用 Pointer Events + `setPointerCapture`）必须**先覆盖保存最新坐标（`pendingScrollTop` / `pendingResizeX`），再复用待定 rAF 帧**（松手/停止时若有未落地帧则同步收尾），且按帧档位动态调节虚拟列表 `overscanPx`（60Hz `560px` / 高刷 `420px`），避免 60Hz 窗口丢弃帧内后段滚动偏移。
+- **0ms 指针选中、`flushSync` 同步落盘与零阻尼反馈（Zero-Latency Selection）**：
+  - 所有非浮层关闭类持久交互控件（结果行、模式开关 `Aa`/`ab`/`.*`、分组切换 `Segmented`、`Header` 一级抽屉触发按钮、[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) 复选行与打开数据源浮层触发器等）在桌面端鼠标左键 `onpointerdown` 时通过 Svelte `flushSync` 同步提交选中状态与光标选区（并在 `onclick` 中以 `e.detail > 0` 去重保护兼容键盘 `Enter`/`Space` 与触控点击），确保同一物理帧内即刻生效而不在 60Hz 上意外滑入下一帧；弹窗定位（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)、[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte)）与输入框聚焦同样拒绝冗余 1 帧 rAF 延迟。
+  - 关闭浮层/抽屉的触发器保留在 `onclick` 中执行，避免触控或指针“穿透点击（Ghost Click）”。
+  - 严禁在选中态切换路径上使用 Tailwind `transition-colors` / `transition-all`（默认 `150ms`），统一改用即时状态类与 `active:` 触感反馈；仅保留 `Switch` 滑块位移动效（绑定 `--motion-switch`，60Hz 为 4 帧 ≈ `67ms`）。
+- **主线程与详情/词库自适应解耦**：
+  - 键盘高速连按（`e.repeat`）或超大记录（`hit.text.length > frameProfile.deferInspectorThresholdChars`，60Hz 为 `12KB`、高刷为 `4KB`，充分利用 60Hz 单帧 `16.67ms` 预算而避免无效 +1 帧拖延）切换时，右侧 `InspectorPane` 通过 `requestAnimationFrame` 合并渲染（`inspectedHit` 与 `activeHit` 解耦）；`InspectorPane` 内部使用 `queryHighlightKey` 绑定高亮缓存并按悬停/焦点按需挂载字段操作按钮。
+  - 搜索框获焦时的补全词库收集必须使用 `requestIdleCallback`（及 `setTimeout` 回退）异步惰性构建，且流式检索期间跳过构建，严禁在 `onfocus` 主线程同步遍历扫描全部命中行。
 
 ---
 
@@ -214,19 +223,21 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 在提交任何前端代码前，逐条核对以下问题：
 
-- [ ] 搜索框是否保持了纯粹的类 Google 单文本输入框（内部仅保留 `Aa`、`ab`、`.*` 显式开关、`+ 继续筛选` 与 `×` 清除，无 `in:`/`time:` 内联语法解析，数据源与时间范围收口在 `ScopeBar` / `SourcePickerModal`）？
+- [ ] 搜索框是否保持了纯粹的类 Google 单文本输入框（仅放大镜紧邻右侧依次内嵌默认 `全部` 的数据源列表勾选入口与默认 `不限` 的时间范围入口，内部文本区保持单行纯净与 `Aa`、`ab`、`.*`、`+ 继续筛选`、`×`，无 `in:`/`time:` 内联语法解析）？
 - [ ] 是否保持了严格单行匹配默认设置（`nearbyLines = 0` / `strictLine = true`）且仅在按 `Enter`（或点击搜索/筛选确认）时触发检索？
 - [ ] `InspectorPane.svelte` 是否 100% 专注当前选中的单条命中记录（`context = 0`，无前后无关邻近行干扰）？
 - [ ] 新增的大数组/流式集合是否使用了 `$state.raw`？
 - [ ] `{#each}` 列表循环内是否存在每次重绘都执行的复杂函数或未缓存的字符串处理？（应使用 `WeakMap` 缓存或外提 `$derived` 原始值）
 - [ ] 虚拟列表是否保持了 `translate3d(0, offsetY, 0)` + `.virtual-row-strict`（`contain: strict`）结构？
 - [ ] 新搜索触发时是否保持了 `awaitingFirstChunk`（无缝保留旧结果，不闪白屏）？
+- [ ] 选中态切换是否已消除 `150ms` `transition-colors`/`transition-all` 阻尼，并在安全控件上接入鼠标主按键 `onpointerdown` + `flushSync` 零延迟响应？
+- [ ] 高频 `scroll` / `pointermove` 节流是否缓存了最新样本而非首样本，且流式刷帧/延后阈值已接入 [`frame.ts`](../web/src/lib/frame.ts) 自适应刷新率配置？
 - [ ] 动态出现的 UI 元素是否会导致相邻文字或列表发生水平/垂直位移（CLS）？
 - [ ] 是否引入了 `amber/emerald/rose/sky/fuchsia` 等硬编码彩色类或新的颜色令牌？（只允许 `primary` / `status` / 灰阶）
 - [ ] 新增按钮、状态是否优先用图标，文字是否放进 `title` / `aria-label`？
 - [ ] 可点击元素在触屏下命中区是否 ≥ 44px（`.touch-target`）？是否依赖 `hover` 才能看到核心操作？
 - [ ] 窄屏（< 768px）下列表/详情/设置是否仍可用？输入框字号在触屏下是否为 16px（避免 iOS 聚焦放大）？
-- [ ] 快捷键是否使用 `e.code`（`Alt + C` / `Alt + W` / `Alt + R`）、是否同步更新了设置里的「快捷键」页（`i18n.ts`）？
+- [ ] 快捷键是否使用 `e.code`（`Alt + C` / `Alt + W` / `Alt + R` / `?` / `⌘,`）、是否同步更新了顶栏一级「快捷键说明」抽屉（`i18n.ts` / `ShortcutsPane.svelte`）？
 - [ ] 文案是否进入 `i18n.ts`（zh / en 同步），组件内有无散落的 `locale === 'zh' ? … : …`？
 - [ ] `npm --prefix web run test && npm --prefix web run check && npm --prefix web run build` 是否零报错、零警告通过？
 
@@ -311,7 +322,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 ### 10.4 手势与面板
 - 长按结果行（480ms）弹出底部操作面板：复制、限定 `in:源`、排除 `-in:源`；移动超过 8px 取消。
 - 结果列表在 `scrollTop === 0` 时下拉可重新搜索（`touchstart/move/end`，带 `RefreshCw` 指示）；列表使用 `overscroll-contain`。
-- 设置与命令面板在窄屏均为底部抽屉/顶部全宽；设置抽屉顶部有拖拽把手，下拉超过 96px 关闭。
+- 顶栏 `<Header />` 右侧的三个独立一级菜单（「数据源」、「快捷键说明」、「设置」）共享统一的 [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 容器：桌面端在 `<Header />` 下方从右侧 `translate3d` 丝滑滑出，采用与主界面一致的 `bg-background` 画布与透明无模糊遮罩以保持结果实时预览，内部复用 `bg-card/55` Layer-1 色调分组及单色高反差抬升键帽样式 `Segmented`；各面板完全独立、互不交叉切换；移动端为顶部带拖拽把手的底部抽屉，下拉超过 96px 关闭；搜索放大镜右侧 [`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) 与 [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte) 在桌面端均为同源 `bg-popover` 锚定浮层，在窄屏均为可下拉关闭底部面板；命令面板在窄屏均为顶部全宽/底部视图。
 
 ### 10.5 视口与触控细节
 - 根容器使用 `h-app`（`100vh` → `100dvh`），顶/底使用 `pt-safe` / `pb-safe`（`env(safe-area-inset-*)`），`index.html` 的 viewport 带 `viewport-fit=cover`。
@@ -320,7 +331,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 ## 十一、设置与数据源面板规范
 
-- [`SettingsPopover.svelte`](../web/src/lib/components/SettingsPopover.svelte) 只是外壳（遮罩、图标标签栏、标题栏、拖拽把手）；内容在 `components/settings/`：`GeneralPane`、`SourcesPane`（含 `AddSourceForm`）、`ShortcutsPane`。标签页固定为三个：通用、数据源、快捷键。
+- [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 负责统一的工作区右侧滑出/移动端底部抽屉外壳（桌面端透明无模糊遮罩、GPU 进退场动画、移动端拖拽把手），[`DrawerTemplate.svelte`](../web/src/lib/components/ui/DrawerTemplate.svelte) 负责统一的协调色页眉模板（图标徽章、标题、计数、右侧操作区与关闭按钮），[`SettingsPopover.svelte`](../web/src/lib/components/SettingsPopover.svelte) 根据传入的独立 `mode`（`'sources' | 'shortcuts' | 'settings'`）分别挂载对应的单功能子面板（`SourcesPane`〔含 `AddSourceForm`〕、`ShortcutsPane`、`GeneralPane`），彼此无标签栏或交叉跳转入口。
 - 设置项统一使用 [`ui/SettingRow`](../web/src/lib/components/ui/SettingRow.svelte)（图标 + 短标签 + 控件，说明放 `hint`）；二选/多选用 [`ui/Segmented`](../web/src/lib/components/ui/Segmented.svelte)（图标或短文字）；开关用 `ui/Switch`，数值用 `ui/NumberStepper`。**不要**在面板里手写分段按钮样式。
 - 会重新搜索的设置（最大结果数、`hidden`、`respectIgnore`）走“保存 + 在有已生效查询时重搜”；仅影响显示的设置（字体大小、自动换行、行距、单条预览行数 `previewLines`）只保存并即时生效（已移除实时防抖/liveSearch 与邻近上下文行数设置）。
 - 数据源：

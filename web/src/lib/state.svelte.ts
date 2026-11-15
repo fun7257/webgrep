@@ -19,6 +19,8 @@ import type {
   WsSearchMessage,
 } from './types';
 import { messages, type Locale } from './i18n';
+
+export type DrawerPanelId = 'sources' | 'shortcuts' | 'settings';
 import {
   buildQueryCacheKeys,
   compileSearchQuery,
@@ -35,6 +37,12 @@ import {
   toggleMultiSourceSelection,
 } from './source-picker';
 import { formatTimeScopeLabel } from './time-range';
+import {
+  applyFrameProfileCssVars,
+  buildFrameProfileForHz,
+  startAdaptiveFrameProbe,
+  type FrameProfile,
+} from './frame';
 import type { ResultFix } from './suggest';
 
 const HISTORY_STORAGE_KEY = 'webgrep.searchHistory.v2';
@@ -112,6 +120,8 @@ class WorkbenchState {
   private pendingSearchOnOpen = false;
   private isUnloading = false;
   private lifecycleBound = false;
+  private stopFrameProbe: (() => void) | null = null;
+  frameProfile = $state.raw<FrameProfile>(buildFrameProfileForHz(60));
 
   // Structured Search State: committed progressive steps + single-text draft + independent ScopeFilter
   steps = $state<QueryStep[]>([]);
@@ -175,24 +185,44 @@ class WorkbenchState {
   sourcesLoading = $state<boolean>(false);
   sourcesLoaded = $state<boolean>(false);
   addSourceModalOpen = $state<boolean>(false);
-  settingsTab = $state<'general' | 'sources' | 'shortcuts'>('general');
+  drawerPanel = $state<DrawerPanelId | null>(null);
   sourceAddOpen = $state<boolean>(false);
+  sourcePickerOpen = $state<boolean>(false);
+  timePickerOpen = $state<boolean>(false);
 
-  openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
-    this.sourcePickerOpen = false;
+  rightDrawerOpen = $derived<boolean>(this.drawerPanel !== null);
+  settingsOpen = $derived<boolean>(this.drawerPanel === 'settings');
+  sourcesDrawerOpen = $derived<boolean>(this.drawerPanel === 'sources');
+  shortcutsDrawerOpen = $derived<boolean>(this.drawerPanel === 'shortcuts');
+
+  openSourcesDrawer(expandAdd = false) {
     this.paletteOpen = false;
-    if (tab === 'add-source') {
-      this.settingsTab = 'sources';
-      this.sourceAddOpen = true;
-    } else {
-      this.settingsTab = tab;
-    }
-    this.settingsOpen = true;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.sourceAddOpen = expandAdd;
+    this.drawerPanel = 'sources';
+  }
+
+  openShortcutsDrawer() {
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.sourceAddOpen = false;
+    this.drawerPanel = 'shortcuts';
+  }
+
+  openSettingsDrawer() {
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.sourceAddOpen = false;
+    this.drawerPanel = 'settings';
   }
 
   openSourcePicker() {
     this.paletteOpen = false;
-    this.settingsOpen = false;
+    this.timePickerOpen = false;
+    this.closeRightDrawer();
     this.sourcePickerOpen = true;
   }
 
@@ -200,12 +230,55 @@ class WorkbenchState {
     this.sourcePickerOpen = false;
   }
 
+  toggleSourcePicker() {
+    if (this.sourcePickerOpen) {
+      this.closeSourcePicker();
+    } else {
+      this.openSourcePicker();
+    }
+  }
+
+  openTimePicker() {
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.closeRightDrawer();
+    this.timePickerOpen = true;
+  }
+
+  closeTimePicker() {
+    this.timePickerOpen = false;
+  }
+
+  toggleTimePicker() {
+    if (this.timePickerOpen) {
+      this.closeTimePicker();
+    } else {
+      this.openTimePicker();
+    }
+  }
+
+  closeSettings() {
+    if (this.drawerPanel === 'settings') this.drawerPanel = null;
+  }
+
+  closeRightDrawer() {
+    this.sourceAddOpen = false;
+    this.drawerPanel = null;
+  }
+
+  openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
+    if (tab === 'sources') this.openSourcesDrawer(false);
+    else if (tab === 'add-source') this.openSourcesDrawer(true);
+    else if (tab === 'shortcuts') this.openShortcutsDrawer();
+    else this.openSettingsDrawer();
+  }
+
   openSourceManager() {
-    this.openSettings('sources');
+    this.openSourcesDrawer(false);
   }
 
   openAddSourceModal() {
-    this.openSettings('add-source');
+    this.openSourcesDrawer(true);
   }
 
   enabledSourceCount = $derived<number>(
@@ -222,6 +295,7 @@ class WorkbenchState {
 
   // Active hit & Right Inspector + File Context LRU
   activeHitIndex = $state<number>(-1);
+  inspectedHit = $state.raw<HitItem | null>(null);
   scrollToActiveTick = $state<number>(0);
   inspectedPath = $state<string | null>(null);
   inspectedLine = $state<number>(1);
@@ -232,6 +306,7 @@ class WorkbenchState {
   private fileContextCache = new Map<string, FileContextCacheEntry>();
   private inspectSeq = 0;
   private inspectAbort: AbortController | null = null;
+  private inspectorRaf: number | null = null;
 
   // UI Layout, Theme & Client Preferences
   locale = $state<Locale>('zh');
@@ -240,8 +315,6 @@ class WorkbenchState {
   rightInspectorOpen = $state<boolean>(true);
   leftSidebarWidth = $state<number>(260);
   rightInspectorWidth = $state<number>(520);
-  settingsOpen = $state<boolean>(false);
-  sourcePickerOpen = $state<boolean>(false);
   paletteOpen = $state<boolean>(false);
   detailOpen = $state<boolean>(false);
   isCompact = $state<boolean>(false);
@@ -334,9 +407,15 @@ class WorkbenchState {
     this.loadCachedSources();
     if (typeof window !== 'undefined' && !this.lifecycleBound) {
       this.lifecycleBound = true;
+      applyFrameProfileCssVars(this.frameProfile);
+      this.stopFrameProbe = startAdaptiveFrameProbe((profile) => {
+        this.frameProfile = profile;
+      });
       window.addEventListener('beforeunload', () => {
         this.isUnloading = true;
         this.clearWsDegradedTimer();
+        this.stopFrameProbe?.();
+        this.stopFrameProbe = null;
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = null;
@@ -1327,14 +1406,23 @@ class WorkbenchState {
     }
   }
 
+  private clearInspectorSchedule() {
+    if (this.inspectorRaf !== null && typeof cancelAnimationFrame !== 'undefined') {
+      cancelAnimationFrame(this.inspectorRaf);
+      this.inspectorRaf = null;
+    }
+  }
+
   private resetResultBuffer() {
     this.clearFlushSchedule();
+    this.clearInspectorSchedule();
     this.awaitingFirstChunk = false;
     this.pendingChunks = [];
     this.groupIndexByFile.clear();
     this.fileGroups = [];
     this.flatHits = [];
     this.activeHitIndex = -1;
+    this.inspectedHit = null;
     this.filesSearched = 0;
     this.filesMatched = 0;
     this.totalMatches = 0;
@@ -1494,6 +1582,7 @@ class WorkbenchState {
 
   private restoreFromL0Entry(entry: L0CacheEntry, hadDraft: boolean) {
     this.clearFlushSchedule();
+    this.clearInspectorSchedule();
     this.awaitingFirstChunk = false;
     this.pendingChunks = [];
     this.isSearching = false;
@@ -1507,6 +1596,7 @@ class WorkbenchState {
     this.fileGroups = entry.fileGroups;
     this.flatHits = entry.flatHits;
     this.activeHitIndex = -1;
+    this.inspectedHit = null;
     this.filesSearched = entry.filesSearched;
     this.filesMatched = entry.filesMatched;
     this.totalMatches = entry.totalMatches;
@@ -1518,6 +1608,15 @@ class WorkbenchState {
     this.lastExecutedKey = entry.exactKey;
     this.lastExecutedHadDraft = hadDraft;
     this.displayedTimeStartMs = entry.timeStartMs;
+
+    if (
+      this.flatHits.length > 0 &&
+      this.rightInspectorOpen &&
+      this.inspectedPath
+    ) {
+      const firstMatchIdx = this.flatHits.findIndex((h) => !h.isContext);
+      this.selectHitByIndex(firstMatchIdx >= 0 ? firstMatchIdx : 0, false);
+    }
   }
 
   executeSearch(opts: ExecuteSearchOptions = {}) {
@@ -1671,7 +1770,11 @@ class WorkbenchState {
       case 'hits': {
         if (Array.isArray(msg.items) && msg.items.length > 0) {
           this.pendingChunks.push(msg.items);
-          this.scheduleFlushHits(this.awaitingFirstChunk ? 60 : 80);
+          this.scheduleFlushHits(
+            this.awaitingFirstChunk
+              ? this.frameProfile.firstFlushLeadMs
+              : this.frameProfile.steadyFlushLeadMs
+          );
         }
         break;
       }
@@ -1764,10 +1867,12 @@ class WorkbenchState {
     if (this.awaitingFirstChunk) {
       this.awaitingFirstChunk = false;
       this.displayedTimeStartMs = this.inflightCacheKeys.get(this.currentSearchId)?.timeStartMs ?? 0;
+      this.clearInspectorSchedule();
       this.groupIndexByFile.clear();
       this.fileGroups = [];
       this.flatHits = [];
       this.activeHitIndex = -1;
+      this.inspectedHit = null;
       this.filesMatched = 0;
       this.totalMatches = 0;
       this.matchedLines = 0;
@@ -1846,45 +1951,71 @@ class WorkbenchState {
     }
   }
 
-  selectHitByIndex(index: number, forceOpenInspector = false) {
+  /** Updates active row index immediately on pointerdown without opening or rerendering the inspector yet. */
+  previewSelectHitByIndex(index: number) {
+    if (index < 0 || index >= this.flatHits.length) return;
+    this.activeHitIndex = index;
+  }
+
+  private commitInspectedHit(hit: HitItem, forceOpenInspector: boolean) {
+    this.inspectedHit = hit;
+    this.inspectedPath = hit.file;
+    this.inspectedLine = hit.line;
+    this.inspectorError = null;
+
+    if (!isPossiblyTruncatedHitText(hit.text)) {
+      this.inspectAbort?.abort();
+      this.inspectAbort = null;
+      this.inspectSeq += 1;
+      this.inspectedFile = null;
+      this.inspectorLoading = false;
+      return;
+    }
+
+    void this.inspectFileAtLine(hit.file, hit.line, forceOpenInspector);
+  }
+
+  selectHitByIndex(index: number, forceOpenInspector = false, deferInspector = false) {
     if (index < 0 || index >= this.flatHits.length) return;
     this.activeHitIndex = index;
     const hit = this.flatHits[index];
-    if (hit) {
-      const gIdx = this.groupIndexByFile.get(hit.file);
-      if (gIdx !== undefined && this.fileGroups[gIdx]?.collapsed) {
-        const next = this.fileGroups.slice();
-        next[gIdx] = { ...next[gIdx], collapsed: false };
-        this.fileGroups = next;
-      }
-      if (forceOpenInspector) {
-        this.detailOpen = true;
-        if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
-      }
+    if (!hit) return;
 
-      this.inspectedPath = hit.file;
-      this.inspectedLine = hit.line;
-      this.inspectorError = null;
-
-      if (!isPossiblyTruncatedHitText(hit.text)) {
-        this.inspectAbort?.abort();
-        this.inspectAbort = null;
-        this.inspectSeq += 1;
-        this.inspectedFile = null;
-        this.inspectorLoading = false;
-        return;
-      }
-
-      void this.inspectFileAtLine(hit.file, hit.line, forceOpenInspector);
+    const gIdx = this.groupIndexByFile.get(hit.file);
+    if (gIdx !== undefined && this.fileGroups[gIdx]?.collapsed) {
+      const next = this.fileGroups.slice();
+      next[gIdx] = { ...next[gIdx], collapsed: false };
+      this.fileGroups = next;
     }
+    if (forceOpenInspector) {
+      this.detailOpen = true;
+      if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
+    }
+
+    this.clearInspectorSchedule();
+    if (
+      (deferInspector || hit.text.length > this.frameProfile.deferInspectorThresholdChars) &&
+      typeof requestAnimationFrame !== 'undefined'
+    ) {
+      const targetHit = hit;
+      this.inspectorRaf = requestAnimationFrame(() => {
+        this.inspectorRaf = null;
+        if (this.activeHitIndex === index && this.flatHits[index] === targetHit) {
+          this.commitInspectedHit(targetHit, forceOpenInspector);
+        }
+      });
+      return;
+    }
+
+    this.commitInspectedHit(hit, forceOpenInspector);
   }
 
-  navigateHits(delta: 1 | -1) {
+  navigateHits(delta: 1 | -1, rapid = false) {
     if (this.flatHits.length === 0) return;
     let next = this.activeHitIndex + delta;
     if (next < 0) next = 0;
     if (next >= this.flatHits.length) next = this.flatHits.length - 1;
-    this.selectHitByIndex(next, false);
+    this.selectHitByIndex(next, false, rapid);
     this.scrollToActiveTick += 1;
   }
 
@@ -1937,6 +2068,9 @@ class WorkbenchState {
 
   async inspectFileAtLine(filePath: string, line = 1, forceOpen = true) {
     const targetLine = Math.max(1, line);
+    if (this.inspectedHit && (this.inspectedHit.file !== filePath || this.inspectedHit.line !== targetLine)) {
+      this.inspectedHit = null;
+    }
     const dockerEpoch = this.isDockerVirtualPath(filePath) ? `\u0000${this.searchCount}` : '';
     const dockerSinceSec = computeDockerPreviewSinceSec(
       this.sources,

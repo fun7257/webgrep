@@ -86,8 +86,9 @@
             role="option"
             aria-selected={idx === selected}
             onmouseenter={() => (selected = idx)}
+            onpointerdown={() => (selected = idx)}
             onclick={() => runAt(idx)}
-            class={`flex w-full items-center gap-3 rounded-lg px-3 py-3 md:py-2 text-left text-[13.5px] transition-colors ${
+            class={`flex w-full items-center gap-3 rounded-lg px-3 py-3 md:py-2 text-left text-[13.5px] active:bg-secondary/80 ${
               idx === selected ? 'bg-secondary text-foreground' : 'text-foreground/90'
             }`}
           >

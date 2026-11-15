@@ -63,14 +63,14 @@
 </script>
 
 <div
-  class="inline-flex h-8 items-center rounded-lg border border-border/80 bg-background/90 p-0.5 shadow-2xs focus-within:border-primary/80 focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+  class="inline-flex h-8 items-center rounded-lg border border-border/55 bg-secondary/50 dark:bg-secondary/45 p-0.5 shadow-2xs focus-within:border-primary/60 focus-within:bg-background"
 >
   <button
     type="button"
     title="Decrease"
     disabled={value <= min}
     onclick={() => stepBy(-1)}
-    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
+    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground dark:hover:bg-accent active:opacity-80 disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
   >
     <Minus class="h-3 w-3" />
   </button>
@@ -98,7 +98,7 @@
     title="Increase"
     disabled={value >= max}
     onclick={() => stepBy(1)}
-    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors"
+    class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground dark:hover:bg-accent active:opacity-80 disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
   >
     <Plus class="h-3 w-3" />
   </button>

@@ -35,82 +35,93 @@
   }
 </script>
 
-<div class="space-y-1">
-  <SettingRow icon={Languages} label={workbench.t.ui.language} hint={workbench.t.ui.languageDesc}>
-    <Segmented
-      value={workbench.locale}
-      options={[
-        { value: 'zh', label: '中', title: '中文' },
-        { value: 'en', label: 'EN', title: 'English' },
-      ]}
-      onchange={(v) => display(() => (workbench.locale = v))}
-    />
-  </SettingRow>
+<div class="space-y-4">
+  <div>
+    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
+      {s.sectionAppearance}
+    </div>
+    <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
+      <SettingRow icon={Languages} label={workbench.t.ui.language} hint={workbench.t.ui.languageDesc}>
+        <Segmented
+          value={workbench.locale}
+          options={[
+            { value: 'zh', label: '中', title: '中文' },
+            { value: 'en', label: 'EN', title: 'English' },
+          ]}
+          onchange={(v) => display(() => (workbench.locale = v))}
+        />
+      </SettingRow>
 
-  <SettingRow icon={SunMoon} label={s.themeLabel}>
-    <Segmented
-      value={workbench.darkMode}
-      options={[
-        { value: false, icon: Sun, title: workbench.t.header.lightMode },
-        { value: true, icon: Moon, title: workbench.t.header.darkMode },
-      ]}
-      onchange={(v) => workbench.darkMode !== v && workbench.toggleTheme()}
-    />
-  </SettingRow>
+      <SettingRow icon={SunMoon} label={s.themeLabel}>
+        <Segmented
+          value={workbench.darkMode}
+          options={[
+            { value: false, icon: Sun, title: workbench.t.header.lightMode },
+            { value: true, icon: Moon, title: workbench.t.header.darkMode },
+          ]}
+          onchange={(v) => workbench.darkMode !== v && workbench.toggleTheme()}
+        />
+      </SettingRow>
 
-  <SettingRow icon={ALargeSmall} label={s.fontSizeLabel} hint={s.fontSizeDesc}>
-    <NumberStepper
-      value={workbench.codeFontSize}
-      min={10}
-      max={28}
-      step={0.5}
-      suffix="px"
-      widthClass="w-11"
-      onchange={(v) => display(() => (workbench.codeFontSize = v))}
-    />
-  </SettingRow>
+      <SettingRow icon={ALargeSmall} label={s.fontSizeLabel} hint={s.fontSizeDesc}>
+        <NumberStepper
+          value={workbench.codeFontSize}
+          min={10}
+          max={28}
+          step={0.5}
+          suffix="px"
+          widthClass="w-11"
+          onchange={(v) => display(() => (workbench.codeFontSize = v))}
+        />
+      </SettingRow>
 
-  <SettingRow icon={AlignLeft} label={s.wordWrapLabel} hint={s.wordWrapDesc}>
-    <Switch
-      checked={workbench.wordWrap}
-      title={s.wordWrapLabel}
-      onchange={(v) => display(() => (workbench.wordWrap = v))}
-    />
-  </SettingRow>
+      <SettingRow icon={AlignLeft} label={s.wordWrapLabel} hint={s.wordWrapDesc}>
+        <Switch
+          checked={workbench.wordWrap}
+          title={s.wordWrapLabel}
+          onchange={(v) => display(() => (workbench.wordWrap = v))}
+        />
+      </SettingRow>
 
-  <SettingRow icon={Rows3} label={s.densityLabel} hint={s.densityDesc}>
-    <Segmented
-      value={workbench.resultDensity}
-      options={[
-        { value: 'compact', icon: Rows4, title: s.densityCompact },
-        { value: 'comfortable', icon: Rows3, title: s.densityComfortable },
-      ]}
-      onchange={(v) => display(() => (workbench.resultDensity = v))}
-    />
-  </SettingRow>
+      <SettingRow icon={Rows3} label={s.densityLabel} hint={s.densityDesc}>
+        <Segmented
+          value={workbench.resultDensity}
+          options={[
+            { value: 'compact', icon: Rows4, title: s.densityCompact },
+            { value: 'comfortable', icon: Rows3, title: s.densityComfortable },
+          ]}
+          onchange={(v) => display(() => (workbench.resultDensity = v))}
+        />
+      </SettingRow>
 
-  <SettingRow icon={UnfoldVertical} label={s.previewLinesLabel} hint={s.previewLinesDesc}>
-    <NumberStepper
-      value={workbench.previewLines}
-      min={1}
-      max={6}
-      step={1}
-      widthClass="w-10"
-      onchange={(v) => display(() => (workbench.previewLines = v))}
-    />
-  </SettingRow>
+      <SettingRow icon={UnfoldVertical} label={s.previewLinesLabel} hint={s.previewLinesDesc}>
+        <NumberStepper
+          value={workbench.previewLines}
+          min={1}
+          max={6}
+          step={1}
+          widthClass="w-10"
+          onchange={(v) => display(() => (workbench.previewLines = v))}
+        />
+      </SettingRow>
+    </div>
+  </div>
 
-  <div class="my-2 border-t border-border/60"></div>
-
-  <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
-    <NumberStepper
-      value={workbench.maxResults}
-      min={1}
-      max={500000}
-      step={1000}
-      widthClass="w-16"
-      onchange={(v) => search(() => (workbench.maxResults = v))}
-    />
-  </SettingRow>
-
+  <div>
+    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
+      {s.sectionEngine}
+    </div>
+    <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
+      <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
+        <NumberStepper
+          value={workbench.maxResults}
+          min={1}
+          max={500000}
+          step={1000}
+          widthClass="w-16"
+          onchange={(v) => search(() => (workbench.maxResults = v))}
+        />
+      </SettingRow>
+    </div>
+  </div>
 </div>

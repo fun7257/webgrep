@@ -46,7 +46,7 @@
   {title}
   {onclick}
   class={cn(
-    'inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 select-none',
+    'inline-flex items-center justify-center gap-1.5 rounded-md font-medium active:scale-[0.98] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 select-none',
     variantClasses[variant],
     sizeClasses[size],
     className

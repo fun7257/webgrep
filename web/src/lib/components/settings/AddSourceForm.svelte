@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import type { DirSuggestEntry } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
@@ -103,18 +104,21 @@
         pathInput = '';
       }
     }
+    flushSync();
     queueSuggest(pathInput);
-    requestAnimationFrame(() => pathEl?.focus());
+    pathEl?.focus({ preventScroll: true });
   }
 
   function apply(entry: DirSuggestEntry, drill: boolean) {
     const isDirectory = entry.isDir === true;
     const shouldDrill = isDirectory && (drill || kind === 'file');
     const next = shouldDrill ? (entry.path.endsWith('/') ? entry.path : `${entry.path}/`) : entry.path;
-    pathInput = next;
+    flushSync(() => {
+      pathInput = next;
+    });
     if (shouldDrill) {
       queueSuggest(next);
-      requestAnimationFrame(() => pathEl?.focus());
+      pathEl?.focus({ preventScroll: true });
     } else {
       showSuggest = false;
     }
@@ -197,10 +201,10 @@
   }
 
   const inputCls =
-    'h-10 w-full rounded-lg border border-border/80 bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-foreground/50 focus:outline-none [@media(any-pointer:coarse)]:text-[16px]';
+    'h-9 w-full rounded-lg border border-border/70 bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary/60 focus:outline-none [@media(any-pointer:coarse)]:text-[16px]';
 </script>
 
-<div class="space-y-2.5 rounded-xl border border-border/60 bg-secondary/20 p-3">
+<div class="space-y-2.5 rounded-xl border border-border/65 bg-card/65 dark:bg-card/60 p-3.5">
   <div class="flex items-center">
     <Segmented
       value={kind}
@@ -338,7 +342,7 @@
     onclick={submit}
     title={t.addSource}
     aria-label={t.addSource}
-    class="flex h-10 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40 cursor-pointer"
+    class="flex h-10 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
   >
     {#if submitting}
       <Loader2 class="h-4 w-4 animate-spin" />

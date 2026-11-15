@@ -27,10 +27,13 @@
   let copiedLine = $state<boolean>(false);
   let collapsedJsonPaths = $state<Record<string, boolean>>({});
   let copiedFieldPath = $state<string>('');
+  let hoveredFieldPath = $state<string>('');
+  let tabToggledOnDown = false;
 
-  let activeHit = $derived(workbench.activeHit);
+  let activeHit = $derived(workbench.inspectedHit ?? workbench.activeHit);
   let targetLine = $derived(activeHit?.line ?? workbench.inspectedLine);
   let fileData = $derived(workbench.inspectedFile);
+  let alwaysShowFieldActions = $derived(workbench.isTouch || workbench.isCompact);
   let inspectedProject = $derived.by(() => {
     const p = workbench.inspectedPath || '';
     const slash = p.indexOf('/');
@@ -67,21 +70,65 @@
     leadingTs && leadingTs.restText.length > 0 ? leadingTs.restText : activeLineText
   );
 
-  // Reset scroll and collapse state when switching to another hit/record
+  // Reset scroll, hover, and collapse state when switching to another hit/record
   $effect(() => {
     const _path = workbench.inspectedPath;
     const _line = targetLine;
     void _path;
     void _line;
     collapsedJsonPaths = {};
+    hoveredFieldPath = '';
     if (scrollContainerEl) {
       scrollContainerEl.scrollTop = 0;
     }
   });
 
-  function highlightFormattedText(text: string) {
-    if (!text) return [{ text: '', kind: 'plain' as const }];
-    const segments = buildHighlightSegments(
+  const hasRegexOrAnchorPrimary = $derived(
+    isRegexMode ||
+      workbench.primaryPattern.includes('$r') ||
+      workbench.primaryPattern.includes('^') ||
+      workbench.primaryPattern.includes('$')
+  );
+
+  const anchorFallbackNeedles = $derived.by(() => {
+    if (!hasRegexOrAnchorPrimary || !activeHit?.spans || activeHit.spans.length === 0) {
+      return [] as { exact: string; lower: string }[];
+    }
+    const seen = new Set<string>();
+    const out: { exact: string; lower: string }[] = [];
+    for (const sp of activeHit.spans) {
+      const sub = activeHit.text.slice(sp.start, sp.end);
+      if (!sub) continue;
+      const norm = isCaseInsensitive ? sub.toLowerCase() : sub;
+      if (seen.has(norm)) continue;
+      seen.add(norm);
+      out.push({ exact: sub, lower: norm });
+      if (out.length >= 8) break;
+    }
+    return out;
+  });
+
+  const queryHighlightKey = $derived.by(() => {
+    const base = `${workbench.mode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}`;
+    if (anchorFallbackNeedles.length === 0) return base;
+    return `${base}\u0002${anchorFallbackNeedles.map((n) => n.exact).join('\u0001')}`;
+  });
+
+  let fieldCacheKey = '';
+  const fieldHighlightCache = new Map<string, HighlightSegment[]>();
+
+  function highlightFormattedText(text: string): HighlightSegment[] {
+    if (!text) return [{ text: '', kind: 'plain' }];
+    if (fieldCacheKey !== queryHighlightKey) {
+      fieldCacheKey = queryHighlightKey;
+      fieldHighlightCache.clear();
+    }
+    if (text.length <= 2048) {
+      const cached = fieldHighlightCache.get(text);
+      if (cached) return cached;
+    }
+
+    let segments = buildHighlightSegments(
       text,
       undefined,
       workbench.contains,
@@ -90,17 +137,15 @@
       workbench.primaryPattern,
       isRegexMode
     );
+
     if (
-      !segments.some((s) => s.kind === 'primary') &&
-      activeHit?.spans &&
-      activeHit.spans.length > 0
+      anchorFallbackNeedles.length > 0 &&
+      !segments.some((s) => s.kind === 'primary')
     ) {
       const fallbackSpans: { start: number; end: number }[] = [];
       const hay = isCaseInsensitive ? text.toLowerCase() : text;
-      for (const sp of activeHit.spans) {
-        const sub = activeHit.text.slice(sp.start, sp.end);
-        if (!sub) continue;
-        const needle = isCaseInsensitive ? sub.toLowerCase() : sub;
+      for (const item of anchorFallbackNeedles) {
+        const needle = isCaseInsensitive ? item.lower : item.exact;
         let pos = 0;
         while (pos < hay.length) {
           const idx = hay.indexOf(needle, pos);
@@ -110,7 +155,7 @@
         }
       }
       if (fallbackSpans.length > 0) {
-        return buildHighlightSegments(
+        segments = buildHighlightSegments(
           text,
           fallbackSpans,
           workbench.contains,
@@ -121,7 +166,19 @@
         );
       }
     }
+
+    if (text.length <= 2048) {
+      if (fieldHighlightCache.size >= 512) {
+        const oldest = fieldHighlightCache.keys().next().value;
+        if (oldest !== undefined) fieldHighlightCache.delete(oldest);
+      }
+      fieldHighlightCache.set(text, segments);
+    }
     return segments;
+  }
+
+  function toggleInspectorTab() {
+    workbench.inspectorTab = workbench.inspectorTab === 'raw' ? 'structured' : 'raw';
   }
 
   let rawLineSegments = $derived.by(() => {
@@ -266,19 +323,23 @@
 </script>
 
 {#snippet renderSegments(segments: HighlightSegment[])}
-  {#each segments as seg}
-    {#if seg.kind === 'primary'}
-      <mark class="match-span-primary">{seg.text}</mark>
-    {:else if seg.kind === 'contains-0'}
-      <mark class="match-span-contains-0">{seg.text}</mark>
-    {:else if seg.kind === 'contains-1'}
-      <mark class="match-span-contains-1">{seg.text}</mark>
-    {:else if seg.kind === 'contains-2'}
-      <mark class="match-span-contains-2">{seg.text}</mark>
-    {:else}
-      <span>{seg.text}</span>
-    {/if}
-  {/each}
+  {#if segments.length === 1 && segments[0].kind === 'plain'}
+    {segments[0].text}
+  {:else}
+    {#each segments as seg}
+      {#if seg.kind === 'primary'}
+        <mark class="match-span-primary">{seg.text}</mark>
+      {:else if seg.kind === 'contains-0'}
+        <mark class="match-span-contains-0">{seg.text}</mark>
+      {:else if seg.kind === 'contains-1'}
+        <mark class="match-span-contains-1">{seg.text}</mark>
+      {:else if seg.kind === 'contains-2'}
+        <mark class="match-span-contains-2">{seg.text}</mark>
+      {:else}
+        <span>{seg.text}</span>
+      {/if}
+    {/each}
+  {/if}
 {/snippet}
 
 {#snippet renderHighlighted(text: string)}
@@ -287,45 +348,51 @@
 
 {#snippet renderFieldActions(path: string, rawVal: string)}
   {#if rawVal.trim().length > 0 && rawVal.length <= 200}
-    <span class="hover-only opacity-0 group-hover/kv:opacity-100 focus-within:opacity-100 flex items-center gap-0.5 shrink-0 select-none transition-opacity">
-      <button
-        type="button"
-        title={workbench.t.inspector.includeTitle(rawVal)}
-        aria-label={workbench.t.inspector.includeTitle(rawVal)}
-        onclick={(e) => {
-          e.stopPropagation();
-          workbench.appendSearchTerm(rawVal);
-        }}
-        class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/70 text-foreground hover:bg-secondary transition-colors"
+    {#if alwaysShowFieldActions || hoveredFieldPath === path || copiedFieldPath === path}
+      <span
+        class={alwaysShowFieldActions
+          ? 'flex items-center gap-0.5 shrink-0 select-none'
+          : 'absolute right-1 top-0.5 z-10 flex items-center gap-0.5 rounded-md border border-border/60 bg-popover/95 px-1 py-0.5 shadow-sm select-none'}
       >
-        +
-      </button>
-      <button
-        type="button"
-        title={workbench.t.inspector.excludeTitle(rawVal)}
-        aria-label={workbench.t.inspector.excludeTitle(rawVal)}
-        onclick={(e) => {
-          e.stopPropagation();
-          workbench.excludeSearchTerm(rawVal);
-        }}
-        class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/60 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-      >
-        -
-      </button>
-      <button
-        type="button"
-        title={workbench.t.inspector.copyFieldTitle}
-        aria-label={workbench.t.inspector.copyFieldTitle}
-        onclick={(e) => copyFieldValue(path, rawVal, e)}
-        class="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-      >
-        {#if copiedFieldPath === path}
-          <Check class="h-3 w-3 text-primary" />
-        {:else}
-          <Copy class="h-3 w-3" />
-        {/if}
-      </button>
-    </span>
+        <button
+          type="button"
+          title={workbench.t.inspector.includeTitle(rawVal)}
+          aria-label={workbench.t.inspector.includeTitle(rawVal)}
+          onclick={(e) => {
+            e.stopPropagation();
+            workbench.appendSearchTerm(rawVal);
+          }}
+          class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/70 text-foreground hover:bg-secondary active:bg-primary/20 cursor-pointer"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          title={workbench.t.inspector.excludeTitle(rawVal)}
+          aria-label={workbench.t.inspector.excludeTitle(rawVal)}
+          onclick={(e) => {
+            e.stopPropagation();
+            workbench.excludeSearchTerm(rawVal);
+          }}
+          class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/60 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-status/20 cursor-pointer"
+        >
+          -
+        </button>
+        <button
+          type="button"
+          title={workbench.t.inspector.copyFieldTitle}
+          aria-label={workbench.t.inspector.copyFieldTitle}
+          onclick={(e) => copyFieldValue(path, rawVal, e)}
+          class="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
+        >
+          {#if copiedFieldPath === path}
+            <Check class="h-3 w-3 text-primary" />
+          {:else}
+            <Copy class="h-3 w-3" />
+          {/if}
+        </button>
+      </span>
+    {/if}
   {/if}
 {/snippet}
 
@@ -358,7 +425,7 @@
                 <button
                   type="button"
                   onclick={(e) => toggleJsonPath(childPath, e)}
-                  class="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-secondary/40 transition-colors cursor-pointer"
+                  class="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-secondary/40 active:bg-secondary/65 cursor-pointer"
                 >
                   {#if isCollapsed}
                     <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -393,7 +460,16 @@
               typeof v === 'number' || (typeof v === 'string' && /^\d{10,19}$/.test(v))
                 ? detectInlineEpochHint(String(v))
                 : null}
-            <div class="group/kv flex items-start justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40 transition-colors">
+            <div
+              role="group"
+              onpointerenter={() => {
+                if (!alwaysShowFieldActions) hoveredFieldPath = childPath;
+              }}
+              onpointerleave={() => {
+                if (!alwaysShowFieldActions && hoveredFieldPath === childPath) hoveredFieldPath = '';
+              }}
+              class="relative flex items-start justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40"
+            >
               <div class={`min-w-0 flex-1 ${isMultiLineStr ? 'space-y-1' : 'flex items-baseline gap-2.5'}`}>
                 <span class="text-muted-foreground shrink-0 select-none text-[12px] min-w-[76px]">
                   {#if isArray}
@@ -492,7 +568,7 @@
             onmousedown={(e) => e.preventDefault()}
             onclick={appendSelectedText}
             title={workbench.t.inspector.includeTitle(selectedText)}
-            class="touch-target flex items-center gap-1 rounded-md bg-secondary/80 px-2 py-1 text-xs font-medium text-foreground hover:bg-secondary transition-colors"
+            class="touch-target flex items-center gap-1 rounded-md bg-secondary/80 px-2 py-1 text-xs font-medium text-foreground hover:bg-secondary active:bg-secondary cursor-pointer"
           >
             <span>+</span>
             <span class="truncate max-w-[64px]">{selectedText}</span>
@@ -502,7 +578,7 @@
             onmousedown={(e) => e.preventDefault()}
             onclick={excludeSelectedText}
             title={workbench.t.inspector.excludeTitle(selectedText)}
-            class="touch-target flex items-center gap-1 rounded-md bg-secondary/60 px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+            class="touch-target flex items-center gap-1 rounded-md bg-secondary/60 px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
           >
             <span>-</span>
             <span class="truncate max-w-[64px]">{selectedText}</span>
@@ -513,7 +589,7 @@
           onmousedown={(e) => e.preventDefault()}
           onclick={searchSelectedText}
           title={workbench.t.inspector.searchSelectionTitle(selectedText)}
-          class="flex items-center gap-1 rounded-md bg-secondary/80 px-2 py-1 text-xs font-medium text-foreground hover:bg-secondary transition-colors"
+          class="flex items-center gap-1 rounded-md bg-secondary/80 px-2 py-1 text-xs font-medium text-foreground hover:bg-secondary active:bg-secondary cursor-pointer"
         >
           <Search class="h-3 w-3" />
           <span class="truncate max-w-[72px]">{selectedText}</span>
@@ -523,15 +599,27 @@
       <!-- Formatted / Raw toggle (single icon button) -->
       <button
         type="button"
-        onclick={() =>
-          (workbench.inspectorTab = workbench.inspectorTab === 'raw' ? 'structured' : 'raw')}
+        onpointerdown={(e) => {
+          if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            tabToggledOnDown = true;
+            toggleInspectorTab();
+          }
+        }}
+        onclick={(e) => {
+          if (tabToggledOnDown && e.detail > 0) {
+            tabToggledOnDown = false;
+            return;
+          }
+          tabToggledOnDown = false;
+          toggleInspectorTab();
+        }}
         title={workbench.inspectorTab === 'raw'
           ? workbench.t.inspector.formattedBtn
           : workbench.t.inspector.rawBtn}
         aria-label={workbench.inspectorTab === 'raw'
           ? workbench.t.inspector.formattedBtn
           : workbench.t.inspector.rawBtn}
-        class="touch-target rounded-md p-1.5 text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground transition-colors"
+        class="touch-target rounded-md p-1.5 text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
       >
         {#if workbench.inspectorTab === 'raw'}
           <Braces class="h-3.5 w-3.5" />
@@ -545,7 +633,7 @@
           type="button"
           title={workbench.t.inspector.copyTitle}
           onclick={copyCurrentContent}
-          class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
+          class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
         >
           {#if copiedLine}
             <Check class="h-3.5 w-3.5 text-primary" />
@@ -559,7 +647,7 @@
         type="button"
         title={workbench.t.inspector.closeTitle}
         onclick={closeDetail}
-        class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground transition-colors"
+        class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
       >
         <X class="h-3.5 w-3.5" />
       </button>
@@ -610,7 +698,7 @@
                     e.stopPropagation();
                     collapsedJsonPaths = {};
                   }}
-                  class="rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                  class="rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground active:bg-secondary cursor-pointer"
                 >
                   {workbench.t.inspector.expandAllJson}
                 </button>
@@ -633,7 +721,17 @@
                   </div>
                 {/if}
                 {#each structuredInfo.kvPairs as kv, idx (`kv:${idx}:${kv.key}`)}
-                  <div class="group/kv flex items-baseline justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40 transition-colors">
+                  {@const kvPath = `kv.${idx}`}
+                  <div
+                    role="group"
+                    onpointerenter={() => {
+                      if (!alwaysShowFieldActions) hoveredFieldPath = kvPath;
+                    }}
+                    onpointerleave={() => {
+                      if (!alwaysShowFieldActions && hoveredFieldPath === kvPath) hoveredFieldPath = '';
+                    }}
+                    class="relative flex items-baseline justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40"
+                  >
                     <div class="flex items-baseline gap-2.5 min-w-0 flex-1">
                       <span class="text-muted-foreground shrink-0 select-none text-[12px] min-w-[76px]">
                         {@render renderHighlighted(kv.key)}
@@ -642,7 +740,7 @@
                         {@render renderHighlighted(kv.value)}
                       </span>
                     </div>
-                    {@render renderFieldActions(`kv.${idx}`, kv.value)}
+                    {@render renderFieldActions(kvPath, kv.value)}
                   </div>
                 {/each}
               </div>

@@ -16,7 +16,7 @@
   }
 
   const btn =
-    'touch-target flex h-8 min-w-10 flex-1 items-center justify-center rounded-lg font-mono text-[13.5px] transition-colors hover:bg-secondary/60 active:bg-secondary';
+    'touch-target flex h-8 min-w-10 flex-1 items-center justify-center rounded-lg font-mono text-[13.5px] hover:bg-secondary/60 active:bg-secondary';
 </script>
 
 <div

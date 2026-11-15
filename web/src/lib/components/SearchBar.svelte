@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { flushSync, untrack } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import type { QueryStep, SearchHistoryEntry } from '$lib/types';
+  import type { HitItem, QueryStep, SearchHistoryEntry } from '$lib/types';
   import {
     buildVocabulary,
     computeWordCompletion,
@@ -11,11 +11,19 @@
     type Suggestion,
     type Vocabulary,
   } from '$lib/suggest';
-  import ScopeBar from './ScopeBar.svelte';
+  import { resolveScopeSourceSummary } from '$lib/source-picker';
+  import { formatTimeTriggerLabel, isBuiltinTimePreset } from '$lib/time-range';
+  import SourcePickerPopover from './SourcePickerPopover.svelte';
   import SymbolBar from './SymbolBar.svelte';
+  import TimeRangePicker from './TimeRangePicker.svelte';
   import {
+    ChevronDown,
     ChevronRight,
     Clock,
+    Container,
+    Database,
+    FileText,
+    Folder,
     FolderGit2,
     Lightbulb,
     Loader2,
@@ -36,22 +44,129 @@
   let activeIdx = $state(-1);
   let cursorPos = $state(0);
 
-  // Lazy vocabulary built from loaded lines only when focused
+  // Lazy idle vocabulary built from loaded lines without blocking input focus
   let cachedVocab = $state<Vocabulary | null>(null);
   let vocabSourceHits: unknown = null;
+  let vocabHandle: number | null = null;
+  let vocabUsingIdle = false;
+  let toggledFlagOnDown: string | null = null;
+  let sourceTriggerOnDown = false;
+  let timeTriggerOnDown = false;
+  let sourcePickerWrapEl = $state<HTMLDivElement | null>(null);
+  let timePickerWrapEl = $state<HTMLDivElement | null>(null);
 
-  function ensureVocabulary() {
+  const scopeStrings = $derived(workbench.t.scopeBar);
+  const sourceSummary = $derived(
+    resolveScopeSourceSummary(
+      workbench.sources,
+      workbench.scope.sources,
+      workbench.scope.excludedSources ?? []
+    )
+  );
+  const hasSourceScope = $derived(sourceSummary.mode !== 'all');
+  const sourceTriggerLabel = $derived.by(() => {
+    switch (sourceSummary.mode) {
+      case 'all':
+        return scopeStrings.sourceTriggerAll;
+      case 'single':
+        return (
+          sourceSummary.singleSource?.name ??
+          workbench.scope.sources[0] ??
+          scopeStrings.sourceTriggerAll
+        );
+      case 'multi':
+        return scopeStrings.sourceTriggerMulti(sourceSummary.selectedCount);
+      case 'excluded':
+        return scopeStrings.sourceTriggerExcluded(sourceSummary.excludedCount);
+      case 'mixed':
+        return `${sourceSummary.selectedCount} · -${sourceSummary.excludedCount}`;
+    }
+  });
+
+  const hasTimeScope = $derived(workbench.scope.timePreset !== '');
+  const hasCustomTime = $derived(hasTimeScope && !isBuiltinTimePreset(workbench.scope.timePreset));
+  const timeTriggerLabel = $derived(
+    formatTimeTriggerLabel(
+      workbench.scope.timePreset,
+      scopeStrings.timeShortLabels,
+      scopeStrings.timeTriggerAny
+    )
+  );
+
+  function cancelScheduledVocabulary() {
+    if (vocabHandle === null) return;
+    if (vocabUsingIdle && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(vocabHandle);
+    } else {
+      clearTimeout(vocabHandle);
+    }
+    vocabHandle = null;
+  }
+
+  function* iterHitTexts(hits: readonly HitItem[], limit: number): IterableIterator<string> {
+    const cap = Math.min(limit, hits.length);
+    for (let i = 0; i < cap; i++) {
+      yield hits[i].text;
+    }
+  }
+
+  function scheduleVocabularyBuild() {
     const hits = workbench.flatHits;
+    if (hits.length === 0) {
+      cancelScheduledVocabulary();
+      vocabSourceHits = hits;
+      cachedVocab = null;
+      return;
+    }
+    if (workbench.isSearching) return;
     if (vocabSourceHits === hits && cachedVocab) return;
-    vocabSourceHits = hits;
-    const lines = hits.map((h) => h.text);
-    cachedVocab = lines.length > 0 ? buildVocabulary(lines, 1200) : null;
+
+    cancelScheduledVocabulary();
+    const buildNow = () => {
+      vocabHandle = null;
+      if (!focused || workbench.flatHits !== hits) return;
+      vocabSourceHits = hits;
+      cachedVocab = buildVocabulary(iterHitTexts(hits, 800), 800);
+    };
+
+    if (typeof requestIdleCallback === 'function') {
+      vocabUsingIdle = true;
+      vocabHandle = requestIdleCallback(buildNow, { timeout: 120 });
+    } else {
+      vocabUsingIdle = false;
+      vocabHandle = window.setTimeout(buildNow, 16);
+    }
+  }
+
+  function handleFlagPointerDown(flag: string, e: PointerEvent, action: () => void) {
+    if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      toggledFlagOnDown = flag;
+      flushSync(action);
+    }
+  }
+
+  function handleFlagClick(flag: string, e: MouseEvent, action: () => void) {
+    if (toggledFlagOnDown === flag && e.detail > 0) {
+      toggledFlagOnDown = null;
+      return;
+    }
+    toggledFlagOnDown = null;
+    action();
   }
 
   $effect(() => {
     const _hits = workbench.flatHits;
-    if (!focused) return;
-    untrack(() => ensureVocabulary());
+    const _searching = workbench.isSearching;
+    const _focused = focused;
+    void _hits;
+    void _searching;
+    if (!_focused) {
+      cancelScheduledVocabulary();
+      return;
+    }
+    untrack(() => scheduleVocabularyBuild());
+    return () => cancelScheduledVocabulary();
   });
 
   function syncCursorPos() {
@@ -120,7 +235,11 @@
   const hasOpenDropdown = $derived(
     focused && dropdownOpen && (dropdownItems.length > 0 || regexTip !== null)
   );
-  const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
+  const hasAttachedPanel = $derived(
+    !workbench.sourcePickerOpen &&
+      !workbench.timePickerOpen &&
+      (showSymbolBar || hasOpenDropdown)
+  );
 
   const placeholderText = $derived.by(() => {
     if (workbench.isRegex) return workbench.t.searchBar.placeholderRegex;
@@ -143,13 +262,13 @@
     if (tok) {
       const before = workbench.pattern.slice(0, tok.start);
       const after = workbench.pattern.slice(tok.end);
-      workbench.pattern = `${before}${s.insert}${after}`;
       const nextPos = before.length + s.insert.length;
-      requestAnimationFrame(() => {
-        inputEl?.focus();
-        inputEl?.setSelectionRange(nextPos, nextPos);
-        syncCursorPos();
+      flushSync(() => {
+        workbench.pattern = `${before}${s.insert}${after}`;
       });
+      inputEl?.focus();
+      inputEl?.setSelectionRange(nextPos, nextPos);
+      syncCursorPos();
     } else {
       workbench.pattern = s.insert;
     }
@@ -172,13 +291,13 @@
 
   function acceptGhost(): boolean {
     if (!inlineGhost) return false;
-    workbench.pattern = `${workbench.pattern}${inlineGhost}`;
-    const pos = workbench.pattern.length;
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.setSelectionRange(pos, pos);
-      syncCursorPos();
+    const pos = workbench.pattern.length + inlineGhost.length;
+    flushSync(() => {
+      workbench.pattern = `${workbench.pattern}${inlineGhost}`;
     });
+    inputEl?.focus();
+    inputEl?.setSelectionRange(pos, pos);
+    syncCursorPos();
     return true;
   }
 
@@ -190,13 +309,13 @@
     const start = inputEl.selectionStart ?? workbench.pattern.length;
     const end = inputEl.selectionEnd ?? start;
     const next = workbench.pattern.slice(0, start) + sym + workbench.pattern.slice(end);
-    workbench.pattern = next;
     const caret = sym === '()' ? start + 1 : start + sym.length;
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.setSelectionRange(caret, caret);
-      syncCursorPos();
+    flushSync(() => {
+      workbench.pattern = next;
     });
+    inputEl?.focus();
+    inputEl?.setSelectionRange(caret, caret);
+    syncCursorPos();
   }
 
   function backspaceAtCursor() {
@@ -207,19 +326,19 @@
     const start = inputEl.selectionStart ?? workbench.pattern.length;
     const end = inputEl.selectionEnd ?? start;
     if (end > start) {
-      workbench.pattern = workbench.pattern.slice(0, start) + workbench.pattern.slice(end);
-      requestAnimationFrame(() => {
-        inputEl?.focus();
-        inputEl?.setSelectionRange(start, start);
-        syncCursorPos();
+      flushSync(() => {
+        workbench.pattern = workbench.pattern.slice(0, start) + workbench.pattern.slice(end);
       });
+      inputEl?.focus();
+      inputEl?.setSelectionRange(start, start);
+      syncCursorPos();
     } else if (start > 0) {
-      workbench.pattern = workbench.pattern.slice(0, start - 1) + workbench.pattern.slice(start);
-      requestAnimationFrame(() => {
-        inputEl?.focus();
-        inputEl?.setSelectionRange(start - 1, start - 1);
-        syncCursorPos();
+      flushSync(() => {
+        workbench.pattern = workbench.pattern.slice(0, start - 1) + workbench.pattern.slice(start);
       });
+      inputEl?.focus();
+      inputEl?.setSelectionRange(start - 1, start - 1);
+      syncCursorPos();
     }
   }
 
@@ -272,7 +391,7 @@
 
     if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.altKey && workbench.flatHits.length > 0) {
       e.preventDefault();
-      workbench.navigateHits(e.key === 'ArrowDown' ? 1 : -1);
+      workbench.navigateHits(e.key === 'ArrowDown' ? 1 : -1, e.repeat);
       return;
     }
 
@@ -301,29 +420,93 @@
     syncCursorPos();
     dropdownOpen = true;
     activeIdx = -1;
-    if (focused) ensureVocabulary();
+    if (focused) scheduleVocabularyBuild();
   }
 
   function handleFocus() {
+    if (workbench.sourcePickerOpen) {
+      workbench.closeSourcePicker();
+    }
+    if (workbench.timePickerOpen) {
+      workbench.closeTimePicker();
+    }
     focused = true;
     dropdownOpen = true;
     syncCursorPos();
-    ensureVocabulary();
   }
 
   function handleBlur() {
     focused = false;
     dropdownOpen = false;
     activeIdx = -1;
+    cancelScheduledVocabulary();
+  }
+
+  function handleSourceTriggerPointerDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (!workbench.sourcePickerOpen) {
+        e.preventDefault();
+        sourceTriggerOnDown = true;
+        dropdownOpen = false;
+        activeIdx = -1;
+        flushSync(() => workbench.openSourcePicker());
+      }
+    }
+  }
+
+  function handleSourceTriggerClick(e: MouseEvent) {
+    if (sourceTriggerOnDown && e.detail > 0) {
+      sourceTriggerOnDown = false;
+      return;
+    }
+    sourceTriggerOnDown = false;
+    dropdownOpen = false;
+    activeIdx = -1;
+    workbench.toggleSourcePicker();
+  }
+
+  function handleTimeTriggerPointerDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (!workbench.timePickerOpen) {
+        e.preventDefault();
+        timeTriggerOnDown = true;
+        dropdownOpen = false;
+        activeIdx = -1;
+        flushSync(() => workbench.openTimePicker());
+      }
+    }
+  }
+
+  function handleTimeTriggerClick(e: MouseEvent) {
+    if (timeTriggerOnDown && e.detail > 0) {
+      timeTriggerOnDown = false;
+      return;
+    }
+    timeTriggerOnDown = false;
+    dropdownOpen = false;
+    activeIdx = -1;
+    workbench.toggleTimePicker();
+  }
+
+  function handleWindowPointerDown(e: PointerEvent) {
+    const target = e.target as Node;
+    if (workbench.sourcePickerOpen && sourcePickerWrapEl && !sourcePickerWrapEl.contains(target)) {
+      workbench.closeSourcePicker();
+    }
+    if (workbench.timePickerOpen && timePickerWrapEl && !timePickerWrapEl.contains(target)) {
+      workbench.closeTimePicker();
+    }
   }
 </script>
 
+<svelte:window onpointerdown={handleWindowPointerDown} />
+
 <div
   class={hero
-    ? `flex flex-1 flex-col items-center px-3 md:px-6 select-none ${
+    ? `flex flex-1 flex-col items-center px-2 sm:px-3 md:px-6 select-none ${
         showSymbolBar ? 'justify-start pt-4' : 'justify-center pb-[14vh]'
       }`
-    : 'relative px-3 md:px-6 pt-2 md:pt-3 pb-1.5 select-none'}
+    : 'relative px-2 sm:px-3 md:px-6 pt-2 md:pt-3 pb-1.5 select-none'}
 >
   {#if hero}
     <!-- Google-Style Centered Brand Wordmark -->
@@ -338,7 +521,7 @@
       {#if workbench.sourcesLoaded && workbench.sources.length === 0}
         <button
           type="button"
-          onclick={() => workbench.openSettings('add-source')}
+          onclick={() => workbench.openSourcesDrawer(true)}
           class="inline-flex items-center gap-1.5 text-xs text-status hover:underline cursor-pointer"
         >
           <FolderGit2 class="h-3.5 w-3.5" />
@@ -352,8 +535,8 @@
   <div class={`relative ${hero ? 'w-full max-w-[680px]' : 'w-full'}`}>
     <div class="relative">
       <div
-        class={`relative flex items-center gap-2 border transition-colors min-w-0 ${
-          hero ? 'min-h-12 px-4 py-1' : 'min-h-11 px-3.5 py-1'
+        class={`relative flex items-center gap-1 sm:gap-2 border min-w-0 ${
+          hero ? 'min-h-12 px-2 sm:px-4 py-1' : 'min-h-11 px-2 sm:px-3.5 py-1'
         } ${
           hasAttachedPanel
             ? 'rounded-t-[22px] rounded-b-none border-b-transparent border-border bg-card shadow-xl'
@@ -366,8 +549,8 @@
           </div>
         {/if}
 
-        <!-- Left Search Icon & Optional Include/Exclude Mode Badge -->
-        <div class="flex items-center gap-1.5 text-muted-foreground shrink-0">
+        <!-- Left Cluster: Search Icon + Checkable Data Source Picker + Time Range Picker + Hairline Divider + Optional +/- Mode -->
+        <div class="flex items-center gap-0.5 sm:gap-1.5 text-muted-foreground shrink-0">
           {#if workbench.isSearching}
             <Loader2 class="h-4 w-4 animate-spin text-primary" />
           {:else}
@@ -377,11 +560,13 @@
               onmousedown={(e) => e.preventDefault()}
               onclick={() => {
                 dropdownOpen = false;
+                workbench.closeSourcePicker();
+                workbench.closeTimePicker();
                 workbench.submitSearch();
               }}
               title={workbench.t.searchBar.searchNowTitle}
               aria-label={workbench.t.searchBar.searchNowTitle}
-              class={`touch-target flex h-5 w-5 items-center justify-center rounded transition-colors ${
+              class={`touch-target flex h-5 w-5 items-center justify-center rounded ${
                 workbench.hasExecutableQuery
                   ? 'text-muted-foreground hover:text-foreground cursor-pointer'
                   : 'text-muted-foreground/60 cursor-default'
@@ -391,14 +576,189 @@
             </button>
           {/if}
 
+          <!-- Embedded Data Source Selector right next to the Search icon -->
+          <div bind:this={sourcePickerWrapEl} class="relative flex items-center shrink-0">
+            <div
+              class={`inline-flex h-7 items-center rounded-md text-xs select-none ${
+                sourceSummary.mode === 'excluded'
+                  ? 'bg-status/15 text-status ring-1 ring-inset ring-status/35 font-medium hover:bg-status/20'
+                  : hasSourceScope
+                    ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-medium hover:bg-primary/20'
+                    : workbench.sourcePickerOpen
+                      ? 'bg-secondary text-foreground ring-1 ring-inset ring-border/75 font-medium'
+                      : 'text-muted-foreground hover:bg-secondary/70 hover:text-foreground active:bg-secondary'
+              }`}
+            >
+              <button
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={workbench.sourcePickerOpen}
+                title={scopeStrings.openSourcePickerTitle}
+                aria-label={scopeStrings.openSourcePickerTitle}
+                onpointerdown={handleSourceTriggerPointerDown}
+                onclick={handleSourceTriggerClick}
+                class={`touch-target inline-flex h-full items-center gap-1 cursor-pointer ${
+                  hasSourceScope
+                    ? 'px-1.5 sm:pl-2 sm:pr-1 rounded-md sm:rounded-l-md sm:rounded-r-none'
+                    : 'px-1.5 sm:px-2 rounded-md'
+                }`}
+              >
+                {#if sourceSummary.mode === 'single'}
+                  {#if sourceSummary.singleSource?.kind === 'docker'}
+                    <Container class="h-3 w-3 shrink-0" />
+                  {:else if sourceSummary.singleSource?.kind === 'file'}
+                    <FileText class="h-3 w-3 shrink-0" />
+                  {:else}
+                    <Folder class="h-3 w-3 shrink-0" />
+                  {/if}
+                {:else if sourceSummary.mode === 'multi' || sourceSummary.mode === 'mixed'}
+                  <Database class="h-3 w-3 shrink-0" />
+                {/if}
+                <span
+                  class={`truncate ${
+                    sourceSummary.mode === 'single'
+                      ? 'max-w-[36px] sm:max-w-[128px] font-mono'
+                      : 'tabular-nums'
+                  }`}
+                >
+                  {sourceTriggerLabel}
+                </span>
+                {#if !hasSourceScope}
+                  <ChevronDown
+                    class={`h-3 w-3 shrink-0 opacity-65 transition-transform ${
+                      workbench.sourcePickerOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                {/if}
+              </button>
+
+              {#if hasSourceScope}
+                <button
+                  type="button"
+                  onmousedown={(e) => e.preventDefault()}
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    workbench.clearScopeSources();
+                  }}
+                  title={scopeStrings.clearScope}
+                  aria-label={scopeStrings.clearScope}
+                  class={`touch-target hidden sm:inline-flex h-full w-5 items-center justify-center rounded-r-md cursor-pointer ${
+                    sourceSummary.mode === 'excluded'
+                      ? 'hover:bg-status/20'
+                      : 'hover:bg-primary/25'
+                  }`}
+                >
+                  <X class="h-3 w-3" />
+                </button>
+              {/if}
+            </div>
+
+            {#if workbench.sourcePickerOpen}
+              <SourcePickerPopover
+                onClose={() => workbench.closeSourcePicker()}
+                onFocusMainInput={() => inputEl?.focus()}
+              />
+            {/if}
+          </div>
+
+          <!-- Embedded Time Range Selector right next to the Data Source selector -->
+          <div bind:this={timePickerWrapEl} class="relative flex items-center shrink-0">
+            <div
+              class={`inline-flex h-7 items-center rounded-md text-xs select-none ${
+                hasTimeScope
+                  ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-medium hover:bg-primary/20'
+                  : workbench.timePickerOpen
+                    ? 'bg-secondary text-foreground ring-1 ring-inset ring-border/75 font-medium'
+                    : 'text-muted-foreground hover:bg-secondary/70 hover:text-foreground active:bg-secondary'
+              }`}
+            >
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded={workbench.timePickerOpen}
+                title={scopeStrings.openTimePickerTitle}
+                aria-label={scopeStrings.openTimePickerTitle}
+                onpointerdown={handleTimeTriggerPointerDown}
+                onclick={handleTimeTriggerClick}
+                class={`touch-target inline-flex h-full items-center gap-1 cursor-pointer ${
+                  hasTimeScope
+                    ? 'px-1.5 sm:pl-2 sm:pr-1 rounded-md sm:rounded-l-md sm:rounded-r-none'
+                    : 'px-1.5 sm:px-2 rounded-md'
+                }`}
+              >
+                <Clock
+                  class={`shrink-0 ${
+                    hasTimeScope
+                      ? 'hidden sm:block h-3 w-3'
+                      : 'h-3.5 w-3.5 sm:h-3 sm:w-3'
+                  }`}
+                />
+                {#if hasTimeScope}
+                  <span
+                    class={`truncate font-mono tabular-nums ${
+                      hasCustomTime
+                        ? 'max-w-[40px] sm:max-w-[144px]'
+                        : 'max-w-[44px] sm:max-w-[112px]'
+                    }`}
+                  >
+                    {timeTriggerLabel}
+                  </span>
+                {:else}
+                  <span class="hidden sm:inline truncate">
+                    {timeTriggerLabel}
+                  </span>
+                  <ChevronDown
+                    class={`hidden sm:block h-3 w-3 shrink-0 opacity-65 transition-transform ${
+                      workbench.timePickerOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                {/if}
+              </button>
+
+              {#if hasTimeScope}
+                <button
+                  type="button"
+                  onmousedown={(e) => e.preventDefault()}
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    workbench.setScopeTime('');
+                    workbench.closeTimePicker();
+                  }}
+                  title={scopeStrings.clearScope}
+                  aria-label={scopeStrings.clearScope}
+                  class="touch-target hidden sm:inline-flex h-full w-5 items-center justify-center rounded-r-md hover:bg-primary/25 cursor-pointer"
+                >
+                  <X class="h-3 w-3" />
+                </button>
+              {/if}
+            </div>
+
+            {#if workbench.timePickerOpen}
+              <TimeRangePicker
+                value={workbench.scope.timePreset}
+                onApply={(spec) => {
+                  workbench.setScopeTime(spec);
+                  workbench.closeTimePicker();
+                }}
+                onClose={() => workbench.closeTimePicker()}
+                onFocusMainInput={() => inputEl?.focus()}
+              />
+            {/if}
+          </div>
+
+          <span aria-hidden="true" class="ml-0.5 h-4 w-px shrink-0 bg-border/65"></span>
+
           {#if workbench.canExcludeDraft}
             <button
               type="button"
               onmousedown={(e) => e.preventDefault()}
-              onclick={() => workbench.toggleDraftExclude()}
+              onpointerdown={(e) => handleFlagPointerDown('draftExclude', e, () => workbench.toggleDraftExclude())}
+              onclick={(e) => handleFlagClick('draftExclude', e, () => workbench.toggleDraftExclude())}
               title={workbench.t.searchBar.draftExcludeTitle(workbench.draftExclude)}
               aria-label={workbench.t.searchBar.draftExcludeTitle(workbench.draftExclude)}
-              class={`touch-target inline-flex h-5 items-center rounded px-1.5 font-mono text-[11px] font-semibold ring-1 ring-inset transition-colors cursor-pointer ${
+              class={`touch-target inline-flex h-5 items-center rounded px-1 sm:px-1.5 font-mono text-[11px] font-semibold ring-1 ring-inset cursor-pointer ${
                 workbench.draftExclude
                   ? 'bg-status/15 text-status ring-status/35 hover:bg-status/25'
                   : 'bg-primary/12 text-primary ring-primary/25 hover:bg-primary/20'
@@ -410,7 +770,7 @@
         </div>
 
         <!-- Pure Single-Text Search Input + Fish-Style Ghost Completion Overlay -->
-        <div class="relative h-9 min-w-[96px] flex-1">
+        <div class="relative h-9 min-w-[56px] sm:min-w-[96px] flex-1">
           {#if inlineGhost}
             <div
               aria-hidden="true"
@@ -431,8 +791,10 @@
             spellcheck={false}
             placeholder={placeholderText}
             onmousedown={() => {
+              if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
+              if (workbench.timePickerOpen) workbench.closeTimePicker();
               dropdownOpen = true;
-              requestAnimationFrame(syncCursorPos);
+              setTimeout(syncCursorPos, 0);
             }}
             onfocus={handleFocus}
             onblur={handleBlur}
@@ -446,18 +808,19 @@
         </div>
 
         <!-- Right Side Controls: Explicit Toggles (Aa, ab, .*), Progressive Filter (+ 继续筛选), and Clear (×) -->
-        <div class="flex items-center gap-1 shrink-0">
+        <div class="flex items-center gap-0.5 sm:gap-1 shrink-0">
           <button
             type="button"
             aria-pressed={workbench.caseSensitive}
             title={workbench.t.searchBar.matchCaseTitle}
             aria-label={workbench.t.searchBar.matchCaseTitle}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => workbench.toggleCaseSensitive()}
-            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+            onpointerdown={(e) => handleFlagPointerDown('case', e, () => workbench.toggleCaseSensitive())}
+            onclick={(e) => handleFlagClick('case', e, () => workbench.toggleCaseSensitive())}
+            class={`touch-target inline-flex h-7 min-w-[22px] sm:min-w-[28px] items-center justify-center rounded-md px-1 sm:px-1.5 font-mono text-[11px] sm:text-[12px] leading-none cursor-pointer select-none ${
               workbench.caseSensitive
                 ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
-                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground active:bg-secondary'
             }`}
           >
             Aa
@@ -469,11 +832,12 @@
             title={workbench.t.searchBar.wholeWordTitle}
             aria-label={workbench.t.searchBar.wholeWordTitle}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => workbench.toggleWholeWord()}
-            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+            onpointerdown={(e) => handleFlagPointerDown('word', e, () => workbench.toggleWholeWord())}
+            onclick={(e) => handleFlagClick('word', e, () => workbench.toggleWholeWord())}
+            class={`touch-target inline-flex h-7 min-w-[22px] sm:min-w-[28px] items-center justify-center rounded-md px-1 sm:px-1.5 font-mono text-[11px] sm:text-[12px] leading-none cursor-pointer select-none ${
               workbench.wholeWord
                 ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
-                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground active:bg-secondary'
             }`}
           >
             ab
@@ -485,11 +849,12 @@
             title={workbench.t.searchBar.useRegexTitle}
             aria-label={workbench.t.searchBar.useRegexTitle}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => workbench.toggleRegexMode()}
-            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+            onpointerdown={(e) => handleFlagPointerDown('regex', e, () => workbench.toggleRegexMode())}
+            onclick={(e) => handleFlagClick('regex', e, () => workbench.toggleRegexMode())}
+            class={`touch-target inline-flex h-7 min-w-[22px] sm:min-w-[28px] items-center justify-center rounded-md px-1 sm:px-1.5 font-mono text-[11px] sm:text-[12px] leading-none cursor-pointer select-none ${
               workbench.isRegex
                 ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
-                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground active:bg-secondary'
             }`}
           >
             .*
@@ -507,11 +872,10 @@
                 cursorPos = 0;
                 inputEl?.focus();
               }}
-              class="touch-target ml-0.5 inline-flex h-7 shrink-0 items-center gap-0.5 rounded-full bg-secondary/70 px-2.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border/70 hover:bg-secondary hover:text-foreground transition-colors cursor-pointer select-none"
+              class="touch-target ml-0.5 inline-flex h-6 w-6 sm:h-7 sm:w-auto shrink-0 items-center justify-center sm:gap-0.5 rounded-full bg-secondary/70 sm:px-2.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border/70 hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer select-none"
             >
               <Plus class="h-3.5 w-3.5 shrink-0" />
               <span class="hidden sm:inline">{workbench.t.searchBar.addNextFilter.replace(/^\+\s*/, '')}</span>
-              <span class="sm:hidden">{workbench.t.searchBar.addNextFilterShort.replace(/^\+\s*/, '')}</span>
             </button>
           {/if}
 
@@ -526,9 +890,9 @@
                 cursorPos = 0;
                 inputEl?.focus();
               }}
-              class="touch-target shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+              class="touch-target shrink-0 rounded-full p-1 sm:p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
             >
-              <X class="h-4 w-4" />
+              <X class="h-3.5 w-3.5 sm:h-4 sm:w-4" />
             </button>
           {/if}
         </div>
@@ -556,11 +920,12 @@
                   role="button"
                   tabindex="-1"
                   onmouseenter={() => (activeIdx = hi)}
+                  onpointerdown={() => (activeIdx = hi)}
                   onclick={() => applyDropdownItem(hi)}
                   onkeydown={(e) => {
                     if (e.key === 'Enter') applyDropdownItem(hi);
                   }}
-                  class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
+                  class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer active:bg-secondary ${
                     isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
                   }`}
                 >
@@ -602,8 +967,9 @@
                 <button
                   type="button"
                   onmouseenter={() => (activeIdx = idx)}
+                  onpointerdown={() => (activeIdx = idx)}
                   onclick={() => applyWordSuggestion(item)}
-                  class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors cursor-pointer ${
+                  class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left cursor-pointer active:bg-secondary ${
                     isSelected ? 'bg-secondary text-foreground' : 'text-foreground hover:bg-secondary/60'
                   }`}
                 >
@@ -631,7 +997,7 @@
                     workbench.isRegex = true;
                     inputEl?.focus();
                   }}
-                  class="touch-target shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+                  class="touch-target shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:bg-primary/20 active:bg-primary/25 cursor-pointer"
                 >
                   {workbench.t.searchBar.enableRegexAction}
                 </button>
@@ -642,9 +1008,6 @@
       {/if}
     </div>
 
-    <!-- Decoupled ScopeBar (Data Sources + Time Window) -->
-    <ScopeBar {hero} />
-
     <!-- Infinite-Level Progressive Condition Chain Bar (#1 -> #2 -> #3 -> ...) -->
     {#if workbench.steps.length > 0}
       <div class="mt-2 flex flex-wrap items-center gap-1.5 px-1">
@@ -654,7 +1017,7 @@
             <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground/45" />
           {/if}
           <div
-            class={`inline-flex max-w-full items-center gap-1 rounded-lg border px-1.5 py-0.5 font-mono text-xs transition-colors ${
+            class={`inline-flex max-w-full items-center gap-1 rounded-lg border px-1.5 py-0.5 font-mono text-xs ${
               step.exclude
                 ? 'border-status/35 bg-status/10 text-status'
                 : 'border-border/75 bg-secondary/45 text-foreground'
@@ -665,8 +1028,12 @@
               type="button"
               disabled={!canToggle}
               onmousedown={(e) => e.preventDefault()}
-              onclick={() => {
-                workbench.toggleStepExclude(idx);
+              onpointerdown={(e) => {
+                if (!canToggle) return;
+                handleFlagPointerDown(`step-${idx}`, e, () => workbench.toggleStepExclude(idx));
+              }}
+              onclick={(e) => {
+                handleFlagClick(`step-${idx}`, e, () => workbench.toggleStepExclude(idx));
                 inputEl?.focus();
               }}
               title={canToggle
@@ -675,7 +1042,7 @@
               aria-label={canToggle
                 ? workbench.t.searchBar.toggleExcludeTitle(step.exclude)
                 : `#${idx + 1}`}
-              class={`touch-target inline-flex h-4 min-w-[16px] items-center justify-center rounded px-1 font-mono text-[11px] font-semibold transition-colors ${
+              class={`touch-target inline-flex h-4 min-w-[16px] items-center justify-center rounded px-1 font-mono text-[11px] font-semibold ${
                 step.exclude
                   ? 'bg-status/15 text-status'
                   : 'bg-primary/12 text-primary'
@@ -688,11 +1055,11 @@
               type="button"
               onmousedown={(e) => e.preventDefault()}
               onclick={() => {
-                workbench.editStepInSearchBox(idx);
-                requestAnimationFrame(() => {
-                  inputEl?.focus();
-                  syncCursorPos();
+                flushSync(() => {
+                  workbench.editStepInSearchBox(idx);
                 });
+                inputEl?.focus();
+                syncCursorPos();
               }}
               title={workbench.t.searchBar.editStepTitle}
               class={`touch-target inline-flex min-w-0 items-center gap-1 truncate px-0.5 text-left hover:underline cursor-pointer ${
@@ -726,7 +1093,7 @@
               }}
               title={workbench.t.searchBar.removeStepTitle(step.text)}
               aria-label={workbench.t.searchBar.removeStepTitle(step.text)}
-              class="touch-target inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+              class="touch-target inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 hover:bg-secondary hover:text-foreground cursor-pointer"
             >
               <X class="h-3 w-3" />
             </button>
@@ -741,7 +1108,7 @@
             inputEl?.focus();
           }}
           title={workbench.t.searchBar.clearTitle}
-          class="touch-target ml-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+          class="touch-target ml-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
         >
           {workbench.t.searchBar.clearAllSteps}
         </button>

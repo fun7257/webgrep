@@ -111,23 +111,39 @@ export interface HighlightSegment {
   kind: 'plain' | 'primary' | 'contains-0' | 'contains-1' | 'contains-2';
 }
 
-function collectTermSpans(
-  text: string,
-  lowerText: string | null,
+interface CompiledTermMatcher {
+  regex: RegExp | null;
+  isScoped: boolean;
+  literalNeedle: string;
+  literalCaseInsensitive: boolean;
+  strippedNeedle: string;
+}
+
+const MAX_TERM_MATCHER_CACHE = 256;
+const termMatcherCache = new Map<string, CompiledTermMatcher>();
+
+function compileTermMatcher(
   rawTerm: string,
   defaultRegexMode: boolean,
   defaultCaseInsensitive: boolean
-): { start: number; end: number }[] {
+): CompiledTermMatcher | null {
   const term = rawTerm.trim();
-  if (!term) return [];
-  const len = text.length;
-  const out: { start: number; end: number }[] = [];
+  if (!term) return null;
+
+  const cacheKey = `${defaultRegexMode ? '1' : '0'}:${defaultCaseInsensitive ? '1' : '0'}:${term}`;
+  const cached = termMatcherCache.get(cacheKey);
+  if (cached) {
+    termMatcherCache.delete(cacheKey);
+    termMatcherCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const scopedMatch =
     /^\$([a-zA-Z.*]+)\(([\s\S]*)\)$/.exec(term) ??
     /^\$([a-zA-Z.*]+)\(([\s\S]*)$/.exec(term);
   const isScoped = Boolean(scopedMatch && scopedMatch[2].length > 0);
 
+  let regex: RegExp | null = null;
   if (isScoped || defaultRegexMode) {
     const mods = isScoped ? scopedMatch![1].toLowerCase() : '';
     const rawInner = isScoped ? scopedMatch![2] : term;
@@ -147,37 +163,73 @@ function collectTermSpans(
     const basePattern = isScopedRegex
       ? rawInner
       : rawInner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    const tryRegex = (patternStr: string): boolean => {
-      if (!patternStr) return false;
-      const regexPattern = isWholeWord ? `\\b(?:${patternStr})\\b` : patternStr;
+    if (basePattern) {
+      const regexPattern = isWholeWord ? `\\b(?:${basePattern})\\b` : basePattern;
       try {
-        const re = new RegExp(regexPattern, useCaseInsensitive ? 'gi' : 'g');
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          if (m[0].length === 0) {
-            re.lastIndex++;
-            continue;
-          }
-          out.push({ start: m.index, end: m.index + m[0].length });
-        }
-        return out.length > 0;
+        regex = new RegExp(regexPattern, useCaseInsensitive ? 'gi' : 'g');
       } catch {
-        return false;
+        regex = null;
       }
-    };
-
-    if (tryRegex(basePattern)) {
-      return out;
-    }
-    if (isScoped) {
-      return out;
     }
   }
 
-  const hay = defaultCaseInsensitive ? (lowerText ?? text.toLowerCase()) : text;
-  const searchLiteral = (candidateTerm: string): boolean => {
-    const needle = defaultCaseInsensitive ? candidateTerm.toLowerCase() : candidateTerm;
+  const literalNeedle = defaultCaseInsensitive ? term.toLowerCase() : term;
+  let strippedNeedle = '';
+  if (!isScoped && (term.includes('"') || term.includes("'"))) {
+    const stripped = term.replace(/^["']+|["']+$/g, '').replace(/["']/g, '');
+    if (stripped && stripped !== term) {
+      strippedNeedle = defaultCaseInsensitive ? stripped.toLowerCase() : stripped;
+    }
+  }
+
+  const compiled: CompiledTermMatcher = {
+    regex,
+    isScoped,
+    literalNeedle,
+    literalCaseInsensitive: defaultCaseInsensitive,
+    strippedNeedle,
+  };
+  if (termMatcherCache.size >= MAX_TERM_MATCHER_CACHE) {
+    const oldestKey = termMatcherCache.keys().next().value;
+    if (oldestKey !== undefined) termMatcherCache.delete(oldestKey);
+  }
+  termMatcherCache.set(cacheKey, compiled);
+  return compiled;
+}
+
+function collectTermSpans(
+  text: string,
+  getLower: () => string,
+  rawTerm: string,
+  defaultRegexMode: boolean,
+  defaultCaseInsensitive: boolean
+): { start: number; end: number }[] {
+  const matcher = compileTermMatcher(rawTerm, defaultRegexMode, defaultCaseInsensitive);
+  if (!matcher) return [];
+  const len = text.length;
+  const out: { start: number; end: number }[] = [];
+
+  if (matcher.regex) {
+    const re = matcher.regex;
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0].length === 0) {
+        re.lastIndex++;
+        continue;
+      }
+      out.push({ start: m.index, end: m.index + m[0].length });
+    }
+    re.lastIndex = 0;
+    if (out.length > 0 || matcher.isScoped) {
+      return out;
+    }
+  } else if (matcher.isScoped) {
+    return out;
+  }
+
+  const hay = matcher.literalCaseInsensitive ? getLower() : text;
+  const searchLiteral = (needle: string): boolean => {
     if (!needle) return false;
     let pos = 0;
     while (pos < len) {
@@ -189,14 +241,11 @@ function collectTermSpans(
     return out.length > 0;
   };
 
-  if (searchLiteral(term)) {
+  if (searchLiteral(matcher.literalNeedle)) {
     return out;
   }
-  if (term.includes('"') || term.includes("'")) {
-    const strippedQuotes = term.replace(/^["']+|["']+$/g, '').replace(/["']/g, '');
-    if (strippedQuotes && strippedQuotes !== term) {
-      searchLiteral(strippedQuotes);
-    }
+  if (matcher.strippedNeedle) {
+    searchLiteral(matcher.strippedNeedle);
   }
   return out;
 }
@@ -244,7 +293,7 @@ export function buildHighlightSegments(
   } else if (primaryPattern.trim().length > 0) {
     const pSpans = collectTermSpans(
       text,
-      caseInsensitive ? getLower() : null,
+      getLower,
       primaryPattern,
       isRegexMode,
       caseInsensitive
@@ -259,7 +308,7 @@ export function buildHighlightSegments(
       const kind = `contains-${idx % 3}` as HighlightSegment['kind'];
       const cSpans = collectTermSpans(
         text,
-        caseInsensitive ? getLower() : null,
+        getLower,
         rawTerm,
         isRegexMode,
         caseInsensitive
@@ -467,30 +516,26 @@ export interface NanoTimestampInfo {
 }
 
 /**
- * Detects a leading 19-digit Unix nanosecond timestamp (`<19-digit-ns> <payload>`)
- * in external log records and formats it into human-readable local time.
+ * Zero-allocation check for a leading 19-digit Unix nanosecond timestamp (`<19-digit-ns> <payload>`).
+ * Returns the byte/UTF-16 offset where `<payload>` begins, or `0` if absent.
  */
-export function extractLeadingNanoTimestamp(text: string): NanoTimestampInfo | null {
-  if (!text || text.length < 20) return null;
+export function skipLeadingNanoTimestampOffset(text: string): number {
+  if (!text || text.length < 20) return 0;
   for (let i = 0; i < 19; i++) {
     const code = text.charCodeAt(i);
-    if (code < 48 || code > 57) return null;
+    if (code < 48 || code > 57) return 0;
   }
   const sep = text.charCodeAt(19);
-  if (sep !== 32 && sep !== 9) return null;
+  if (sep !== 32 && sep !== 9) return 0;
 
-  const nsStr = text.slice(0, 19);
-  const msNum = Number(nsStr.slice(0, 13));
-  // Valid range: 2000-01-01 to 2100-01-01
-  if (!Number.isFinite(msNum) || msNum < 946684800000 || msNum > 4102444800000) {
-    return null;
+  let ms = 0;
+  for (let i = 0; i < 13; i++) {
+    ms = ms * 10 + (text.charCodeAt(i) - 48);
   }
-
-  const d = new Date(msNum);
-  const pad2 = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-  const pad3 = (n: number) => (n < 10 ? `00${n}` : n < 100 ? `0${n}` : `${n}`);
-  const formattedTime = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
-  const fullFormattedTime = `${d.getFullYear()}-${formattedTime}`;
+  // Valid range: 2000-01-01 to 2100-01-01
+  if (!Number.isFinite(ms) || ms < 946684800000 || ms > 4102444800000) {
+    return 0;
+  }
 
   let restStart = 20;
   while (
@@ -499,6 +544,24 @@ export function extractLeadingNanoTimestamp(text: string): NanoTimestampInfo | n
   ) {
     restStart++;
   }
+  return restStart;
+}
+
+/**
+ * Detects a leading 19-digit Unix nanosecond timestamp (`<19-digit-ns> <payload>`)
+ * in external log records and formats it into human-readable local time.
+ */
+export function extractLeadingNanoTimestamp(text: string): NanoTimestampInfo | null {
+  const restStart = skipLeadingNanoTimestampOffset(text);
+  if (restStart === 0) return null;
+
+  const nsStr = text.slice(0, 19);
+  const msNum = Number(nsStr.slice(0, 13));
+  const d = new Date(msNum);
+  const pad2 = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  const pad3 = (n: number) => (n < 10 ? `00${n}` : n < 100 ? `0${n}` : `${n}`);
+  const formattedTime = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+  const fullFormattedTime = `${d.getFullYear()}-${formattedTime}`;
 
   return {
     nsStr,
@@ -594,6 +657,9 @@ export interface StructuredAnalysis {
  * so human eyes can read escaped Chinese/UTF-8 text and multi-line stack traces effortlessly.
  */
 export function decodeHumanEscapes(s: string): string {
+  if (!s || (!s.includes('\\') && !s.includes('%') && !s.includes('\x1b'))) {
+    return s;
+  }
   let out = s
     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
@@ -763,10 +829,36 @@ export function universalPrettyStructure(s: string): { formatted: string; badge?
   return { formatted: decoded };
 }
 
+const MAX_STRUCTURED_ANALYSIS_CACHE = 128;
+const MAX_STRUCTURED_ANALYSIS_LEN = 262_144;
+const structuredAnalysisCache = new Map<string, StructuredAnalysis>();
+
 /**
  * Beautifies any line of text for comfortable reading in the Inspector without deleting user information.
  */
 export function analyzeStructuredLine(text: string): StructuredAnalysis {
+  if (text.length <= MAX_STRUCTURED_ANALYSIS_LEN) {
+    const cached = structuredAnalysisCache.get(text);
+    if (cached) {
+      structuredAnalysisCache.delete(text);
+      structuredAnalysisCache.set(text, cached);
+      return cached;
+    }
+  }
+
+  const result = computeStructuredAnalysis(text);
+
+  if (text.length <= MAX_STRUCTURED_ANALYSIS_LEN) {
+    if (structuredAnalysisCache.size >= MAX_STRUCTURED_ANALYSIS_CACHE) {
+      const oldestKey = structuredAnalysisCache.keys().next().value;
+      if (oldestKey !== undefined) structuredAnalysisCache.delete(oldestKey);
+    }
+    structuredAnalysisCache.set(text, result);
+  }
+  return result;
+}
+
+function computeStructuredAnalysis(text: string): StructuredAnalysis {
   const tsInfo = extractLeadingNanoTimestamp(text);
   const tsHeader = tsInfo ? `${tsInfo.fullFormattedTime} (${tsInfo.nsStr})` : '';
   const timeHint = tsInfo ? tsInfo.fullFormattedTime : (detectInlineEpochHint(text) ?? undefined);

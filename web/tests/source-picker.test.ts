@@ -4,9 +4,13 @@ import {
   applySingleSourceSelection,
   countSourcesByKind,
   filterSourcesForPicker,
+  fuzzyFilterSourcesForPicker,
+  fuzzyMatchText,
   isSourceRefInList,
+  mergeHighlightRanges,
   normalizeSourceKind,
   resolveScopeSourceSummary,
+  splitHighlightRanges,
   toggleExcludeSourceSelection,
   toggleMultiSourceSelection,
 } from '../src/lib/source-picker.ts';
@@ -150,5 +154,86 @@ describe('Source picker pure logic', () => {
       ['1']
     );
     assert.equal(isSourceRefInList(sources[1], ['WEBGREP']), true);
+  });
+
+  it('fuzzyFilterSourcesForPicker supports subsequence matching, word-boundary DP, multi-token queries, and highlights', () => {
+    const sources: DataSourceItem[] = [
+      makeSource('1', 'Sample Logs', 'dir', true, '/var/log/sample-logs'),
+      makeSource('2', 'webgrep', 'dir', true, '/Users/fun/code/webgrep'),
+      makeSource('3', 'nginx-ctr', 'docker', true, 'unix:///var/run/docker.sock::nginx', 'auto::nginx-ctr'),
+      makeSource('4', 'app-router', 'dir', true, '/var/log/app.log'),
+      makeSource('5', 'disabled-web', 'dir', false, '/tmp/disabled-web'),
+    ];
+
+    // Subsequence matching
+    assert.deepEqual(
+      fuzzyFilterSourcesForPicker(sources, 'all', 'wgp').map((r) => r.source.id),
+      ['2']
+    );
+    assert.deepEqual(
+      fuzzyFilterSourcesForPicker(sources, 'all', 'slog').map((r) => r.source.id),
+      ['1']
+    );
+    assert.deepEqual(
+      fuzzyFilterSourcesForPicker(sources, 'all', 'ngctr').map((r) => r.source.id),
+      ['3']
+    );
+
+    // Non-matching query returns empty
+    assert.deepEqual(fuzzyFilterSourcesForPicker(sources, 'all', 'zzz'), []);
+
+    // Word-boundary highlight preference: '/var/log/app.log' searching 'al' highlights 'a' at 9 and 'l' at 13
+    const boundaryHit = fuzzyMatchText('/var/log/app.log', 'al');
+    assert.ok(boundaryHit);
+    assert.deepEqual(boundaryHit.ranges, [
+      { start: 9, end: 10 },
+      { start: 13, end: 14 },
+    ]);
+
+    // Prefix name match outranks deeper path subsequence match (enabled still stays ahead of disabled)
+    const ranked = fuzzyFilterSourcesForPicker(
+      [
+        makeSource('path-hit', 'other-service', 'dir', true, '/srv/w_e_b/x'),
+        makeSource('name-prefix', 'webgrep', 'dir', true, '/Users/fun/webgrep'),
+        makeSource('disabled-prefix', 'web-dis', 'dir', false, '/tmp/web-dis'),
+      ],
+      'all',
+      'web'
+    );
+    assert.deepEqual(
+      ranked.map((r) => r.source.id),
+      ['name-prefix', 'path-hit', 'disabled-prefix']
+    );
+
+    // Whitespace-separated multi-token query matches across name and endpoint/summary/path
+    const multiTok = fuzzyFilterSourcesForPicker(sources, 'all', 'auto ngc');
+    assert.deepEqual(
+      multiTok.map((r) => r.source.id),
+      ['3']
+    );
+
+    // Highlight range merging & segment splitting
+    assert.deepEqual(
+      mergeHighlightRanges([
+        { start: 3, end: 5 },
+        { start: 0, end: 2 },
+        { start: 2, end: 4 },
+      ]),
+      [{ start: 0, end: 5 }]
+    );
+    assert.deepEqual(
+      splitHighlightRanges('webgrep', [
+        { start: 0, end: 1 },
+        { start: 3, end: 4 },
+        { start: 6, end: 7 },
+      ]),
+      [
+        { text: 'w', match: true },
+        { text: 'eb', match: false },
+        { text: 'g', match: true },
+        { text: 're', match: false },
+        { text: 'p', match: true },
+      ]
+    );
   });
 });

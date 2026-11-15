@@ -7,8 +7,7 @@
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
   import ResultList from '$lib/components/ResultList.svelte';
   import InspectorPane from '$lib/components/InspectorPane.svelte';
-  import SourcePickerModal from '$lib/components/SourcePickerModal.svelte';
-  import SettingsPopover from '$lib/components/SettingsPopover.svelte';
+  import RightDrawer from '$lib/components/RightDrawer.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
 
   let searchInputEl = $state<HTMLInputElement | null>(null);
@@ -66,7 +65,7 @@
     return tag === 'input' || tag === 'textarea' || target.isContentEditable;
   }
 
-  function navigateFile(delta: 1 | -1) {
+  function navigateFile(delta: 1 | -1, rapid = false) {
     const hits = workbench.flatHits;
     const cur = workbench.activeHitIndex;
     if (cur < 0 || cur >= hits.length) return;
@@ -79,7 +78,7 @@
       const prevFile = hits[i].file;
       while (i > 0 && hits[i - 1].file === prevFile) i--;
     }
-    workbench.selectHitByIndex(i, false);
+    workbench.selectHitByIndex(i, false, rapid);
     workbench.scrollToActiveTick += 1;
   }
 
@@ -108,8 +107,9 @@
 
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyK') {
       e.preventDefault();
-      workbench.settingsOpen = false;
-      workbench.sourcePickerOpen = false;
+      workbench.closeSourcePicker();
+      workbench.closeTimePicker();
+      workbench.closeRightDrawer();
       workbench.paletteOpen = !workbench.paletteOpen;
       return;
     }
@@ -117,27 +117,38 @@
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       workbench.paletteOpen = false;
-      workbench.sourcePickerOpen = false;
+      workbench.closeSourcePicker();
+      workbench.closeTimePicker();
       if (workbench.settingsOpen) {
-        workbench.settingsOpen = false;
+        workbench.closeRightDrawer();
       } else {
-        workbench.openSettings('general');
+        workbench.openSettingsDrawer();
       }
       return;
     }
 
     if (e.key === 'Escape') {
-      // Step back one layer at a time: palette → source picker → settings → detail → cancel search
+      // Step back one layer at a time: palette → source/time picker → right drawer → detail → cancel search
       if (workbench.paletteOpen) {
         workbench.paletteOpen = false;
         return;
       }
       if (workbench.sourcePickerOpen) {
-        workbench.sourcePickerOpen = false;
+        workbench.closeSourcePicker();
+        if (!workbench.isCompact && !workbench.isTouch) {
+          searchInputEl?.focus();
+        }
         return;
       }
-      if (workbench.settingsOpen) {
-        workbench.settingsOpen = false;
+      if (workbench.timePickerOpen) {
+        workbench.closeTimePicker();
+        if (!workbench.isCompact && !workbench.isTouch) {
+          searchInputEl?.focus();
+        }
+        return;
+      }
+      if (workbench.rightDrawerOpen) {
+        workbench.closeRightDrawer();
         return;
       }
       if (workbench.isCompact && workbench.detailOpen) {
@@ -151,7 +162,27 @@
     }
 
     if (isTypingInInput(e.target)) return;
-    if (workbench.paletteOpen || workbench.sourcePickerOpen || workbench.settingsOpen) return;
+
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '?') {
+      e.preventDefault();
+      workbench.closeSourcePicker();
+      workbench.closeTimePicker();
+      if (workbench.shortcutsDrawerOpen) {
+        workbench.closeRightDrawer();
+      } else {
+        workbench.openShortcutsDrawer();
+      }
+      return;
+    }
+
+    if (
+      workbench.paletteOpen ||
+      workbench.rightDrawerOpen ||
+      workbench.sourcePickerOpen ||
+      workbench.timePickerOpen
+    ) {
+      return;
+    }
 
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
       const sel = window.getSelection()?.toString() ?? '';
@@ -168,13 +199,6 @@
       e.preventDefault();
       searchInputEl?.focus();
       searchInputEl?.select();
-    } else if (e.key === '?') {
-      e.preventDefault();
-      if (workbench.settingsOpen && workbench.settingsTab === 'shortcuts') {
-        workbench.settingsOpen = false;
-      } else {
-        workbench.openSettings('shortcuts');
-      }
     } else if (e.key === 'Tab' && !e.shiftKey && e.target === document.body) {
       e.preventDefault();
       searchInputEl?.focus();
@@ -184,46 +208,56 @@
         workbench.selectHitByIndex(workbench.activeHitIndex, true);
       }
     } else if (e.key === '[') {
-      navigateFile(-1);
+      navigateFile(-1, e.repeat);
     } else if (e.key === ']') {
-      navigateFile(1);
+      navigateFile(1, e.repeat);
     } else if (e.key === 'ArrowDown' || e.key === 'j') {
       if (workbench.flatHits.length > 0) {
         e.preventDefault();
-        workbench.navigateHits(1);
+        workbench.navigateHits(1, e.repeat);
       }
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
       if (workbench.flatHits.length > 0) {
         e.preventDefault();
-        workbench.navigateHits(-1);
+        workbench.navigateHits(-1, e.repeat);
       }
     }
   }
 
   let resizeRaf: number | null = null;
+  let pendingResizeX = 0;
+
+  function applyInspectorResizeWidth(clientX: number) {
+    const fromRight = window.innerWidth - clientX;
+    workbench.rightInspectorWidth = Math.max(300, Math.min(720, fromRight));
+  }
 
   function startResizeInspector(e: PointerEvent) {
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    pendingResizeX = e.clientX;
     resizingInspector = true;
   }
 
   function handlePointerMove(e: PointerEvent) {
     if (!resizingInspector) return;
-    const clientX = e.clientX;
+    pendingResizeX = e.clientX;
     if (resizeRaf !== null) return;
     resizeRaf = requestAnimationFrame(() => {
       resizeRaf = null;
-      const fromRight = window.innerWidth - clientX;
-      workbench.rightInspectorWidth = Math.max(300, Math.min(720, fromRight));
+      applyInspectorResizeWidth(pendingResizeX);
     });
   }
 
   function stopResize() {
+    const wasResizing = resizingInspector;
     resizingInspector = false;
     if (resizeRaf !== null) {
       cancelAnimationFrame(resizeRaf);
       resizeRaf = null;
+      if (wasResizing) {
+        applyInspectorResizeWidth(pendingResizeX);
+      }
     }
   }
 </script>
@@ -244,7 +278,7 @@
 >
   <Header />
 
-  <div class="flex flex-1 min-h-0 overflow-hidden">
+  <div class="relative flex flex-1 min-h-0 overflow-hidden">
     <main class="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
       <SearchBar bind:inputEl={searchInputEl} hero={isHomeView} />
       {#if !isHomeView}
@@ -265,15 +299,15 @@
         <div
           onpointerdown={startResizeInspector}
           style="touch-action: none"
-          class="relative w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 transition-colors z-20 before:absolute before:inset-y-0 before:-inset-x-1.5 [@media(any-pointer:coarse)]:before:-inset-x-3"
+          class="relative w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 z-20 before:absolute before:inset-y-0 before:-inset-x-1.5 [@media(any-pointer:coarse)]:before:-inset-x-3"
           title={workbench.t.header.dragResizeInspector}
         ></div>
         <InspectorPane />
       {/if}
     {/if}
+
+    <RightDrawer />
   </div>
 
-  <SourcePickerModal />
-  <SettingsPopover />
   <CommandPalette />
 </div>

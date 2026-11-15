@@ -35,7 +35,7 @@
             onclick={() => workbench.cancelSearch()}
             title={workbench.t.telemetry.stopSearch}
             aria-label={workbench.t.telemetry.stopSearch}
-            class="touch-target inline-flex h-6 w-6 items-center justify-center rounded bg-secondary/60 text-foreground hover:bg-secondary transition-colors shrink-0"
+            class="touch-target inline-flex h-6 w-6 items-center justify-center rounded bg-secondary/60 text-foreground hover:bg-secondary active:bg-secondary/80 active:scale-[0.97] shrink-0"
           >
             <Square class="h-2.5 w-2.5 fill-current" />
           </button>

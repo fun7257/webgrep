@@ -24,7 +24,7 @@
 
 <span
   class={cn(
-    'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium leading-none transition-colors tabular-nums',
+    'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium leading-none tabular-nums',
     variantClasses[variant],
     className
   )}

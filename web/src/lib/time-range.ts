@@ -1,15 +1,46 @@
 import type { BuiltinTimePreset } from './types.ts';
+import { fuzzyMatchText, type HighlightRange } from './source-picker.ts';
 
 export const BUILTIN_TIME_PRESETS: readonly BuiltinTimePreset[] = [
   '',
+  '5m',
   '15m',
+  '30m',
   '1h',
+  '3h',
   '6h',
+  '12h',
   '24h',
   'today',
   'yesterday',
   '7d',
   '30d',
+];
+
+export const FLAT_QUICK_TIME_PRESETS: readonly BuiltinTimePreset[] = [
+  '5m',
+  '15m',
+  '30m',
+  '1h',
+  '3h',
+  '6h',
+  '12h',
+  '24h',
+  'today',
+  'yesterday',
+  '7d',
+  '30d',
+];
+
+export interface TimePresetGroup {
+  id: 'live' | 'hours' | 'days';
+  presets: readonly BuiltinTimePreset[];
+}
+
+export const QUICK_TIME_PRESET_GROUPS: readonly TimePresetGroup[] = [
+  { id: 'live', presets: ['5m', '15m', '30m', '1h'] },
+  { id: 'hours', presets: ['3h', '6h', '12h', '24h'] },
+  { id: 'days', presets: ['today', 'yesterday', '7d', '30d'] },
 ];
 
 const BUILTIN_PRESET_SET = new Set<string>(BUILTIN_TIME_PRESETS);
@@ -18,18 +49,16 @@ export function isBuiltinTimePreset(spec: string): spec is BuiltinTimePreset {
   return BUILTIN_PRESET_SET.has(spec);
 }
 
-export interface CalendarDayCell {
-  ymd: string;
-  day: number;
-  inMonth: boolean;
-  isToday: boolean;
-}
-
 export interface TimeRangeDraft {
   startDate: string;
   startTime: string;
   endDate: string;
   endTime: string;
+}
+
+export interface FullTimeRangeDraft {
+  start: string;
+  end: string;
 }
 
 function pad2(n: number): string {
@@ -83,30 +112,6 @@ export function normalizeTimeInput(raw: string, isEnd: boolean): string | null {
     return null;
   }
   return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
-}
-
-export function buildCalendarMonthGrid(
-  year: number,
-  monthIndex0: number,
-  todayYmd: string
-): CalendarDayCell[] {
-  const firstOfMonth = new Date(year, monthIndex0, 1);
-  // Monday = 0 ... Sunday = 6
-  const leadDays = (firstOfMonth.getDay() + 6) % 7;
-  const gridStart = new Date(year, monthIndex0, 1 - leadDays);
-
-  const cells: CalendarDayCell[] = [];
-  for (let i = 0; i < 42; i += 1) {
-    const d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i);
-    const ymd = formatYmd(d);
-    cells.push({
-      ymd,
-      day: d.getDate(),
-      inMonth: d.getMonth() === firstOfMonth.getMonth() && d.getFullYear() === firstOfMonth.getFullYear(),
-      isToday: ymd === todayYmd,
-    });
-  }
-  return cells;
 }
 
 const MONTH_ABBR: Record<string, string> = {
@@ -379,6 +384,106 @@ export function parsePastedDateTime(raw: string): { date: string; time: string }
   return null;
 }
 
+const EMBEDDED_TS_PATTERNS: readonly RegExp[] = [
+  /(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T _]+\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,9})?(?:\s*(?:AM|PM))?(?:\s*(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT))?)?/i,
+  /\d{1,2}[/-][A-Za-z]{3,9}[/-](?:19|20)\d{2}[: T]\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,9})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT))?/i,
+  /(?:19|20)\d{2}年\d{1,2}月\d{1,2}日(?:\s*[T ]?\s*\d{1,2}[:时]\d{1,2}(?:[:分]\d{1,2}秒?)?(?:[.,]\d{1,9})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT))?)?/i,
+  /\d{1,2}([/.])\d{1,2}\1(?:19|20)\d{2}[T ]\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,9})?(?:\s*(?:AM|PM))?(?:\s*(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT))?/i,
+  /\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:T)?\d{6}(?:[.,]?\d{1,9})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT))?\b/i,
+  /^\s*[\[(]?(\d{10,19}(?:\.\d+)?)(?=[\])\s,;:]|$)/,
+];
+
+function candidateHasSeconds(candidate: string): boolean {
+  if (/^\s*\d{10,19}(?:\.\d+)?\s*$/.test(candidate)) return true;
+  if (/(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])T?\d{6}/.test(candidate)) return true;
+  if (/\d{1,2}[:时]\d{2}[:分]\d{2}/.test(candidate)) return true;
+  return false;
+}
+
+export interface ExtractedDateTime {
+  date: string;
+  time: string;
+  hasSeconds: boolean;
+  formatted: string;
+}
+
+export function extractPastedDateTime(
+  raw: string,
+  nowMs = Date.now(),
+  isEnd = false
+): ExtractedDateTime | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const direct = parsePastedDateTime(trimmed);
+  if (direct) {
+    const hasSeconds = candidateHasSeconds(trimmed);
+    const time =
+      direct.time && !hasSeconds && isEnd ? `${direct.time.slice(0, 6)}59` : direct.time;
+    return {
+      date: direct.date,
+      time,
+      hasSeconds,
+      formatted: time ? `${direct.date} ${time}` : direct.date,
+    };
+  }
+
+  for (const re of EMBEDDED_TS_PATTERNS) {
+    const m = re.exec(trimmed);
+    if (!m) continue;
+    const candidate = (m[1] && m[0].startsWith(trimmed[0] ?? '') ? m[1] : m[0]).trim();
+    const parsed = parsePastedDateTime(candidate);
+    if (!parsed) continue;
+    const hasSeconds = candidateHasSeconds(candidate);
+    const time =
+      parsed.time && !hasSeconds && isEnd ? `${parsed.time.slice(0, 6)}59` : parsed.time;
+    return {
+      date: parsed.date,
+      time,
+      hasSeconds,
+      formatted: time ? `${parsed.date} ${time}` : parsed.date,
+    };
+  }
+
+  // Yearless syslog at start of line (e.g. "Nov 14 09:15:00 web01 ...")
+  const syslogMatch =
+    /^(?:[A-Za-z]{3,9}\s+)?([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\b/.exec(
+      trimmed
+    );
+  if (syslogMatch) {
+    const mmStr = parseMonthToken(syslogMatch[1]);
+    if (mmStr) {
+      const yr = new Date(nowMs).getFullYear();
+      const hasSeconds = syslogMatch[5] !== undefined;
+      const ss = hasSeconds ? Number(syslogMatch[5]) : isEnd ? 59 : 0;
+      const resolved = resolveParsedDateTime(
+        `${yr}-${mmStr}-${pad2(Number(syslogMatch[2]))}`,
+        Number(syslogMatch[3]),
+        Number(syslogMatch[4]),
+        ss
+      );
+      if (resolved) {
+        return {
+          date: resolved.date,
+          time: resolved.time,
+          hasSeconds,
+          formatted: `${resolved.date} ${resolved.time}`,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+const REL_TIME_RE = /^(?:now\s*-\s*|-\s*)?(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|day|w)$/i;
+
+function normalizeRelToken(raw: string): string | null {
+  const m = REL_TIME_RE.exec(raw.trim());
+  if (!m) return null;
+  return `${m[1]}${m[2].toLowerCase()}`;
+}
+
 function splitBoundToken(token: string, isEnd: boolean): { date: string; time: string } {
   const clean = token.trim().replace(/^(\d{4})\/(\d{2})\/(\d{2})/, '$1-$2-$3');
   if (!clean) return { date: '', time: '' };
@@ -422,14 +527,7 @@ export function parseCustomRangeDraft(spec: string, nowMs = Date.now()): TimeRan
     return { startDate: ydayYmd, startTime: '00:00:00', endDate: ydayYmd, endTime: '23:59:59' };
   }
 
-  if (
-    lower === '15m' ||
-    lower === '1h' ||
-    lower === '6h' ||
-    lower === '24h' ||
-    lower === '7d' ||
-    lower === '30d'
-  ) {
+  if (isBuiltinTimePreset(lower)) {
     return { startDate: '', startTime: '', endDate: '', endTime: '' };
   }
 
@@ -465,6 +563,184 @@ export function parseCustomRangeDraft(spec: string, nowMs = Date.now()): TimeRan
     endDate: '',
     endTime: '',
   };
+}
+
+function formatFullBoundDraft(raw: string, isEnd: boolean): string {
+  const clean = raw.trim();
+  if (!clean) return '';
+  const rel = normalizeRelToken(clean);
+  if (rel) return rel;
+  const bound = splitBoundToken(clean, isEnd);
+  if (bound.date) {
+    return `${bound.date} ${bound.time || (isEnd ? '23:59:59' : '00:00:00')}`;
+  }
+  return clean;
+}
+
+export function parseFullTimeRangeDraft(spec: string): FullTimeRangeDraft {
+  const clean = spec.trim();
+  if (!clean) return { start: '', end: '' };
+
+  const lower = clean.toLowerCase();
+  if (isBuiltinTimePreset(lower)) {
+    return { start: '', end: '' };
+  }
+
+  const rel = normalizeRelToken(clean);
+  if (rel) {
+    return { start: rel, end: '' };
+  }
+
+  if (/^\d{4}[-/]\d{2}[-/]\d{2}$/.test(clean)) {
+    const normalized = clean.replace(/\//g, '-');
+    if (isValidYmd(normalized)) {
+      return {
+        start: `${normalized} 00:00:00`,
+        end: `${normalized} 23:59:59`,
+      };
+    }
+  }
+
+  const sep = clean.includes('..') ? '..' : clean.includes('~') ? '~' : null;
+  if (sep) {
+    const [leftRaw, rightRaw] = clean.split(sep, 2);
+    return {
+      start: formatFullBoundDraft(leftRaw, false),
+      end: formatFullBoundDraft(rightRaw, true),
+    };
+  }
+
+  return {
+    start: formatFullBoundDraft(clean, false),
+    end: '',
+  };
+}
+
+interface ResolvedFullBound {
+  kind: 'empty' | 'relative' | 'explicit';
+  spec: string;
+  date: string;
+  dateOnly: boolean;
+}
+
+function resolveFullBound(
+  raw: string,
+  isEnd: boolean,
+  fallbackYmd: string,
+  nowMs: number
+): ResolvedFullBound | null {
+  const clean = raw.trim();
+  if (!clean) {
+    return { kind: 'empty', spec: '', date: '', dateOnly: false };
+  }
+
+  if (isEnd && (clean.toLowerCase() === 'now' || clean === '现在')) {
+    return { kind: 'empty', spec: '', date: '', dateOnly: false };
+  }
+
+  const rel = normalizeRelToken(clean);
+  if (rel) {
+    return { kind: 'relative', spec: rel, date: '', dateOnly: false };
+  }
+
+  // Date-only: YYYY-MM-DD or YYYY/M/D
+  const dateOnlyMatch = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(clean);
+  if (dateOnlyMatch) {
+    const ymd = `${dateOnlyMatch[1]}-${pad2(Number(dateOnlyMatch[2]))}-${pad2(Number(dateOnlyMatch[3]))}`;
+    if (!isValidYmd(ymd)) return null;
+    const hms = isEnd ? '23:59:59' : '00:00:00';
+    return { kind: 'explicit', spec: `${ymd} ${hms}`, date: ymd, dateOnly: true };
+  }
+
+  // Date + Time: YYYY-MM-DD HH:mm[:ss] (or slash / T)
+  const fullMatch = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T _]+(\d{1,2}:\d{2}(?::\d{2})?)$/.exec(clean);
+  if (fullMatch) {
+    const ymd = `${fullMatch[1]}-${pad2(Number(fullMatch[2]))}-${pad2(Number(fullMatch[3]))}`;
+    if (!isValidYmd(ymd)) return null;
+    const hms = normalizeTimeInput(fullMatch[4], isEnd);
+    if (!hms) return null;
+    return { kind: 'explicit', spec: `${ymd} ${hms}`, date: ymd, dateOnly: false };
+  }
+
+  // Time-only: HH:mm[:ss] or HHmm / HHmmss -> inherits fallback date
+  if (/^(?:\d{1,2}:\d{2}(?::\d{2})?|\d{4}|\d{6})$/.test(clean)) {
+    const hms = normalizeTimeInput(clean, isEnd);
+    if (!hms) return null;
+    return { kind: 'explicit', spec: `${fallbackYmd} ${hms}`, date: fallbackYmd, dateOnly: false };
+  }
+
+  // Fallback to 20+ log / ISO / epoch / pasted timestamp formats
+  const extracted = extractPastedDateTime(clean, nowMs, isEnd);
+  if (extracted) {
+    const dateOnly = extracted.time === '';
+    const hms = dateOnly ? (isEnd ? '23:59:59' : '00:00:00') : extracted.time;
+    return { kind: 'explicit', spec: `${extracted.date} ${hms}`, date: extracted.date, dateOnly };
+  }
+
+  return null;
+}
+
+export function buildFullTimeRangeSpec(
+  draft: FullTimeRangeDraft,
+  nowMs = Date.now()
+): { spec: string; error: 'empty' | 'invalid_start' | 'invalid_end' | null } {
+  let rawStart = draft.start.trim();
+  let rawEnd = draft.end.trim();
+
+  if (!rawEnd) {
+    const sep = rawStart.includes('..') ? '..' : rawStart.includes('~') ? '~' : null;
+    if (sep) {
+      const [leftRaw, rightRaw] = rawStart.split(sep, 2);
+      rawStart = leftRaw.trim();
+      rawEnd = rightRaw.trim();
+    }
+  }
+
+  if (rawEnd.toLowerCase() === 'now' || rawEnd === '现在') {
+    rawEnd = '';
+  }
+
+  if (!rawStart && !rawEnd) {
+    return { spec: '', error: 'empty' };
+  }
+
+  const todayYmd = formatYmd(new Date(nowMs));
+  const startRes = resolveFullBound(rawStart, false, todayYmd, nowMs);
+  if (!startRes) {
+    return { spec: '', error: 'invalid_start' };
+  }
+
+  const endFallbackYmd = startRes.kind === 'explicit' && startRes.date ? startRes.date : todayYmd;
+  const endRes = resolveFullBound(rawEnd, true, endFallbackYmd, nowMs);
+  if (!endRes) {
+    return { spec: '', error: 'invalid_end' };
+  }
+
+  if (startRes.kind === 'relative' && endRes.kind === 'empty') {
+    return { spec: startRes.spec, error: null };
+  }
+
+  let left = startRes.spec;
+  let right = endRes.spec;
+
+  if (
+    startRes.kind === 'explicit' &&
+    endRes.kind === 'explicit' &&
+    left &&
+    right &&
+    left > right
+  ) {
+    if (startRes.dateOnly && endRes.dateOnly && startRes.date > endRes.date) {
+      left = `${endRes.date} 00:00:00`;
+      right = `${startRes.date} 23:59:59`;
+    } else {
+      const tmp = left;
+      left = right;
+      right = tmp;
+    }
+  }
+
+  return { spec: `${left}..${right}`, error: null };
 }
 
 export function buildCustomRangeSpec(
@@ -533,6 +809,371 @@ export function buildCustomRangeSpec(
   return { spec: `${left}..${right}`, error: null };
 }
 
+export interface DateTimeParts {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+  second: string;
+}
+
+export type DateTimeSlot = keyof DateTimeParts;
+
+export const DATETIME_SLOTS: readonly DateTimeSlot[] = [
+  'year',
+  'month',
+  'day',
+  'hour',
+  'minute',
+  'second',
+];
+
+export interface SyncedTimeRangeState {
+  start: DateTimeParts;
+  end: DateTimeParts;
+  endIsNow: boolean;
+}
+
+export function dateToParts(d: Date): DateTimeParts {
+  return {
+    year: String(d.getFullYear()).padStart(4, '0'),
+    month: pad2(d.getMonth() + 1),
+    day: pad2(d.getDate()),
+    hour: pad2(d.getHours()),
+    minute: pad2(d.getMinutes()),
+    second: pad2(d.getSeconds()),
+  };
+}
+
+export function daysInMonth(year: number, month1to12: number): number {
+  const safeYear = Math.min(2099, Math.max(1970, Math.trunc(year) || 2026));
+  const safeMonth = Math.min(12, Math.max(1, Math.trunc(month1to12) || 1));
+  return new Date(safeYear, safeMonth, 0).getDate();
+}
+
+export function clampDateTimeParts(
+  parts: DateTimeParts,
+  fallbackNowMs = Date.now()
+): DateTimeParts {
+  const fb = new Date(fallbackNowMs);
+  const rawY = Number.parseInt(parts.year.trim(), 10);
+  const rawM = Number.parseInt(parts.month.trim(), 10);
+  const rawD = Number.parseInt(parts.day.trim(), 10);
+  const rawH = Number.parseInt(parts.hour.trim(), 10);
+  const rawMin = Number.parseInt(parts.minute.trim(), 10);
+  const rawS = Number.parseInt(parts.second.trim(), 10);
+
+  const y = Number.isFinite(rawY) ? Math.min(2099, Math.max(1970, rawY)) : fb.getFullYear();
+  const m = Number.isFinite(rawM) ? Math.min(12, Math.max(1, rawM)) : fb.getMonth() + 1;
+  const maxDay = daysInMonth(y, m);
+  const d = Number.isFinite(rawD)
+    ? Math.min(maxDay, Math.max(1, rawD))
+    : Math.min(maxDay, fb.getDate());
+  const h = Number.isFinite(rawH) ? Math.min(23, Math.max(0, rawH)) : 0;
+  const min = Number.isFinite(rawMin) ? Math.min(59, Math.max(0, rawMin)) : 0;
+  const s = Number.isFinite(rawS) ? Math.min(59, Math.max(0, rawS)) : 0;
+
+  return {
+    year: String(y).padStart(4, '0'),
+    month: pad2(m),
+    day: pad2(d),
+    hour: pad2(h),
+    minute: pad2(min),
+    second: pad2(s),
+  };
+}
+
+function wrapSlotValue(val: number, min: number, max: number, delta: number): number {
+  const span = max - min + 1;
+  return min + ((((val - min + delta) % span) + span) % span);
+}
+
+export function stepDateTimeSlot(
+  parts: DateTimeParts,
+  slot: DateTimeSlot,
+  delta: number
+): DateTimeParts {
+  const norm = clampDateTimeParts(parts);
+  let y = Number(norm.year);
+  let m = Number(norm.month);
+  let d = Number(norm.day);
+  let h = Number(norm.hour);
+  let min = Number(norm.minute);
+  let s = Number(norm.second);
+
+  switch (slot) {
+    case 'year':
+      y = wrapSlotValue(y, 1970, 2099, delta);
+      break;
+    case 'month':
+      m = wrapSlotValue(m, 1, 12, delta);
+      break;
+    case 'day':
+      d = wrapSlotValue(d, 1, daysInMonth(y, m), delta);
+      break;
+    case 'hour':
+      h = wrapSlotValue(h, 0, 23, delta);
+      break;
+    case 'minute':
+      min = wrapSlotValue(min, 0, 59, delta);
+      break;
+    case 'second':
+      s = wrapSlotValue(s, 0, 59, delta);
+      break;
+  }
+
+  const maxDay = daysInMonth(y, m);
+  if (d > maxDay) d = maxDay;
+
+  return {
+    year: String(y).padStart(4, '0'),
+    month: pad2(m),
+    day: pad2(d),
+    hour: pad2(h),
+    minute: pad2(min),
+    second: pad2(s),
+  };
+}
+
+export function extractedToDateTimeParts(
+  ext: ExtractedDateTime,
+  isEnd: boolean
+): DateTimeParts {
+  const [year = '2026', month = '01', day = '01'] = ext.date.split('-');
+  const [hour, minute, second] = ext.time
+    ? ext.time.split(':')
+    : isEnd
+      ? ['23', '59', '59']
+      : ['00', '00', '00'];
+  return clampDateTimeParts({
+    year,
+    month,
+    day,
+    hour: hour ?? '00',
+    minute: minute ?? '00',
+    second: second ?? (isEnd ? '59' : '00'),
+  });
+}
+
+function relTokenOffsetMs(raw: string): number | null {
+  const m = REL_TIME_RE.exec(raw.trim());
+  if (!m) return null;
+  const num = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  const mult = unit.startsWith('s')
+    ? 1000
+    : unit.startsWith('m')
+      ? 60_000
+      : unit.startsWith('h')
+        ? 3_600_000
+        : unit.startsWith('d')
+          ? 86_400_000
+          : 7 * 86_400_000;
+  return num * mult;
+}
+
+function resolveAnyBoundParts(
+  rawBound: string,
+  isEnd: boolean,
+  fallbackParts: DateTimeParts,
+  nowMs: number
+): DateTimeParts | null {
+  const clean = rawBound.trim();
+  if (!clean) return null;
+
+  const relMs = relTokenOffsetMs(clean);
+  if (relMs !== null) {
+    return dateToParts(new Date(Math.max(1, Math.round(nowMs - relMs))));
+  }
+
+  const bound = splitBoundToken(clean, isEnd);
+  if (bound.date) {
+    const [year, month, day] = bound.date.split('-');
+    const [hour, minute, second] = (bound.time || (isEnd ? '23:59:59' : '00:00:00')).split(':');
+    return clampDateTimeParts({ year, month, day, hour, minute, second }, nowMs);
+  }
+  if (bound.time) {
+    const [hour, minute, second] = bound.time.split(':');
+    return clampDateTimeParts(
+      {
+        year: fallbackParts.year,
+        month: fallbackParts.month,
+        day: fallbackParts.day,
+        hour,
+        minute,
+        second,
+      },
+      nowMs
+    );
+  }
+
+  const ext = extractPastedDateTime(clean, nowMs, isEnd);
+  if (ext) {
+    return extractedToDateTimeParts(ext, isEnd);
+  }
+
+  return null;
+}
+
+export function resolveSyncedDateTimeParts(
+  spec: string,
+  nowMs = Date.now()
+): SyncedTimeRangeState {
+  const nowParts = dateToParts(new Date(nowMs));
+  const todayMidnight = new Date(nowMs);
+  todayMidnight.setHours(0, 0, 0, 0);
+  const todayStartParts = dateToParts(todayMidnight);
+
+  const clean = spec.trim();
+  const lower = clean.toLowerCase();
+
+  if (!clean || lower === 'today') {
+    return {
+      start: todayStartParts,
+      end: nowParts,
+      endIsNow: true,
+    };
+  }
+
+  if (lower === 'yesterday') {
+    const yday = new Date(todayMidnight.getTime());
+    yday.setDate(yday.getDate() - 1);
+    const ydayStart = dateToParts(yday);
+    return {
+      start: ydayStart,
+      end: { ...ydayStart, hour: '23', minute: '59', second: '59' },
+      endIsNow: false,
+    };
+  }
+
+  const relMs = relTokenOffsetMs(clean);
+  if (relMs !== null) {
+    return {
+      start: dateToParts(new Date(Math.max(1, Math.round(nowMs - relMs)))),
+      end: nowParts,
+      endIsNow: true,
+    };
+  }
+
+  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(clean)) {
+    const [y, mo, da] = clean.replace(/\//g, '-').split('-');
+    const normalized = `${y}-${pad2(Number(mo))}-${pad2(Number(da))}`;
+    if (isValidYmd(normalized)) {
+      const [year, month, day] = normalized.split('-');
+      return {
+        start: { year, month, day, hour: '00', minute: '00', second: '00' },
+        end: { year, month, day, hour: '23', minute: '59', second: '59' },
+        endIsNow: false,
+      };
+    }
+  }
+
+  const sep = clean.includes('..') ? '..' : clean.includes('~') ? '~' : null;
+  if (sep) {
+    const [leftRaw, rightRaw] = clean.split(sep, 2);
+    const startParts =
+      resolveAnyBoundParts(leftRaw, false, todayStartParts, nowMs) ?? todayStartParts;
+    if (!rightRaw.trim()) {
+      return {
+        start: startParts,
+        end: nowParts,
+        endIsNow: true,
+      };
+    }
+    const endParts = resolveAnyBoundParts(rightRaw, true, startParts, nowMs) ?? nowParts;
+    return {
+      start: startParts,
+      end: endParts,
+      endIsNow: false,
+    };
+  }
+
+  const singleStart =
+    resolveAnyBoundParts(clean, false, todayStartParts, nowMs) ?? todayStartParts;
+  return {
+    start: singleStart,
+    end: nowParts,
+    endIsNow: true,
+  };
+}
+
+export function formatDateTimePartsToSpec(parts: DateTimeParts): string {
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+export function buildSpecFromDateTimeParts(
+  start: DateTimeParts,
+  end: DateTimeParts,
+  endIsNow: boolean
+): string {
+  const normStart = clampDateTimeParts(start);
+  let left = formatDateTimePartsToSpec(normStart);
+  if (endIsNow) {
+    return `${left}..`;
+  }
+  const normEnd = clampDateTimeParts(end);
+  let right = formatDateTimePartsToSpec(normEnd);
+  if (left > right) {
+    const tmp = left;
+    left = right;
+    right = tmp;
+  }
+  return `${left}..${right}`;
+}
+
+export function normalizeCanonicalRelToken(raw: string): string | null {
+  const m =
+    /^(?:now\s*-\s*|last\s+|past\s+|最近\s*|近\s*|-\s*)?(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|秒|秒钟|m|min|mins|minute|minutes|分|分钟|h|hr|hrs|hour|hours|小时|时|d|day|days|天|日|w|wk|wks|week|weeks|周|星期)$/i.exec(
+      raw.trim()
+    );
+  if (!m) return null;
+  const num = Number(m[1]);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const u = m[2].toLowerCase();
+  let unit: 's' | 'm' | 'h' | 'd' | 'w';
+  if (u === 's' || u.startsWith('sec') || u.startsWith('秒')) {
+    unit = 's';
+  } else if (u === 'm' || u.startsWith('min') || u === '分' || u === '分钟') {
+    unit = 'm';
+  } else if (u === 'h' || u.startsWith('hr') || u.startsWith('hour') || u === '小时' || u === '时') {
+    unit = 'h';
+  } else if (u === 'd' || u.startsWith('day') || u === '天' || u === '日') {
+    unit = 'd';
+  } else {
+    unit = 'w';
+  }
+  const numStr = String(Number(m[1]));
+  return `${numStr}${unit}`;
+}
+
+export function formatRelativeSpecHuman(spec: string, locale: 'zh' | 'en'): string | null {
+  const canonical = normalizeCanonicalRelToken(spec);
+  if (!canonical) return null;
+  const unit = canonical.slice(-1) as 's' | 'm' | 'h' | 'd' | 'w';
+  const numStr = canonical.slice(0, -1);
+  const num = Number(numStr);
+  if (locale === 'zh') {
+    const unitZh: Record<typeof unit, string> = {
+      s: '秒',
+      m: '分钟',
+      h: '小时',
+      d: '天',
+      w: '周',
+    };
+    return `最近 ${numStr} ${unitZh[unit]}`;
+  }
+  const singular = num === 1;
+  const unitEn: Record<typeof unit, string> = {
+    s: 'sec',
+    m: 'min',
+    h: singular ? 'hour' : 'hours',
+    d: singular ? 'day' : 'days',
+    w: singular ? 'week' : 'weeks',
+  };
+  return `Last ${numStr} ${unitEn[unit]}`;
+}
+
 export function formatTimeScopeLabel(
   spec: string,
   timeLabels: Record<string, string>,
@@ -541,6 +1182,14 @@ export function formatTimeScopeLabel(
   const clean = spec.trim();
   if (!clean) return timeLabels[''] ?? '';
   if (clean in timeLabels) return timeLabels[clean];
+
+  const isZh = Object.values(timeLabels).some((v) => /[\u4e00-\u9fff]/.test(v));
+  const relCanonical = normalizeCanonicalRelToken(clean);
+  if (relCanonical) {
+    if (relCanonical in timeLabels) return timeLabels[relCanonical];
+    const human = formatRelativeSpecHuman(relCanonical, isZh ? 'zh' : 'en');
+    if (human) return human;
+  }
 
   const currentYear = String(new Date(nowMs).getFullYear());
   const shortDate = (ymd: string): string =>
@@ -582,6 +1231,235 @@ export function formatTimeScopeLabel(
   }
 
   return clean;
+}
+
+export function formatTimeTriggerLabel(
+  spec: string,
+  timeShortLabels: Record<string, string>,
+  idleLabel: string,
+  nowMs = Date.now()
+): string {
+  const clean = spec.trim();
+  if (!clean) return idleLabel;
+  if (clean in timeShortLabels) return timeShortLabels[clean];
+  const relCanonical = normalizeCanonicalRelToken(clean);
+  if (relCanonical) return relCanonical;
+  return formatTimeScopeLabel(clean, timeShortLabels, nowMs);
+}
+
+export interface ParsedQuickTimeExpression {
+  spec: string;
+  kind: 'preset' | 'relative' | 'range';
+}
+
+export function parseQuickTimeExpression(
+  rawInput: string,
+  nowMs = Date.now()
+): ParsedQuickTimeExpression | null {
+  const clean = rawInput.trim();
+  if (!clean) return null;
+
+  const lower = clean.toLowerCase();
+  if (
+    lower === 'any' ||
+    lower === 'any time' ||
+    lower === 'all' ||
+    lower === 'all time' ||
+    clean === '不限' ||
+    clean === '不限时间' ||
+    clean === '全部' ||
+    clean === '全部时间'
+  ) {
+    return { spec: '', kind: 'preset' };
+  }
+  if (lower === 'today' || clean === '今天' || clean === '今日') {
+    return { spec: 'today', kind: 'preset' };
+  }
+  if (lower === 'yesterday' || lower === 'yday' || clean === '昨天' || clean === '昨日') {
+    return { spec: 'yesterday', kind: 'preset' };
+  }
+  if (clean === '半小时' || lower === 'half hour') {
+    return { spec: '30m', kind: 'preset' };
+  }
+
+  const rel = normalizeCanonicalRelToken(clean);
+  if (rel) {
+    return {
+      spec: rel,
+      kind: isBuiltinTimePreset(rel) ? 'preset' : 'relative',
+    };
+  }
+
+  const rangeSep = clean.includes('..') ? '..' : clean.includes('~') ? '~' : null;
+  if (rangeSep) {
+    const [leftRaw, rightRaw] = clean.split(rangeSep, 2);
+    if (!leftRaw.trim() && !rightRaw.trim()) return null;
+    const todayYmd = formatYmd(new Date(nowMs));
+    const startRes = resolveFullBound(leftRaw, false, todayYmd, nowMs);
+    if (!startRes) return null;
+    const endFallback = startRes.kind === 'explicit' && startRes.date ? startRes.date : todayYmd;
+    const endRes = resolveFullBound(rightRaw, true, endFallback, nowMs);
+    if (!endRes) return null;
+    if (startRes.kind === 'empty' && endRes.kind === 'empty') return null;
+
+    if (startRes.kind === 'relative' && endRes.kind === 'empty') {
+      const canonical = normalizeCanonicalRelToken(startRes.spec) ?? startRes.spec;
+      return {
+        spec: canonical,
+        kind: isBuiltinTimePreset(canonical) ? 'preset' : 'relative',
+      };
+    }
+
+    const built = buildFullTimeRangeSpec({ start: leftRaw.trim(), end: rightRaw.trim() }, nowMs);
+    if (built.error || !built.spec) return null;
+    return { spec: built.spec, kind: 'range' };
+  }
+
+  const dateOnlyMatch = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(clean);
+  if (dateOnlyMatch) {
+    const ymd = `${dateOnlyMatch[1]}-${pad2(Number(dateOnlyMatch[2]))}-${pad2(Number(dateOnlyMatch[3]))}`;
+    if (!isValidYmd(ymd)) return null;
+    return { spec: ymd, kind: 'range' };
+  }
+
+  const colonTimeMatch = /^\d{1,2}:\d{2}(?::\d{2})?$/.test(clean);
+  if (colonTimeMatch) {
+    const hms = normalizeTimeInput(clean, false);
+    if (!hms) return null;
+    const todayYmd = formatYmd(new Date(nowMs));
+    return { spec: `${todayYmd} ${hms}..`, kind: 'range' };
+  }
+
+  const ext = extractPastedDateTime(clean, nowMs, false);
+  if (ext) {
+    const hms = ext.time || '00:00:00';
+    return { spec: `${ext.date} ${hms}..`, kind: 'range' };
+  }
+
+  return null;
+}
+
+export interface QuickTimeCandidate {
+  key: string;
+  spec: string;
+  shortLabel: string;
+  fullLabel: string;
+  shortRanges: HighlightRange[];
+  fullRanges: HighlightRange[];
+  isCustom: boolean;
+}
+
+const PRESET_ALIASES: Record<string, readonly string[]> = {
+  '': ['any', 'any time', 'all', 'all time', '不限', '全部', '全部时间'],
+  today: ['today', 'tod', '今天', '今日'],
+  yesterday: ['yesterday', 'yday', '昨天', '昨日'],
+  '30m': ['半小时', 'half hour'],
+};
+
+export function matchQuickTimeCandidates(
+  query: string,
+  timeLabels: Record<string, string>,
+  timeShortLabels: Record<string, string>,
+  nowMs = Date.now()
+): QuickTimeCandidate[] {
+  const trimmed = query.trim();
+  const parsed = trimmed ? parseQuickTimeExpression(trimmed, nowMs) : null;
+  const presetsToScan: readonly BuiltinTimePreset[] = ['', ...FLAT_QUICK_TIME_PRESETS];
+
+  const scored: Array<QuickTimeCandidate & { score: number }> = [];
+  const seenSpecs = new Set<string>();
+
+  if (!trimmed) {
+    for (const preset of presetsToScan) {
+      scored.push({
+        key: `preset:${preset || 'any'}`,
+        spec: preset,
+        shortLabel: timeShortLabels[preset] ?? timeLabels[preset] ?? preset,
+        fullLabel: timeLabels[preset] ?? preset,
+        shortRanges: [],
+        fullRanges: [],
+        isCustom: false,
+        score: 0,
+      });
+    }
+    return scored;
+  }
+
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  for (const preset of presetsToScan) {
+    const shortLabel = timeShortLabels[preset] ?? timeLabels[preset] ?? preset;
+    const fullLabel = timeLabels[preset] ?? shortLabel;
+    const aliases = PRESET_ALIASES[preset] ?? [];
+
+    let totalScore = 0;
+    let matchedAll = true;
+    const shortRanges: HighlightRange[] = [];
+    const fullRanges: HighlightRange[] = [];
+
+    for (const tok of tokens) {
+      const mFull = fuzzyMatchText(fullLabel, tok);
+      const mShort = fuzzyMatchText(shortLabel, tok);
+      const mCode = preset ? fuzzyMatchText(preset, tok) : null;
+      let bestAliasScore = -Infinity;
+      for (const alias of aliases) {
+        const ma = fuzzyMatchText(alias, tok);
+        if (ma && ma.score > bestAliasScore) bestAliasScore = ma.score;
+      }
+
+      if (!mFull && !mShort && !mCode && bestAliasScore === -Infinity) {
+        matchedAll = false;
+        break;
+      }
+      if (mFull) fullRanges.push(...mFull.ranges);
+      if (mShort) shortRanges.push(...mShort.ranges);
+
+      const best = Math.max(
+        mFull?.score ?? -Infinity,
+        mShort ? mShort.score + 10 : -Infinity,
+        mCode ? mCode.score + 8 : -Infinity,
+        bestAliasScore
+      );
+      totalScore += best;
+    }
+
+    if (matchedAll) {
+      seenSpecs.add(preset);
+      scored.push({
+        key: `preset:${preset || 'any'}`,
+        spec: preset,
+        shortLabel,
+        fullLabel,
+        shortRanges,
+        fullRanges,
+        isCustom: false,
+        score: totalScore + (parsed?.spec === preset ? 500 : 0),
+      });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  if (parsed && !seenSpecs.has(parsed.spec)) {
+    const customFull = formatTimeScopeLabel(parsed.spec, timeLabels, nowMs);
+    const customShort = formatTimeTriggerLabel(
+      parsed.spec,
+      timeShortLabels,
+      timeShortLabels[''] ?? '',
+      nowMs
+    );
+    scored.unshift({
+      key: `custom:${parsed.spec}`,
+      spec: parsed.spec,
+      shortLabel: customShort,
+      fullLabel: customFull,
+      shortRanges: [],
+      fullRanges: [],
+      isCustom: true,
+      score: 1000,
+    });
+  }
+
+  return scored.map(({ score: _score, ...rest }) => rest);
 }
 
 export interface TimeFormatPreset {

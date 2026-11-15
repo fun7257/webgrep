@@ -1,0 +1,211 @@
+<script lang="ts">
+  import { onDestroy } from 'svelte';
+  import { workbench, type DrawerPanelId } from '$lib/state.svelte';
+  import SettingsPopover from './SettingsPopover.svelte';
+
+  const isOpen = $derived(workbench.rightDrawerOpen);
+
+  let mounted = $state(false);
+  let entered = $state(false);
+  let activeMode = $state<DrawerPanelId | null>(null);
+  let panelEl = $state<HTMLDivElement | null>(null);
+  let exitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let dragStartY: number | null = null;
+  let dragY = $state(0);
+  let dragging = $state(false);
+
+  const drawerLabel = $derived.by(() => {
+    switch (activeMode) {
+      case 'sources':
+        return workbench.t.settings.panelSourcesTitle;
+      case 'shortcuts':
+        return workbench.t.settings.panelShortcutsTitle;
+      case 'settings':
+      default:
+        return workbench.t.settings.panelSettingsTitle;
+    }
+  });
+
+  function finishExit() {
+    if (exitTimer !== null) {
+      clearTimeout(exitTimer);
+      exitTimer = null;
+    }
+    if (!isOpen) {
+      mounted = false;
+      activeMode = null;
+      dragY = 0;
+      dragging = false;
+    }
+  }
+
+  $effect(() => {
+    if (isOpen && workbench.drawerPanel !== null) {
+      activeMode = workbench.drawerPanel;
+      if (exitTimer !== null) {
+        clearTimeout(exitTimer);
+        exitTimer = null;
+      }
+      dragY = 0;
+      dragging = false;
+
+      if (!mounted) {
+        entered = false;
+        mounted = true;
+        return;
+      }
+
+      if (!entered && panelEl) {
+        // Force style commit at current transform so reversal/entry animates cleanly on Frame 1
+        void panelEl.getBoundingClientRect();
+        entered = true;
+      }
+      return;
+    }
+
+    if (mounted) {
+      entered = false;
+      if (exitTimer === null) {
+        exitTimer = setTimeout(finishExit, workbench.frameProfile.sheetMotionMs + 60);
+      }
+    }
+  });
+
+  onDestroy(() => {
+    if (exitTimer !== null) {
+      clearTimeout(exitTimer);
+      exitTimer = null;
+    }
+  });
+
+  function handleTransitionEnd(e: TransitionEvent) {
+    if (e.target !== panelEl || e.propertyName !== 'transform') return;
+    if (!isOpen) {
+      finishExit();
+    }
+  }
+
+  function handleScrimPointerDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse' && e.button === 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      workbench.closeRightDrawer();
+    }
+  }
+
+  function handleScrimClick(e: MouseEvent) {
+    e.stopPropagation();
+    if (isOpen) {
+      workbench.closeRightDrawer();
+    }
+  }
+
+  function onHandleDown(e: PointerEvent) {
+    dragStartY = e.clientY;
+    dragging = true;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onHandleMove(e: PointerEvent) {
+    if (dragStartY === null) return;
+    dragY = Math.max(0, e.clientY - dragStartY);
+  }
+
+  function onHandleUp() {
+    if (dragStartY === null) return;
+    const shouldClose = dragY > 96;
+    dragStartY = null;
+    dragging = false;
+    dragY = 0;
+    if (shouldClose) {
+      entered = false;
+      workbench.closeRightDrawer();
+    }
+  }
+</script>
+
+{#if mounted && activeMode}
+  <div
+    class={`fixed md:absolute inset-0 z-30 flex items-end md:items-stretch md:justify-end ${
+      isOpen ? 'pointer-events-auto' : 'pointer-events-none'
+    }`}
+    role="dialog"
+    aria-modal="false"
+    aria-label={drawerLabel}
+  >
+    <!-- Mobile dimming scrim; optically transparent on desktop to avoid muddy gray seam below Header -->
+    <div
+      class="drawer-scrim absolute inset-0 bg-black/25 dark:bg-black/45 md:bg-transparent dark:md:bg-transparent"
+      data-open={entered ? 'true' : 'false'}
+      aria-hidden="true"
+      onpointerdown={handleScrimPointerDown}
+      onclick={handleScrimClick}
+    ></div>
+
+    <div
+      bind:this={panelEl}
+      ontransitionend={handleTransitionEnd}
+      class="drawer-panel pb-safe md:pb-0 relative z-10 flex w-full max-h-[82dvh] h-[78dvh] md:h-full md:max-h-none md:w-[440px] lg:w-[460px] flex-col overflow-hidden rounded-t-2xl md:rounded-tr-none md:rounded-tl-xl border-t md:border-l border-border/65 bg-background text-foreground shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[-10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[-14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]"
+      data-open={entered ? 'true' : 'false'}
+      data-dragging={dragging ? 'true' : 'false'}
+      style:transform={dragging || dragY > 0 ? `translate3d(0, ${dragY}px, 0)` : undefined}
+    >
+      <!-- Mobile pull-to-dismiss handle -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        onpointerdown={onHandleDown}
+        onpointermove={onHandleMove}
+        onpointerup={onHandleUp}
+        onpointercancel={onHandleUp}
+        style="touch-action: none"
+        class="flex h-5 shrink-0 cursor-grab items-center justify-center md:hidden"
+      >
+        <span class="h-1 w-9 rounded-full bg-border"></span>
+      </div>
+
+      {#key activeMode}
+        <SettingsPopover mode={activeMode} />
+      {/key}
+    </div>
+  </div>
+{/if}
+
+<style>
+  .drawer-scrim {
+    opacity: 0;
+    transition: opacity var(--motion-sheet, 150ms) cubic-bezier(0.4, 0, 1, 1);
+  }
+  .drawer-scrim[data-open='true'] {
+    opacity: 1;
+    transition: opacity var(--motion-drawer-in, 183ms) cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .drawer-panel {
+    transform: translate3d(0, 100%, 0);
+    will-change: transform;
+    transition: transform var(--motion-sheet, 150ms) cubic-bezier(0.4, 0, 1, 1);
+  }
+  .drawer-panel[data-open='true'] {
+    transform: translate3d(0, 0, 0);
+    transition: transform var(--motion-drawer-in, 183ms) cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @media (min-width: 768px) {
+    .drawer-panel {
+      transform: translate3d(100%, 0, 0);
+    }
+    .drawer-panel[data-open='true'] {
+      transform: translate3d(0, 0, 0);
+    }
+  }
+  .drawer-panel[data-dragging='true'] {
+    transition: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .drawer-scrim,
+    .drawer-panel {
+      transition-duration: 1ms !important;
+    }
+  }
+</style>

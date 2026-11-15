@@ -1,5 +1,6 @@
 import type { Component } from 'svelte';
 import {
+  Clock,
   Database,
   FolderPlus,
   Keyboard,
@@ -28,7 +29,7 @@ export function buildCommands(): Command[] {
       icon: SlidersHorizontal as unknown as Command['icon'],
       title: p.settings,
       shortcut: '⌘,',
-      run: () => workbench.openSettings('general'),
+      run: () => workbench.openSettingsDrawer(),
     },
     {
       id: 'pick-sources',
@@ -37,16 +38,22 @@ export function buildCommands(): Command[] {
       run: () => workbench.openSourcePicker(),
     },
     {
+      id: 'pick-time',
+      icon: Clock as unknown as Command['icon'],
+      title: p.pickTime,
+      run: () => workbench.openTimePicker(),
+    },
+    {
       id: 'sources',
       icon: Database as unknown as Command['icon'],
       title: p.sources,
-      run: () => workbench.openSettings('sources'),
+      run: () => workbench.openSourcesDrawer(false),
     },
     {
       id: 'add-source',
       icon: FolderPlus as unknown as Command['icon'],
       title: p.addSource,
-      run: () => workbench.openSettings('add-source'),
+      run: () => workbench.openSourcesDrawer(true),
     },
     {
       id: 'theme',
@@ -65,7 +72,7 @@ export function buildCommands(): Command[] {
       icon: Keyboard as unknown as Command['icon'],
       title: p.shortcuts,
       shortcut: '?',
-      run: () => workbench.openSettings('shortcuts'),
+      run: () => workbench.openShortcutsDrawer(),
     },
     {
       id: 'inspector',

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import { zeroResultFixes } from '$lib/suggest';
   import type { HitItem } from '$lib/types';
@@ -6,6 +7,7 @@
     copyTextToClipboard,
     extractLeadingNanoTimestamp,
     getCachedHighlightSegments,
+    skipLeadingNanoTimestampOffset,
     type HighlightSegment,
   } from '$lib/utils';
   import { FolderSearch, Ban, Check, Copy, Loader2, RefreshCw } from 'lucide-svelte';
@@ -36,7 +38,6 @@
   let viewportHeight = $state<number>(720);
   let scrollerWidth = $state<number>(960);
 
-  const OVERSCAN_PX = 420;
   const BREADCRUMB_H = 22;
 
   const targetLines = $derived(
@@ -53,20 +54,57 @@
     }
   });
 
-  // Per-hit preview line estimate, computed once per (hit, layout signature) and cached by object identity.
-  // Deterministic (text length + column budget, never DOM measurement) so a row's height never changes once shown.
-  const lineEstimateCache = new WeakMap<HitItem, { sig: string; lines: number }>();
+  // Width-independent column count cache & per-hit metadata cache keyed by HitItem object identity.
+  const colEstimateCache = new WeakMap<HitItem, { budget: number; cols: number }>();
+
+  interface CachedRowMeta {
+    srcName: string;
+    dirLabel: string;
+    fileName: string;
+    timeLabel: string;
+    timeNs: string;
+  }
+
+  const rowMetaCache = new WeakMap<HitItem, CachedRowMeta>();
+
+  function getRowMeta(it: HitItem): CachedRowMeta {
+    let meta = rowMetaCache.get(it);
+    if (meta) return meta;
+    const slash = it.file.indexOf('/');
+    const srcName = slash > 0 ? it.file.slice(0, slash) : '';
+    const lastSlash = it.file.lastIndexOf('/');
+    const dirParts = it.file
+      .slice(slash > 0 ? slash + 1 : 0, Math.max(0, lastSlash))
+      .split('/')
+      .filter(Boolean);
+    const dirLabel =
+      dirParts.length > 2
+        ? `…/${dirParts.slice(-2).join('/')}/`
+        : dirParts.length
+          ? `${dirParts.join('/')}/`
+          : '';
+    const fileName = lastSlash >= 0 ? it.file.slice(lastSlash + 1) : it.file;
+    const tsInfo = extractLeadingNanoTimestamp(it.text);
+    meta = {
+      srcName,
+      dirLabel,
+      fileName,
+      timeLabel: tsInfo ? tsInfo.formattedTime : '',
+      timeNs: tsInfo ? tsInfo.nsStr : '',
+    };
+    rowMetaCache.set(it, meta);
+    return meta;
+  }
 
   function estimateColumns(raw: string, budget: number): number {
-    let start = 0;
-    const ts = extractLeadingNanoTimestamp(raw);
-    const text = ts && ts.restText.length > 0 ? ts.restText : raw;
-    while (start < text.length && (text.charCodeAt(start) === 32 || text.charCodeAt(start) === 9)) start++;
-    const end = Math.min(text.length, start + budget);
+    const tsEnd = skipLeadingNanoTimestampOffset(raw);
+    let start = tsEnd > 0 && tsEnd < raw.length ? tsEnd : 0;
+    while (start < raw.length && (raw.charCodeAt(start) === 32 || raw.charCodeAt(start) === 9)) start++;
+    const end = Math.min(raw.length, start + budget);
     let cols = 0;
     for (let i = start; i < end; i++) {
       // CJK / full-width glyphs render ~1em wide ≈ 1.67 monospace columns (0.6em each)
-      cols += text.charCodeAt(i) >= 0x2e80 ? 1.67 : 1;
+      cols += raw.charCodeAt(i) >= 0x2e80 ? 1.67 : 1;
     }
     return cols;
   }
@@ -82,7 +120,6 @@
     const budget = previewCharBudget;
     const availTextWidth = Math.max(240, scrollerWidth - (workbench.isCompact ? 48 : 72));
     const charsPerLine = Math.max(24, Math.floor(availTextWidth / (fontPx * 0.6)));
-    const sig = `${maxPreview}:${fontPx}:${charsPerLine}:${budget}`;
 
     const lines = new Uint8Array(hLen);
     const offsets = new Float64Array(hLen + 1);
@@ -91,14 +128,13 @@
       const it = hits[i];
       let n = 1;
       if (maxPreview > 1) {
-        const cached = lineEstimateCache.get(it);
-        if (cached && cached.sig === sig) {
-          n = cached.lines;
-        } else {
-          // small slack so a barely-overflowing estimate doesn't reserve a mostly-empty extra line
-          n = Math.min(maxPreview, Math.max(1, Math.ceil(estimateColumns(it.text, budget) / charsPerLine - 0.12)));
-          lineEstimateCache.set(it, { sig, lines: n });
+        let cached = colEstimateCache.get(it);
+        if (!cached || cached.budget !== budget) {
+          cached = { budget, cols: estimateColumns(it.text, budget) };
+          colEstimateCache.set(it, cached);
         }
+        // small slack so a barely-overflowing estimate doesn't reserve a mostly-empty extra line
+        n = Math.min(maxPreview, Math.max(1, Math.ceil(cached.cols / charsPerLine - 0.12)));
       }
       lines[i] = n;
       offsets[i] = acc;
@@ -134,8 +170,9 @@
       };
     }
 
-    const minY = Math.max(0, scrollTop - OVERSCAN_PX);
-    const maxY = scrollTop + Math.max(400, viewportHeight) + OVERSCAN_PX;
+    const overscanPx = workbench.frameProfile.overscanPx;
+    const minY = Math.max(0, scrollTop - overscanPx);
+    const maxY = scrollTop + Math.max(400, viewportHeight) + overscanPx;
 
     const firstIdx = indexAtY(offsets, hLen, minY);
     const lastIdx = indexAtY(offsets, hLen, maxY);
@@ -143,26 +180,22 @@
     const items: VirtualHitRow[] = [];
     for (let i = firstIdx; i <= lastIdx; i++) {
       const it = hits[i];
-      const slash = it.file.indexOf('/');
-      const srcName = slash > 0 ? it.file.slice(0, slash) : '';
+      const meta = getRowMeta(it);
       const prevFile = i > 0 ? hits[i - 1].file : '';
       const prevSlash = prevFile.indexOf('/');
       const prevSrc = prevSlash > 0 ? prevFile.slice(0, prevSlash) : '';
-      const lastSlash = it.file.lastIndexOf('/');
-      const tsInfo = extractLeadingNanoTimestamp(it.text);
-      const dirParts = it.file.slice(slash > 0 ? slash + 1 : 0, Math.max(0, lastSlash)).split('/').filter(Boolean);
       const n = lines[i];
       items.push({
-        showSrc: i === 0 || srcName !== prevSrc,
+        showSrc: i === 0 || meta.srcName !== prevSrc,
         fileChanged: i === 0 || it.file !== prevFile,
-        dirLabel: dirParts.length > 2 ? `…/${dirParts.slice(-2).join('/')}/` : dirParts.length ? `${dirParts.join('/')}/` : '',
-        fileName: lastSlash >= 0 ? it.file.slice(lastSlash + 1) : it.file,
+        dirLabel: meta.dirLabel,
+        fileName: meta.fileName,
         idx: i,
         key: `${i}:${it.file}:${it.line}:${it.col}`,
         item: it,
-        srcName,
-        timeLabel: tsInfo ? tsInfo.formattedTime : '',
-        timeNs: tsInfo ? tsInfo.nsStr : '',
+        srcName: meta.srcName,
+        timeLabel: meta.timeLabel,
+        timeNs: meta.timeNs,
         lines: n,
         height: baseHitPad + BREADCRUMB_H + n * lineHeight,
       });
@@ -196,16 +229,27 @@
   });
 
   let scrollRaf: number | null = null;
+  let pendingScrollTop = 0;
+  let pendingViewportHeight = 720;
+
+  $effect(() => {
+    return () => {
+      if (scrollRaf !== null) {
+        cancelAnimationFrame(scrollRaf);
+        scrollRaf = null;
+      }
+    };
+  });
 
   function handleScroll(e: Event) {
     const el = e.currentTarget as HTMLDivElement;
-    const nextTop = el.scrollTop;
-    const nextHeight = el.clientHeight;
+    pendingScrollTop = el.scrollTop;
+    pendingViewportHeight = el.clientHeight;
     if (scrollRaf !== null) return;
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = null;
-      scrollTop = nextTop;
-      viewportHeight = nextHeight;
+      scrollTop = pendingScrollTop;
+      viewportHeight = pendingViewportHeight;
     });
   }
 
@@ -240,27 +284,55 @@
     }
   }
 
-  // Long-press (touch) opens a bottom action sheet for the row.
+  // Instant pointer-down row highlight + touch long-press action sheet.
+  let pressedIdx = $state<number>(-1);
+  let pointerDownSelectedIdx = -1;
   let menuRow = $state.raw<VirtualHitRow | null>(null);
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
   let pressOrigin: { x: number; y: number } | null = null;
   let suppressClick = false;
 
   function cancelPress() {
+    pressedIdx = -1;
     if (pressTimer !== null) clearTimeout(pressTimer);
     pressTimer = null;
     pressOrigin = null;
   }
 
   function onRowPointerDown(e: PointerEvent, row: VirtualHitRow) {
-    if (e.pointerType !== 'touch') return;
-    pressOrigin = { x: e.clientX, y: e.clientY };
-    pressTimer = setTimeout(() => {
-      pressTimer = null;
-      suppressClick = true;
-      menuRow = row;
-      navigator.vibrate?.(8);
-    }, 480);
+    if ((e.target as Element | null)?.closest('button, a')) return;
+    if (e.pointerType === 'touch') {
+      flushSync(() => {
+        pressedIdx = row.idx;
+      });
+      pressOrigin = { x: e.clientX, y: e.clientY };
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        pressedIdx = -1;
+        suppressClick = true;
+        menuRow = row;
+        navigator.vibrate?.(8);
+      }, 480);
+      return;
+    }
+
+    if (
+      e.pointerType === 'mouse' &&
+      e.button === 0 &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.shiftKey
+    ) {
+      flushSync(() => {
+        if (!workbench.isCompact && workbench.rightInspectorOpen && workbench.inspectedPath) {
+          pointerDownSelectedIdx = row.idx;
+          workbench.selectHitByIndex(row.idx, false);
+        } else {
+          workbench.previewSelectHitByIndex(row.idx);
+        }
+      });
+    }
   }
 
   function onRowPointerMove(e: PointerEvent) {
@@ -358,6 +430,7 @@
           {#each visibleSlice.items as row (row.key)}
             {@const item = row.item}
             {@const active = row.idx === workbench.activeHitIndex}
+            {@const pressed = pressedIdx === row.idx}
             {@const segments = getCachedHighlightSegments(
               item,
               workbench.contains,
@@ -381,11 +454,15 @@
                 oncontextmenu={(e) => {
                   if (workbench.isCompact || workbench.isTouch) e.preventDefault();
                 }}
-                onclick={() => {
+                onclick={(e) => {
                   if (suppressClick) {
                     suppressClick = false;
+                    pointerDownSelectedIdx = -1;
                     return;
                   }
+                  const handledOnDown = pointerDownSelectedIdx === row.idx && e.detail > 0;
+                  pointerDownSelectedIdx = -1;
+                  if (handledOnDown) return;
                   // Touch long-press selections are handled via the action sheet; skip selection guard there.
                   if (!workbench.isCompact && !workbench.isTouch) {
                     const sel = window.getSelection()?.toString() ?? '';
@@ -399,8 +476,12 @@
                     workbench.selectHitByIndex(row.idx, true);
                   }
                 }}
-                class={`group ${workbench.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none transition-colors overflow-hidden rounded-lg ${
-                  active ? 'bg-secondary/75' : 'hover:bg-secondary/35'
+                class={`group ${workbench.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none overflow-hidden rounded-lg ${
+                  active
+                    ? 'bg-secondary/90 ring-1 ring-inset ring-primary/35 shadow-[inset_2.5px_0_0_hsl(var(--primary))]'
+                    : pressed
+                      ? 'bg-secondary/65'
+                      : 'hover:bg-secondary/40 active:bg-secondary/60'
                 }`}
               >
                 <!-- Layer 1: Subtle Project Attribution (@project) + File:Line + Copy Button -->
@@ -423,7 +504,7 @@
                             }
                           }}
                           title={workbench.t.ui.onlyInSourceTitle(row.srcName)}
-                          class="shrink-0 text-muted-foreground/45 hover:text-foreground transition-colors cursor-pointer"
+                          class="shrink-0 text-muted-foreground/45 hover:text-foreground cursor-pointer"
                         >
                           {row.srcName}
                         </button>
@@ -432,10 +513,10 @@
                     <!-- file:line — full path when the file changes, otherwise only the line number -->
                     {#if row.fileChanged}
                       <span class="min-w-0 truncate" title={item.file}>
-                        <span class="text-muted-foreground/45">{row.dirLabel}</span><span class="text-foreground/75">{row.fileName}</span><span class="text-muted-foreground/60">:{item.line}</span>
+                        <span class="text-muted-foreground/45">{row.dirLabel}</span><span class={active ? 'text-foreground' : 'text-foreground/75'}>{row.fileName}</span><span class="text-muted-foreground/60">:{item.line}</span>
                       </span>
                     {:else}
-                      <span class="shrink-0 text-muted-foreground/50 tabular-nums" title={item.file}>:{item.line}</span>
+                      <span class={`shrink-0 tabular-nums ${active ? 'text-foreground/80' : 'text-muted-foreground/50'}`} title={item.file}>:{item.line}</span>
                     {/if}
                     {#if row.timeLabel}
                       <span
@@ -452,7 +533,7 @@
                     title={workbench.t.ui.copyContent}
                     onclick={(e) => copyLineText(e, row.idx, item.text)}
                     aria-label={workbench.t.ui.copyContent}
-                    class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100 transition-opacity"
+                    class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100"
                   >
                     {#if copiedIdx === row.idx}
                       <Check class="h-3.5 w-3.5 text-primary" />
@@ -507,7 +588,7 @@
           <button
             type="button"
             onclick={() => workbench.applyResultFix(fix)}
-            class="touch-target rounded-lg bg-primary/10 px-3 py-1.5 font-mono text-[12.5px] text-primary hover:bg-primary/20 transition-colors"
+            class="touch-target rounded-lg bg-primary/10 px-3 py-1.5 font-mono text-[12.5px] text-primary hover:bg-primary/20 active:bg-primary/25 cursor-pointer"
           >
             {fix.label}
           </button>
@@ -518,7 +599,7 @@
             onclick={() => {
               workbench.resetAllFilters();
             }}
-            class="rounded-lg border border-border bg-card px-3.5 py-1.5 text-[13px] font-medium text-foreground hover:bg-secondary transition-colors"
+            class="rounded-lg border border-border bg-card px-3.5 py-1.5 text-[13px] font-medium text-foreground hover:bg-secondary active:bg-secondary/80 cursor-pointer"
           >
             {workbench.t.results.resetFiltersBtn}
           </button>

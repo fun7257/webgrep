@@ -19,8 +19,8 @@
     oncancel?: () => void;
   } = $props();
 
-  const t = $derived(workbench.t.settings);
-  const tp = $derived(workbench.t.scope.timePicker);
+  const t = $derived(workbench.t.ui);
+  const tp = $derived(workbench.t.scopeBar.timePicker);
   const lang = $derived(workbench.locale);
 
   let basis = $state<TimeBasis>('mtime');
@@ -30,6 +30,7 @@
   let previewForFormat = $state('');
   let lastEmitted = $state<{ fmt: string; valid: boolean } | null>(null);
   let previewSeq = 0;
+  let presetToggledOnDown = false;
 
   const effectiveFormat = $derived(customDraft.trim() || 'auto');
   const isAuto = $derived(effectiveFormat.toLowerCase() === 'auto');
@@ -182,8 +183,21 @@
               : !isAuto && effectiveFormat === preset.value}
           <button
             type="button"
-            onclick={() => applyPreset(preset.value, preset.example)}
-            class={`touch-target rounded border px-2 py-0.5 text-[11px] font-mono transition-colors ${
+            onpointerdown={(e) => {
+              if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                presetToggledOnDown = true;
+                applyPreset(preset.value, preset.example);
+              }
+            }}
+            onclick={(e) => {
+              if (presetToggledOnDown && e.detail > 0) {
+                presetToggledOnDown = false;
+                return;
+              }
+              presetToggledOnDown = false;
+              applyPreset(preset.value, preset.example);
+            }}
+            class={`touch-target rounded border px-2 py-0.5 text-[11px] font-mono active:bg-secondary/60 ${
               active
                 ? 'border-primary/60 bg-primary/10 text-primary font-medium'
                 : 'border-border/70 bg-background/80 text-muted-foreground hover:border-border hover:text-foreground'
