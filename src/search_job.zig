@@ -1,9 +1,10 @@
 const std = @import("std");
 const libwebgrep = @import("libwebgrep");
+const docker_logs = @import("docker_logs.zig");
 const file_api = @import("file_api.zig");
 const source_registry = @import("source_registry.zig");
 const search_cache = @import("search_cache.zig");
-const ingestor = @import("ingestor.zig");
+const time_parser = @import("time_parser.zig");
 
 pub const SearchRequest = struct {
     type: []const u8 = "search",
@@ -30,11 +31,14 @@ pub const SearchRequest = struct {
     timeEndNs: u64 = 0,
     timeStartMs: u64 = 0,
     timeEndMs: u64 = 0,
+    timeMode: []const u8 = "auto",
+    timeFormat: []const u8 = "",
+    tzOffsetMin: i16 = 0,
     /// File/path filters from `@*.rs` / `@src/` / `-@*_test.go` (`!` prefix = exclude).
     /// Matched against each file's source-relative path; positives are OR-ed, negatives always win.
     fileGlobs: []const []const u8 = &.{},
     /// Radius of the nearby-lines fallback used when no single line contains every term (0 = disabled).
-    nearbyLines: u32 = 15,
+    nearbyLines: u32 = 0,
 };
 
 pub const FrameSender = struct {
@@ -234,7 +238,215 @@ fn parseScopedModifier(
     return null;
 }
 
-/// Computes the SIMD prefilter selectivity score for a compiled regex (`libwebgrep v0.4.1`).
+/// Caller-configured engine limits for `libwebgrep v0.5.0`.
+/// Since `libwebgrep v0.5.0` removed internal hardcoded upper caps (`*_hard_cap`),
+/// `webgrep` explicitly defines and passes its own caller-level bounds.
+pub const EngineLimits = struct {
+    pub const max_pattern_count: usize = 4096;
+    pub const max_pattern_bytes: usize = 1024 * 1024;
+    pub const max_unicode_variants: usize = 64;
+    pub const max_regex_inst: usize = 32768;
+    pub const max_regex_repeat: usize = 2000;
+    pub const max_regex_recursion_depth: usize = 128;
+    pub const aot_dfa_max_insts: usize = 256;
+    pub const max_context_lines: u32 = 100;
+    pub const max_line_len: usize = 8 * 1024 * 1024;
+    pub const max_compression_ratio: u64 = 1000;
+    pub const max_source_bytes: u64 = 1024 * 1024 * 1024 * 1024;
+    pub const max_request_bytes: u64 = 1024 * 1024 * 1024 * 1024;
+    pub const max_output_bytes: u64 = 1024 * 1024 * 1024 * 1024;
+    pub const time_budget_ns: u64 = 3600 * std.time.ns_per_s;
+    pub const max_decode_bytes: usize = 1024 * 1024 * 1024;
+    pub const max_decompressed_bytes: u64 = 1024 * 1024 * 1024;
+    pub const max_before_bytes: usize = @as(usize, max_context_lines) * max_line_len;
+    pub const max_queued_event_bytes: usize = max_line_len;
+    pub const max_glob_rules: usize = 4096;
+    pub const max_glob_rule_len: usize = 4096;
+    pub const max_glob_brace_depth: usize = 8;
+    pub const max_archive_entries: usize = 100_000;
+    pub const max_archive_entry_bytes: u64 = 256 * 1024 * 1024;
+    pub const max_archive_total_bytes: u64 = 1024 * 1024 * 1024;
+    pub const max_archive_slice_map_bytes: u64 = 64 * 1024 * 1024;
+
+    pub fn archiveOptions(format: libwebgrep.ArchiveFormat) libwebgrep.ArchiveOptions {
+        return .{
+            .format = format,
+            .max_entries = max_archive_entries,
+            .max_entry_bytes = max_archive_entry_bytes,
+            .max_total_bytes = max_archive_total_bytes,
+            .max_compression_ratio = max_compression_ratio,
+        };
+    }
+
+    pub fn findOptions(case_mode: libwebgrep.CaseMode) libwebgrep.FindOptions {
+        return .{
+            .case = case_mode,
+            .max_pattern_count = max_pattern_count,
+            .max_pattern_bytes = max_pattern_bytes,
+            .max_unicode_variants = max_unicode_variants,
+        };
+    }
+
+    pub fn regexOptions(case_mode: libwebgrep.CaseMode) libwebgrep.RegexOptions {
+        return .{
+            .case = case_mode,
+            .max_inst = max_regex_inst,
+            .max_repeat = max_regex_repeat,
+            .max_recursion_depth = max_regex_recursion_depth,
+            .max_pattern_count = max_pattern_count,
+            .max_pattern_bytes = max_pattern_bytes,
+            .max_unicode_variants = max_unicode_variants,
+            .aot_dfa_max_insts = aot_dfa_max_insts,
+        };
+    }
+
+    pub fn globOptions() libwebgrep.walk_glob.CompileOptions {
+        return .{
+            .max_rules = max_glob_rules,
+            .max_rule_len = max_glob_rule_len,
+            .max_brace_depth = max_glob_brace_depth,
+        };
+    }
+};
+
+pub const ARCHIVE_VIRTUAL_SEP = if (@hasDecl(file_api, "ARCHIVE_VIRTUAL_SEP"))
+    file_api.ARCHIVE_VIRTUAL_SEP
+else
+    "::";
+
+pub fn detectArchiveFormat(path: []const u8) ?libwebgrep.ArchiveFormat {
+    if (@hasDecl(file_api, "detectArchiveFormat")) {
+        return file_api.detectArchiveFormat(path);
+    }
+    const check = struct {
+        fn endsWithIgnoreCase(haystack: []const u8, suffix: []const u8) bool {
+            if (haystack.len < suffix.len) return false;
+            return std.ascii.eqlIgnoreCase(haystack[haystack.len - suffix.len ..], suffix);
+        }
+    };
+    if (check.endsWithIgnoreCase(path, ".tar.gz") or check.endsWithIgnoreCase(path, ".tgz")) return .tar_gz;
+    if (check.endsWithIgnoreCase(path, ".tar.zst") or check.endsWithIgnoreCase(path, ".tzst")) return .tar_zst;
+    if (check.endsWithIgnoreCase(path, ".tar.xz") or check.endsWithIgnoreCase(path, ".txz")) return .tar_xz;
+    if (check.endsWithIgnoreCase(path, ".tar")) return .tar;
+    if (check.endsWithIgnoreCase(path, ".zip")) return .zip;
+    return null;
+}
+
+fn isSingleStreamCompressed(path: []const u8) bool {
+    if (detectArchiveFormat(path) != null) return false;
+    return file_api.hasCompressedExtension(path);
+}
+
+fn formatArchiveVirtualPathAlloc(
+    allocator: std.mem.Allocator,
+    archive_path: []const u8,
+    entry_path: []const u8,
+) ![]u8 {
+    if (@hasDecl(file_api, "formatArchiveVirtualPathAlloc")) {
+        return file_api.formatArchiveVirtualPathAlloc(allocator, archive_path, entry_path);
+    }
+    var clean_entry = entry_path;
+    while (std.mem.startsWith(u8, clean_entry, "./")) {
+        clean_entry = clean_entry[2..];
+    }
+    clean_entry = std.mem.trimStart(u8, clean_entry, "/");
+    return std.fmt.allocPrint(allocator, "{s}" ++ ARCHIVE_VIRTUAL_SEP ++ "{s}", .{ archive_path, clean_entry });
+}
+
+pub fn formatRegexDiagnosticAlloc(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    diag: libwebgrep.CompileDiagnostic,
+    fallback_err: anyerror,
+) ![]u8 {
+    if (diag.code != .none) {
+        return std.fmt.allocPrint(
+            allocator,
+            "Regex compile error ({s}) at line {d}, column {d} (offset {d}): {s} in pattern \"{s}\"",
+            .{ @tagName(diag.code), diag.line, diag.column, diag.offset, diag.message, pattern },
+        );
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "Regex compile error ({s}) in pattern \"{s}\"",
+        .{ @errorName(fallback_err), pattern },
+    );
+}
+
+/// Extended language & file-type table supplementing `libwebgrep.walk_types.builtin` (together 65+ types),
+/// plus support for compressed log/data extensions.
+pub const custom_file_types = [_]libwebgrep.walk_types.Type{
+    .{ .name = "log", .patterns = &.{ "*.log", "*.log.*", "*.log.gz", "*.log.zst", "*.log.xz", "*.out", "*.err" } },
+    .{ .name = "json", .patterns = &.{ "*.json", "*.jsonl", "*.ndjson", "*.jsonc", "*.json5", "*.json.gz", "*.json.zst", "*.json.xz" } },
+    .{ .name = "jsonl", .patterns = &.{ "*.jsonl", "*.ndjson", "*.jsonl.gz", "*.jsonl.zst", "*.jsonl.xz" } },
+    .{ .name = "txt", .patterns = &.{ "*.txt", "*.text", "*.txt.gz", "*.txt.zst", "*.txt.xz" } },
+    .{ .name = "rs", .patterns = &.{"*.rs"} },
+    .{ .name = "yml", .patterns = &.{ "*.yml", "*.yaml" } },
+    .{ .name = "svelte", .patterns = &.{"*.svelte"} },
+    .{ .name = "vue", .patterns = &.{"*.vue"} },
+    .{ .name = "jsx", .patterns = &.{"*.jsx"} },
+    .{ .name = "tsx", .patterns = &.{"*.tsx"} },
+    .{ .name = "sql", .patterns = &.{"*.sql"} },
+    .{ .name = "proto", .patterns = &.{"*.proto"} },
+    .{ .name = "graphql", .patterns = &.{ "*.graphql", "*.gql" } },
+    .{ .name = "gql", .patterns = &.{ "*.graphql", "*.gql" } },
+    .{ .name = "xml", .patterns = &.{ "*.xml", "*.xsd", "*.xsl", "*.plist", "*.svg" } },
+    .{ .name = "svg", .patterns = &.{"*.svg"} },
+    .{ .name = "csv", .patterns = &.{ "*.csv", "*.tsv", "*.csv.gz", "*.csv.zst" } },
+    .{ .name = "tsv", .patterns = &.{ "*.tsv", "*.tsv.gz", "*.tsv.zst" } },
+    .{ .name = "ini", .patterns = &.{ "*.ini", "*.conf", "*.cfg", "*.properties" } },
+    .{ .name = "conf", .patterns = &.{ "*.conf", "*.cfg", "*.ini" } },
+    .{ .name = "cfg", .patterns = &.{ "*.cfg", "*.conf", "*.ini" } },
+    .{ .name = "env", .patterns = &.{ ".env", ".env.*", "*.env" } },
+    .{ .name = "lock", .patterns = &.{ "*.lock", "package-lock.json", "pnpm-lock.yaml", "Cargo.lock", "build.zig.zon" } },
+    .{ .name = "zon", .patterns = &.{"*.zon"} },
+    .{ .name = "zig", .patterns = &.{ "*.zig", "*.zon" } },
+    .{ .name = "rb", .patterns = &.{ "*.rb", "*.rake", "Gemfile", "Rakefile" } },
+    .{ .name = "ruby", .patterns = &.{ "*.rb", "*.rake", "Gemfile", "Rakefile" } },
+    .{ .name = "php", .patterns = &.{ "*.php", "*.phtml" } },
+    .{ .name = "swift", .patterns = &.{"*.swift"} },
+    .{ .name = "kt", .patterns = &.{ "*.kt", "*.kts" } },
+    .{ .name = "kotlin", .patterns = &.{ "*.kt", "*.kts" } },
+    .{ .name = "scala", .patterns = &.{ "*.scala", "*.sc" } },
+    .{ .name = "cs", .patterns = &.{ "*.cs", "*.csx" } },
+    .{ .name = "csharp", .patterns = &.{ "*.cs", "*.csx" } },
+    .{ .name = "lua", .patterns = &.{"*.lua"} },
+    .{ .name = "dart", .patterns = &.{"*.dart"} },
+    .{ .name = "ex", .patterns = &.{ "*.ex", "*.exs" } },
+    .{ .name = "elixir", .patterns = &.{ "*.ex", "*.exs" } },
+    .{ .name = "erl", .patterns = &.{ "*.erl", "*.hrl" } },
+    .{ .name = "erlang", .patterns = &.{ "*.erl", "*.hrl" } },
+    .{ .name = "hs", .patterns = &.{ "*.hs", "*.lhs" } },
+    .{ .name = "haskell", .patterns = &.{ "*.hs", "*.lhs" } },
+    .{ .name = "ml", .patterns = &.{ "*.ml", "*.mli" } },
+    .{ .name = "ocaml", .patterns = &.{ "*.ml", "*.mli" } },
+    .{ .name = "clj", .patterns = &.{ "*.clj", "*.cljs", "*.cljc", "*.edn" } },
+    .{ .name = "clojure", .patterns = &.{ "*.clj", "*.cljs", "*.cljc", "*.edn" } },
+    .{ .name = "r", .patterns = &.{ "*.r", "*.R", "*.Rmd" } },
+    .{ .name = "jl", .patterns = &.{"*.jl"} },
+    .{ .name = "julia", .patterns = &.{"*.jl"} },
+    .{ .name = "pl", .patterns = &.{ "*.pl", "*.pm" } },
+    .{ .name = "perl", .patterns = &.{ "*.pl", "*.pm" } },
+    .{ .name = "docker", .patterns = &.{ "Dockerfile", "Dockerfile.*", "*.dockerfile", "docker-compose.yml", "docker-compose.yaml" } },
+    .{ .name = "dockerfile", .patterns = &.{ "Dockerfile", "Dockerfile.*", "*.dockerfile" } },
+    .{ .name = "tf", .patterns = &.{ "*.tf", "*.tfvars", "*.hcl" } },
+    .{ .name = "terraform", .patterns = &.{ "*.tf", "*.tfvars", "*.hcl" } },
+    .{ .name = "nix", .patterns = &.{"*.nix"} },
+    .{ .name = "vim", .patterns = &.{ "*.vim", ".vimrc" } },
+    .{ .name = "fish", .patterns = &.{"*.fish"} },
+    .{ .name = "zsh", .patterns = &.{ "*.zsh", ".zshrc" } },
+    .{ .name = "bash", .patterns = &.{ "*.bash", "*.sh", ".bashrc" } },
+    .{ .name = "ps1", .patterns = &.{ "*.ps1", "*.psm1", "*.psd1" } },
+    .{ .name = "powershell", .patterns = &.{ "*.ps1", "*.psm1", "*.psd1" } },
+    .{ .name = "bat", .patterns = &.{ "*.bat", "*.cmd" } },
+    .{ .name = "less", .patterns = &.{"*.less"} },
+    .{ .name = "scss", .patterns = &.{ "*.scss", "*.sass" } },
+    .{ .name = "sass", .patterns = &.{ "*.sass", "*.scss" } },
+    .{ .name = "wasm", .patterns = &.{ "*.wasm", "*.wat", "*.wast" } },
+    .{ .name = "sol", .patterns = &.{"*.sol"} },
+};
+
+/// Computes the SIMD prefilter selectivity score for a compiled regex (`libwebgrep v0.5.0`).
 /// Higher scores indicate stronger fixed-literal or Teddy multi-literal anchors (`Finder` / `Multi` at 20+ GB/s)
 /// and Ahead-of-Time determinized `BoundedDfa` tables (`precomputed_dfa`), while unanchored NFAs score 1..3.
 fn computeRegexSelectivity(re: *const libwebgrep.Regex) usize {
@@ -393,7 +605,7 @@ pub fn executeSearchWithRegistry(
                 try sender.send(done_json);
                 return;
             }
-            const m = libwebgrep.Multi.init(gpa, parts.items, .{ .case = case_mode }) catch |err| {
+            const m = libwebgrep.Multi.init(gpa, parts.items, EngineLimits.findOptions(case_mode)) catch |err| {
                 try sendError(gpa, sender, req.id, @errorName(err));
                 return;
             };
@@ -413,35 +625,45 @@ pub fn executeSearchWithRegistry(
                 kind: CandidateKind,
             };
             var candidates: std.ArrayList(Candidate) = .empty;
-            errdefer {
-                for (candidates.items) |*c| {
-                    switch (c.kind) {
-                        .regex => |*re| re.deinit(),
-                        .literal => {},
+            const freeCandidates = struct {
+                fn run(alloc: std.mem.Allocator, list: *std.ArrayList(Candidate)) void {
+                    for (list.items) |*c| {
+                        switch (c.kind) {
+                            .regex => |*re| re.deinit(),
+                            .literal => {},
+                        }
                     }
+                    list.deinit(alloc);
                 }
-                candidates.deinit(gpa);
-            }
+            }.run;
+            errdefer freeCandidates(gpa, &candidates);
 
             const classifyTerm = struct {
                 fn run(
                     alloc: std.mem.Allocator,
                     arena_alloc: std.mem.Allocator,
+                    snd: FrameSender,
+                    req_id: u64,
                     raw_pat: []const u8,
                     regex_mode: bool,
                     cm: libwebgrep.CaseMode,
-                ) Candidate {
+                ) !?Candidate {
                     if (parseScopedModifier(arena_alloc, raw_pat, cm)) |scoped_spec| {
-                        if (libwebgrep.Regex.init(alloc, scoped_spec.pattern, .{ .case = scoped_spec.case_mode })) |re| {
-                            return .{
-                                .raw = raw_pat,
-                                .score = computeRegexSelectivity(&re),
-                                .kind = .{ .regex = re },
-                            };
-                        } else |_| {}
+                        var diag: libwebgrep.CompileDiagnostic = .{};
+                        const re = libwebgrep.Regex.initDiagnostic(alloc, scoped_spec.pattern, EngineLimits.regexOptions(scoped_spec.case_mode), &diag) catch |err| {
+                            const msg = try formatRegexDiagnosticAlloc(arena_alloc, scoped_spec.pattern, diag, err);
+                            try sendError(alloc, snd, req_id, msg);
+                            return null;
+                        };
+                        return .{
+                            .raw = raw_pat,
+                            .score = computeRegexSelectivity(&re),
+                            .kind = .{ .regex = re },
+                        };
                     }
                     if (regex_mode and hasRegexMeta(raw_pat)) {
-                        if (libwebgrep.Regex.init(alloc, raw_pat, .{ .case = cm })) |re| {
+                        var diag: libwebgrep.CompileDiagnostic = .{};
+                        if (libwebgrep.Regex.initDiagnostic(alloc, raw_pat, EngineLimits.regexOptions(cm), &diag)) |re| {
                             return .{
                                 .raw = raw_pat,
                                 .score = computeRegexSelectivity(&re),
@@ -457,10 +679,18 @@ pub fn executeSearchWithRegistry(
                 }
             }.run;
 
-            try candidates.append(gpa, classifyTerm(gpa, job_arena, req.pattern, is_regex_mode, case_mode));
+            const first_cand = (try classifyTerm(gpa, job_arena, sender, req.id, req.pattern, is_regex_mode, case_mode)) orelse {
+                freeCandidates(gpa, &candidates);
+                return;
+            };
+            try candidates.append(gpa, first_cand);
             for (req.contains) |pat| {
                 if (pat.len == 0) continue;
-                try candidates.append(gpa, classifyTerm(gpa, job_arena, pat, is_regex_mode, case_mode));
+                const cand = (try classifyTerm(gpa, job_arena, sender, req.id, pat, is_regex_mode, case_mode)) orelse {
+                    freeCandidates(gpa, &candidates);
+                    return;
+                };
+                try candidates.append(gpa, cand);
             }
 
             var best_idx: usize = 0;
@@ -483,7 +713,7 @@ pub fn executeSearchWithRegistry(
                     },
                     .literal => |lit| {
                         if (idx == 0) {
-                            swapped_primary_finder = libwebgrep.Finder.init(lit, .{ .case = case_mode }) catch null;
+                            swapped_primary_finder = libwebgrep.Finder.init(lit, EngineLimits.findOptions(case_mode)) catch null;
                         }
                         try literal_contains_list.append(job_arena, lit);
                     },
@@ -496,7 +726,7 @@ pub fn executeSearchWithRegistry(
             switch (winner.kind) {
                 .regex => |re| break :blk .{ .regex = re },
                 .literal => |lit| {
-                    const f = libwebgrep.Finder.init(lit, .{ .case = case_mode }) catch |err| {
+                    const f = libwebgrep.Finder.init(lit, EngineLimits.findOptions(case_mode)) catch |err| {
                         try sendError(gpa, sender, req.id, @errorName(err));
                         return;
                     };
@@ -504,25 +734,31 @@ pub fn executeSearchWithRegistry(
                 },
             }
         } else if (parseScopedModifier(job_arena, req.pattern, case_mode)) |scoped_spec| {
-            const re = libwebgrep.Regex.init(gpa, scoped_spec.pattern, .{ .case = scoped_spec.case_mode }) catch |err| {
-                try sendError(gpa, sender, req.id, @errorName(err));
+            var diag: libwebgrep.CompileDiagnostic = .{};
+            const re = libwebgrep.Regex.initDiagnostic(gpa, scoped_spec.pattern, EngineLimits.regexOptions(scoped_spec.case_mode), &diag) catch |err| {
+                const msg = try formatRegexDiagnosticAlloc(job_arena, scoped_spec.pattern, diag, err);
+                try sendError(gpa, sender, req.id, msg);
                 return;
             };
             break :blk .{ .regex = re };
         } else if (req.pattern.len == 0 and has_time_filter) {
-            const re = libwebgrep.Regex.init(gpa, "^.", .{ .case = .sensitive }) catch |err| {
-                try sendError(gpa, sender, req.id, @errorName(err));
+            var diag: libwebgrep.CompileDiagnostic = .{};
+            const re = libwebgrep.Regex.initDiagnostic(gpa, "^.", EngineLimits.regexOptions(.sensitive), &diag) catch |err| {
+                const msg = try formatRegexDiagnosticAlloc(job_arena, "^.", diag, err);
+                try sendError(gpa, sender, req.id, msg);
                 return;
             };
             break :blk .{ .regex = re };
         } else if (is_regex_mode) {
-            const re = libwebgrep.Regex.init(gpa, req.pattern, .{ .case = case_mode }) catch |err| {
-                try sendError(gpa, sender, req.id, @errorName(err));
+            var diag: libwebgrep.CompileDiagnostic = .{};
+            const re = libwebgrep.Regex.initDiagnostic(gpa, req.pattern, EngineLimits.regexOptions(case_mode), &diag) catch |err| {
+                const msg = try formatRegexDiagnosticAlloc(job_arena, req.pattern, diag, err);
+                try sendError(gpa, sender, req.id, msg);
                 return;
             };
             break :blk .{ .regex = re };
         } else {
-            const f = libwebgrep.Finder.init(req.pattern, .{ .case = case_mode }) catch |err| {
+            const f = libwebgrep.Finder.init(req.pattern, EngineLimits.findOptions(case_mode)) catch |err| {
                 try sendError(gpa, sender, req.id, @errorName(err));
                 return;
             };
@@ -532,24 +768,84 @@ pub fn executeSearchWithRegistry(
     defer matcher.deinit();
 
     const compiled_globs: []const libwebgrep.walk_glob.Glob = if (req.globs.len > 0)
-        libwebgrep.walk_glob.compileGlobs(job_arena, req.globs, .{}) catch |err| {
+        libwebgrep.walk_glob.compileGlobs(job_arena, req.globs, EngineLimits.globOptions()) catch |err| {
             try sendError(gpa, sender, req.id, @errorName(err));
             return;
         }
     else
         &.{};
 
+    var expanded_file_globs_list: std.ArrayList([]const u8) = .empty;
+    for (req.fileGlobs) |raw_fg| {
+        const trimmed = std.mem.trim(u8, raw_fg, " \t");
+        if (trimmed.len == 0) continue;
+        const is_neg = trimmed[0] == '!';
+        const body = if (is_neg) trimmed[1..] else trimmed;
+        if (body.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, body, '{') != null) {
+            var br_out: std.ArrayList([]u8) = .empty;
+            if (libwebgrep.walk_glob.expandBracesWithOptions(job_arena, body, &br_out, EngineLimits.globOptions())) {
+                for (br_out.items) |expanded_part| {
+                    if (is_neg) {
+                        const neg_part = try std.fmt.allocPrint(job_arena, "!{s}", .{expanded_part});
+                        try expanded_file_globs_list.append(job_arena, neg_part);
+                    } else {
+                        try expanded_file_globs_list.append(job_arena, expanded_part);
+                    }
+                }
+                continue;
+            } else |_| {}
+        }
+        try expanded_file_globs_list.append(job_arena, trimmed);
+    }
+
+    var types_include_list: std.ArrayList([]const u8) = .empty;
+    var types_exclude_list: std.ArrayList([]const u8) = .empty;
+    var custom_types_list: std.ArrayList(libwebgrep.walk_types.Type) = .empty;
+    try custom_types_list.appendSlice(job_arena, &custom_file_types);
+
+    for (req.types) |raw_type| {
+        const trimmed = std.mem.trim(u8, raw_type, " \t");
+        if (trimmed.len == 0) continue;
+        const is_neg = trimmed[0] == '!';
+        const t_name = std.mem.trimStart(u8, if (is_neg) trimmed[1..] else trimmed, ".");
+        if (t_name.len == 0) continue;
+        if (is_neg) {
+            try types_exclude_list.append(job_arena, t_name);
+        } else {
+            try types_include_list.append(job_arena, t_name);
+        }
+        if (libwebgrep.walk_types.findInTable(custom_types_list.items, t_name) == null) {
+            const g1 = try std.fmt.allocPrint(job_arena, "*.{s}", .{t_name});
+            const g2 = try std.fmt.allocPrint(job_arena, "*.{s}.gz", .{t_name});
+            const g3 = try std.fmt.allocPrint(job_arena, "*.{s}.zst", .{t_name});
+            const g4 = try std.fmt.allocPrint(job_arena, "*.{s}.xz", .{t_name});
+            const globs_slice = try job_arena.alloc([]const u8, 4);
+            globs_slice[0] = g1;
+            globs_slice[1] = g2;
+            globs_slice[2] = g3;
+            globs_slice[3] = g4;
+            try custom_types_list.append(job_arena, .{
+                .name = t_name,
+                .patterns = globs_slice,
+            });
+        }
+    }
+
     if (!can_reorder_predicates) {
         for (req.contains) |pat| {
             if (pat.len == 0) continue;
             if (parseScopedModifier(job_arena, pat, case_mode)) |scoped_spec| {
-                if (libwebgrep.Regex.init(gpa, scoped_spec.pattern, .{ .case = scoped_spec.case_mode })) |re| {
-                    try contains_regexes.append(gpa, re);
-                } else |_| {
-                    try literal_contains_list.append(job_arena, pat);
-                }
+                var diag: libwebgrep.CompileDiagnostic = .{};
+                const re = libwebgrep.Regex.initDiagnostic(gpa, scoped_spec.pattern, EngineLimits.regexOptions(scoped_spec.case_mode), &diag) catch |err| {
+                    const msg = try formatRegexDiagnosticAlloc(job_arena, scoped_spec.pattern, diag, err);
+                    try sendError(gpa, sender, req.id, msg);
+                    return;
+                };
+                try contains_regexes.append(gpa, re);
             } else if (is_regex_mode and hasRegexMeta(pat)) {
-                if (libwebgrep.Regex.init(gpa, pat, .{ .case = case_mode })) |re| {
+                var diag: libwebgrep.CompileDiagnostic = .{};
+                if (libwebgrep.Regex.initDiagnostic(gpa, pat, EngineLimits.regexOptions(case_mode), &diag)) |re| {
                     try contains_regexes.append(gpa, re);
                 } else |_| {
                     try literal_contains_list.append(job_arena, pat);
@@ -563,13 +859,16 @@ pub fn executeSearchWithRegistry(
     for (req.excludes) |pat| {
         if (pat.len == 0) continue;
         if (parseScopedModifier(job_arena, pat, case_mode)) |scoped_spec| {
-            if (libwebgrep.Regex.init(gpa, scoped_spec.pattern, .{ .case = scoped_spec.case_mode })) |re| {
-                try excludes_regexes.append(gpa, re);
-            } else |_| {
-                try literal_excludes_list.append(job_arena, pat);
-            }
+            var diag: libwebgrep.CompileDiagnostic = .{};
+            const re = libwebgrep.Regex.initDiagnostic(gpa, scoped_spec.pattern, EngineLimits.regexOptions(scoped_spec.case_mode), &diag) catch |err| {
+                const msg = try formatRegexDiagnosticAlloc(job_arena, scoped_spec.pattern, diag, err);
+                try sendError(gpa, sender, req.id, msg);
+                return;
+            };
+            try excludes_regexes.append(gpa, re);
         } else if (is_regex_mode and hasRegexMeta(pat)) {
-            if (libwebgrep.Regex.init(gpa, pat, .{ .case = case_mode })) |re| {
+            var diag: libwebgrep.CompileDiagnostic = .{};
+            if (libwebgrep.Regex.initDiagnostic(gpa, pat, EngineLimits.regexOptions(case_mode), &diag)) |re| {
                 try excludes_regexes.append(gpa, re);
             } else |_| {
                 try literal_excludes_list.append(job_arena, pat);
@@ -582,6 +881,58 @@ pub fn executeSearchWithRegistry(
     const base_literal_contains = literal_contains_list.items;
     const base_literal_excludes = literal_excludes_list.items;
 
+    const time_mode = time_parser.TimeMode.parse(req.timeMode);
+    const has_time_window = (eff_time_start_ns > 0 or eff_time_end_ns > 0);
+    const is_empty_text_time_browse = has_time_window and
+        req.pattern.len == 0 and
+        req.contains.len == 0 and
+        req.excludes.len == 0 and
+        !req.invert;
+
+    var time_parsers_pool: std.ArrayList(TimeParserPoolEntry) = .empty;
+    defer {
+        for (time_parsers_pool.items) |item| {
+            item.ptr.deinit(gpa);
+            gpa.destroy(item.ptr);
+        }
+        time_parsers_pool.deinit(gpa);
+    }
+
+    const default_auto_parser: *const time_parser.CompiledTimeParser = blk_def_tp: {
+        const p = try gpa.create(time_parser.CompiledTimeParser);
+        p.* = .{};
+        errdefer gpa.destroy(p);
+        try time_parsers_pool.append(gpa, .{ .key = "", .ptr = p });
+        break :blk_def_tp p;
+    };
+
+    const trimmed_req_tf = std.mem.trim(u8, req.timeFormat, " \t\r\n");
+    var query_line_parser: ?*const time_parser.CompiledTimeParser = null;
+    if (has_time_window and time_mode != .mtime and trimmed_req_tf.len > 0) {
+        var tp_err: ?[]const u8 = null;
+        const p = try gpa.create(time_parser.CompiledTimeParser);
+        p.* = .{};
+        var ownership_transferred = false;
+        defer if (!ownership_transferred) gpa.destroy(p);
+        p.initInPlace(gpa, job_arena, trimmed_req_tf, &tp_err) catch |err| {
+            if (err == error.InvalidTimeFormat) {
+                try sendError(gpa, sender, req.id, tp_err orelse "Invalid line time format");
+                return;
+            }
+            return err;
+        };
+        const key_copy = try job_arena.dupe(u8, trimmed_req_tf);
+        try time_parsers_pool.append(gpa, .{ .key = key_copy, .ptr = p });
+        ownership_transferred = true;
+        query_line_parser = p;
+    }
+
+    var time_format_sig_buf: std.ArrayList(u8) = .empty;
+    if (has_time_window and time_mode != .mtime and trimmed_req_tf.len > 0) {
+        try time_format_sig_buf.appendSlice(job_arena, "q=");
+        try time_format_sig_buf.appendSlice(job_arena, trimmed_req_tf);
+    }
+
     var runner = JobRunner{
         .gpa = gpa,
         .job_arena = job_arena,
@@ -591,6 +942,10 @@ pub fn executeSearchWithRegistry(
         .req = req,
         .matcher = &matcher,
         .compiled_globs = compiled_globs,
+        .expanded_file_globs = expanded_file_globs_list.items,
+        .types_include = types_include_list.items,
+        .types_exclude = types_exclude_list.items,
+        .custom_types_table = custom_types_list.items,
         .contains_regexes = contains_regexes.items,
         .excludes_regexes = excludes_regexes.items,
         .swapped_primary_regex_first = swapped_primary_regex_first,
@@ -600,6 +955,11 @@ pub fn executeSearchWithRegistry(
         .last_progress_ts = start_ts,
         .time_start_ns = eff_time_start_ns,
         .time_end_ns = eff_time_end_ns,
+        .time_mode = time_mode,
+        .tz_offset_min = req.tzOffsetMin,
+        .time_format_sig = time_format_sig_buf.items,
+        .default_line_time_parser = default_auto_parser,
+        .is_empty_text_time_browse = is_empty_text_time_browse,
     };
     defer runner.file_tasks.deinit(job_arena);
     defer runner.active_task_indices.deinit(job_arena);
@@ -659,6 +1019,112 @@ pub fn executeSearchWithRegistry(
 
             if (!runner.sourceMatchesProjectFilters(src.id, src.name)) continue;
 
+            const trimmed_src_tf = std.mem.trim(u8, src.time_format, " \t\r\n");
+            const src_task_time_mode: time_parser.TimeMode = if (time_mode == .source) blk_mode: {
+                if (trimmed_src_tf.len > 0) break :blk_mode .content;
+                break :blk_mode .mtime;
+            } else time_mode;
+
+            const src_line_parser: *const time_parser.CompiledTimeParser = blk_slp: {
+                if (query_line_parser) |qp| break :blk_slp qp;
+                if (has_time_window and src_task_time_mode != .mtime) {
+                    if (trimmed_src_tf.len > 0) {
+                        try time_format_sig_buf.append(job_arena, '|');
+                        try time_format_sig_buf.appendSlice(job_arena, src.id);
+                        try time_format_sig_buf.append(job_arena, '=');
+                        try time_format_sig_buf.appendSlice(job_arena, trimmed_src_tf);
+
+                        if (std.ascii.eqlIgnoreCase(trimmed_src_tf, "auto")) {
+                            break :blk_slp default_auto_parser;
+                        }
+
+                        for (time_parsers_pool.items) |entry| {
+                            if (std.mem.eql(u8, entry.key, trimmed_src_tf)) {
+                                break :blk_slp entry.ptr;
+                            }
+                        }
+                        var sp_err: ?[]const u8 = null;
+                        const p = try gpa.create(time_parser.CompiledTimeParser);
+                        p.* = .{};
+                        var ownership_transferred = false;
+                        defer if (!ownership_transferred) gpa.destroy(p);
+                        if (p.initInPlace(gpa, job_arena, trimmed_src_tf, &sp_err)) |_| {
+                            const key_copy = try job_arena.dupe(u8, trimmed_src_tf);
+                            try time_parsers_pool.append(gpa, .{ .key = key_copy, .ptr = p });
+                            ownership_transferred = true;
+                            break :blk_slp p;
+                        } else |_| {
+                            break :blk_slp default_auto_parser;
+                        }
+                    } else if (time_mode == .source and src_task_time_mode == .content) {
+                        try time_format_sig_buf.append(job_arena, '|');
+                        try time_format_sig_buf.appendSlice(job_arena, src.id);
+                        try time_format_sig_buf.appendSlice(job_arena, "=auto");
+                        break :blk_slp default_auto_parser;
+                    }
+                }
+                break :blk_slp default_auto_parser;
+            };
+
+            runner.visited_dir_ids.clearRetainingCapacity();
+            runner.visited_file_ids.clearRetainingCapacity();
+
+            if (std.mem.eql(u8, src.kind, "docker")) {
+                const listed = reg.listDockerFreshForSearchAlloc(job_arena, io, src.path) catch continue;
+                const allow_docker_time_pushdown = (query_line_parser == null) and
+                    (src_task_time_mode != .mtime) and
+                    (trimmed_src_tf.len == 0 or std.ascii.eqlIgnoreCase(trimmed_src_tf, "auto"));
+                const now_i96: i96 = @intCast(time_parser.currentUnixNano(io));
+                for (listed.containers) |c| {
+                    if (runner.shouldStop()) break;
+                    if (runner.types_include.len > 0 or runner.types_exclude.len > 0) {
+                        const synthetic_log_name = try std.fmt.allocPrint(job_arena, "{s}.log", .{c.display_name});
+                        if (!libwebgrep.walk_types.matchesWithTable(
+                            runner.custom_types_table,
+                            runner.types_include,
+                            runner.types_exclude,
+                            synthetic_log_name,
+                        )) continue;
+                    }
+
+                    const virtual_rel = if (src.name.len > 0)
+                        try std.fmt.allocPrint(job_arena, "{s}/{s}", .{ src.name, c.display_name })
+                    else
+                        try job_arena.dupe(u8, c.display_name);
+
+                    if (!runner.fileMatchesPathGlobs(virtual_rel, c.display_name)) continue;
+
+                    const eff_mtime_ns: i96 = if (c.running) @max(c.created_ns, now_i96) else c.created_ns;
+                    if ((runner.time_start_ns > 0 or runner.time_end_ns > 0) and src_task_time_mode == .mtime and eff_mtime_ns > 0) {
+                        const mtime_u64: u64 = @intCast(@max(0, eff_mtime_ns));
+                        if ((runner.time_start_ns > 0 and mtime_u64 < runner.time_start_ns) or
+                            (runner.time_end_ns > 0 and mtime_u64 > runner.time_end_ns))
+                        {
+                            _ = runner.files_searched.fetchAdd(1, .monotonic);
+                            continue;
+                        }
+                    }
+
+                    runner.has_docker_tasks = true;
+                    try runner.file_tasks.append(job_arena, .{
+                        .open_sub_path = c.display_name,
+                        .rel_path = virtual_rel,
+                        .base_name = c.display_name,
+                        .source_id = src.id,
+                        .source_name = src.name,
+                        .docker_transport = listed.transport,
+                        .docker_container_id = c.id,
+                        .docker_allow_time_pushdown = allow_docker_time_pushdown,
+                        .effective_contains = base_literal_contains,
+                        .effective_excludes = base_literal_excludes,
+                        .line_time_parser = src_line_parser,
+                        .task_time_mode = src_task_time_mode,
+                        .mtime_ns = eff_mtime_ns,
+                    });
+                }
+                continue;
+            }
+
             if (!std.mem.eql(u8, src.kind, "file")) {
                 if (std.Io.Dir.cwd().openDir(io, src.path, .{ .iterate = true })) |opened_dir| {
                     var d = opened_dir;
@@ -671,6 +1137,9 @@ pub fn executeSearchWithRegistry(
                         base_literal_contains,
                         base_literal_excludes,
                         "",
+                        null,
+                        src_line_parser,
+                        src_task_time_mode,
                     );
                     continue;
                 } else |_| {}
@@ -697,31 +1166,39 @@ pub fn executeSearchWithRegistry(
                     st.mtime.nanoseconds,
                     st.size,
                     st.inode,
+                    src_line_parser,
+                    src_task_time_mode,
                 );
             }
         }
     } else if (req.paths.len > 0) {
+        const fallback_tp = query_line_parser orelse default_auto_parser;
+        const fallback_mode: time_parser.TimeMode = if (time_mode == .source) .mtime else time_mode;
         for (req.paths) |raw_p| {
             if (runner.shouldStop()) break;
             const clean_p = file_api.sanitizeRelPath(raw_p) catch continue;
             if (clean_p.len == 0) {
-                try runner.walkDirectoryForSource(root_dir, null, "", "", base_literal_contains, base_literal_excludes, "");
+                try runner.walkDirectoryForSource(root_dir, null, "", "", base_literal_contains, base_literal_excludes, "", null, fallback_tp, fallback_mode);
                 continue;
             }
             if (root_dir.openDir(io, clean_p, .{ .iterate = true })) |opened_dir| {
                 var sub_dir = opened_dir;
                 defer sub_dir.close(io);
-                try runner.walkDirectoryForSource(sub_dir, null, "", "", base_literal_contains, base_literal_excludes, clean_p);
+                try runner.walkDirectoryForSource(sub_dir, null, "", "", base_literal_contains, base_literal_excludes, clean_p, null, fallback_tp, fallback_mode);
             } else |_| {
                 const base = std.fs.path.basename(clean_p);
                 if (!runner.fileMatchesSourceFilters("", "", base)) continue;
                 const st = root_dir.statFile(io, clean_p, .{}) catch continue;
-                try runner.enqueueTask(null, clean_p, clean_p, base, "", "", base_literal_contains, base_literal_excludes, st.mtime.nanoseconds, st.size, st.inode);
+                try runner.enqueueTask(null, clean_p, clean_p, base, "", "", base_literal_contains, base_literal_excludes, st.mtime.nanoseconds, st.size, st.inode, fallback_tp, fallback_mode);
             }
         }
     } else {
-        try runner.walkDirectoryForSource(root_dir, null, "", "", base_literal_contains, base_literal_excludes, "");
+        const fallback_tp = query_line_parser orelse default_auto_parser;
+        const fallback_mode: time_parser.TimeMode = if (time_mode == .source) .mtime else time_mode;
+        try runner.walkDirectoryForSource(root_dir, null, "", "", base_literal_contains, base_literal_excludes, "", null, fallback_tp, fallback_mode);
     }
+
+    runner.time_format_sig = time_format_sig_buf.items;
 
     if (!cancel_flag.load(.acquire)) {
         runner.runParallelWorkers();
@@ -771,6 +1248,7 @@ fn sendError(gpa: std.mem.Allocator, sender: FrameSender, id: u64, msg: []const 
 const DirEntryItem = struct {
     name: []const u8,
     is_dir: bool,
+    is_symlink: bool = false,
 
     pub fn lessThan(_: void, a: DirEntryItem, b: DirEntryItem) bool {
         if (a.is_dir != b.is_dir) return !a.is_dir; // search files in dir first, then recurse subdirs
@@ -779,14 +1257,22 @@ const DirEntryItem = struct {
 };
 
 const FileTask = struct {
+    pub const COLOSSAL_FILE_THRESHOLD: u64 = 256 * 1024 * 1024;
+
     parent_dir_path: ?[]const u8 = null,
     open_sub_path: []const u8,
     rel_path: []const u8,
     base_name: []const u8,
     source_id: []const u8 = "",
     source_name: []const u8 = "",
+    docker_transport: ?docker_logs.Transport = null,
+    docker_container_id: []const u8 = "",
+    docker_allow_time_pushdown: bool = false,
+    archive_format: ?libwebgrep.ArchiveFormat = null,
     effective_contains: []const []const u8 = &.{},
     effective_excludes: []const []const u8 = &.{},
+    line_time_parser: *const time_parser.CompiledTimeParser,
+    task_time_mode: time_parser.TimeMode = .auto,
     mtime_ns: i96 = 0,
     file_size: u64 = 0,
     inode: std.Io.File.INode = 0,
@@ -796,16 +1282,34 @@ const FileTask = struct {
     soft_quota: u64 = 0,
     emitted_in_file: u64 = 0,
     resume_after_line: u64 = 0,
+    paused_result: ?libwebgrep.Result = null,
     phase_bytes: u64 = 0,
     paused_at_soft_quota: bool = false,
     counted_file_searched: bool = false,
     counted_file_matched: bool = false,
 
+    pub fn isDocker(self: FileTask) bool {
+        return self.docker_transport != null;
+    }
+
+    pub fn isColossal(self: FileTask) bool {
+        return self.file_size > COLOSSAL_FILE_THRESHOLD;
+    }
+
     pub fn hotterThan(_: void, a: FileTask, b: FileTask) bool {
+        const a_col = a.isColossal();
+        const b_col = b.isColossal();
+        if (a_col != b_col) return !a_col;
+        if (a_col and b_col and a.file_size != b.file_size) return a.file_size < b.file_size;
         if (a.heat_score != b.heat_score) return a.heat_score > b.heat_score;
         if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
         return std.mem.order(u8, a.rel_path, b.rel_path) == .lt;
     }
+};
+
+const TimeParserPoolEntry = struct {
+    key: []const u8,
+    ptr: *time_parser.CompiledTimeParser,
 };
 
 const JobRunner = struct {
@@ -815,8 +1319,12 @@ const JobRunner = struct {
     root_dir: std.Io.Dir,
     registry: ?*source_registry.SourceRegistry = null,
     req: SearchRequest,
-    matcher: *MatcherUnion,
+    matcher: *const MatcherUnion,
     compiled_globs: []const libwebgrep.walk_glob.Glob,
+    expanded_file_globs: []const []const u8 = &.{},
+    types_include: []const []const u8 = &.{},
+    types_exclude: []const []const u8 = &.{},
+    custom_types_table: []const libwebgrep.walk_types.Type = &custom_file_types,
     contains_regexes: []const libwebgrep.Regex = &.{},
     excludes_regexes: []const libwebgrep.Regex = &.{},
     swapped_primary_regex_first: bool = false,
@@ -825,6 +1333,15 @@ const JobRunner = struct {
     sender: FrameSender,
     time_start_ns: u64 = 0,
     time_end_ns: u64 = 0,
+    time_mode: time_parser.TimeMode = .auto,
+    tz_offset_min: i16 = 0,
+    time_format_sig: []const u8 = "",
+    default_line_time_parser: *const time_parser.CompiledTimeParser,
+    is_empty_text_time_browse: bool = false,
+    has_docker_tasks: bool = false,
+
+    visited_dir_ids: std.AutoHashMapUnmanaged(libwebgrep.walk_file_id.Id, void) = .empty,
+    visited_file_ids: std.AutoHashMapUnmanaged(libwebgrep.walk_file_id.Id, void) = .empty,
 
     file_tasks: std.ArrayList(FileTask) = .empty,
     active_task_indices: std.ArrayList(usize) = .empty,
@@ -875,8 +1392,26 @@ const JobRunner = struct {
         mtime_ns: i96,
         file_size: u64,
         inode: std.Io.File.INode,
+        line_tp: *const time_parser.CompiledTimeParser,
+        task_time_mode: time_parser.TimeMode,
     ) !void {
-        if (!self.fileMatchesPathGlobs(rel_path, base_name)) return;
+        const archive_fmt = detectArchiveFormat(base_name);
+        if (archive_fmt == null) {
+            if (!self.fileMatchesPathGlobs(rel_path, base_name)) return;
+        } else {
+            if (!self.archiveContainerAllowedByPathGlobs(rel_path, base_name)) return;
+        }
+        // In explicit `mtime` mode (or sources using file modified time), O(1) prune non-matching
+        // files/archives before allocating tasks while keeping `files_searched` accurate.
+        if ((self.time_start_ns > 0 or self.time_end_ns > 0) and task_time_mode == .mtime and mtime_ns > 0) {
+            const mtime_u64: u64 = @intCast(@max(0, mtime_ns));
+            if ((self.time_start_ns > 0 and mtime_u64 < self.time_start_ns) or
+                (self.time_end_ns > 0 and mtime_u64 > self.time_end_ns))
+            {
+                _ = self.files_searched.fetchAdd(1, .monotonic);
+                return;
+            }
+        }
         const parent_copy = if (parent_dir_path) |p| try self.job_arena.dupe(u8, p) else null;
         const sub_copy = try self.job_arena.dupe(u8, open_sub_path);
         const rel_copy = if (std.mem.eql(u8, open_sub_path, rel_path))
@@ -891,8 +1426,11 @@ const JobRunner = struct {
             .base_name = base_copy,
             .source_id = source_id,
             .source_name = source_name,
+            .archive_format = archive_fmt,
             .effective_contains = effective_contains,
             .effective_excludes = effective_excludes,
+            .line_time_parser = line_tp,
+            .task_time_mode = task_time_mode,
             .mtime_ns = mtime_ns,
             .file_size = file_size,
             .inode = inode,
@@ -917,13 +1455,18 @@ const JobRunner = struct {
         return false;
     }
 
+    fn activeFileGlobs(self: *const JobRunner) []const []const u8 {
+        return if (self.expanded_file_globs.len > 0) self.expanded_file_globs else self.req.fileGlobs;
+    }
+
     /// Applies `req.fileGlobs` (`@*.rs`, `@src/`, `-@*_test.go`) to a candidate file.
     /// Positive patterns are OR-ed (at least one must match when any exist); `!` negatives always exclude.
     fn fileMatchesPathGlobs(self: *const JobRunner, rel_path: []const u8, base_name: []const u8) bool {
-        if (self.req.fileGlobs.len == 0) return true;
+        const globs = self.activeFileGlobs();
+        if (globs.len == 0) return true;
         var has_positive = false;
         var positive_hit = false;
-        for (self.req.fileGlobs) |raw| {
+        for (globs) |raw| {
             const trimmed = std.mem.trim(u8, raw, " \t");
             const is_neg = trimmed.len > 0 and trimmed[0] == '!';
             const body = if (is_neg) trimmed[1..] else trimmed;
@@ -937,6 +1480,69 @@ const JobRunner = struct {
             }
         }
         return !has_positive or positive_hit;
+    }
+
+    fn archiveContainerAllowedByPathGlobs(self: *const JobRunner, rel_path: []const u8, base_name: []const u8) bool {
+        const globs = self.activeFileGlobs();
+        if (globs.len == 0) return true;
+        for (globs) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (trimmed.len > 1 and trimmed[0] == '!') {
+                const body = trimmed[1..];
+                if (matchesPathPattern(rel_path, base_name, body)) return false;
+            }
+        }
+        return true;
+    }
+
+    fn archiveEntryMatchesPathGlobs(
+        self: *const JobRunner,
+        archive_rel_path: []const u8,
+        archive_base_name: []const u8,
+        entry_path: []const u8,
+    ) bool {
+        const globs = self.activeFileGlobs();
+        if (globs.len == 0) return true;
+        const entry_base = std.fs.path.basename(entry_path);
+        var has_positive = false;
+        var positive_hit = false;
+        for (globs) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            const is_neg = trimmed.len > 0 and trimmed[0] == '!';
+            const body = if (is_neg) trimmed[1..] else trimmed;
+            if (body.len == 0) continue;
+            const hit = matchesPathPattern(archive_rel_path, archive_base_name, body) or
+                matchesPathPattern(entry_path, entry_base, body);
+            if (is_neg) {
+                if (hit) return false;
+            } else {
+                has_positive = true;
+                if (hit) positive_hit = true;
+            }
+        }
+        return !has_positive or positive_hit;
+    }
+
+    fn archiveEntryGlobs(
+        self: *const JobRunner,
+        archive_rel_path: []const u8,
+        archive_base_name: []const u8,
+    ) []const []const u8 {
+        const globs = self.activeFileGlobs();
+        if (globs.len == 0) return &.{};
+        for (globs) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (trimmed.len == 0) continue;
+            const is_neg = trimmed[0] == '!';
+            const body = if (is_neg) trimmed[1..] else trimmed;
+            if (!is_neg and matchesPathPattern(archive_rel_path, archive_base_name, body)) {
+                return &.{};
+            }
+            if (!hasGlobMetachar(body) or std.mem.indexOfScalar(u8, body, '/') != null) {
+                return &.{};
+            }
+        }
+        return globs;
     }
 
     /// Matches one `@` file/path pattern (case-insensitive):
@@ -1055,16 +1661,92 @@ const JobRunner = struct {
         src_name: []const u8,
         base_name: []const u8,
     ) bool {
-        if (self.req.types.len > 0) {
-            if (!libwebgrep.walk_types.matches(self.req.types, base_name)) return false;
-        }
-        if (self.time_start_ns > 0 or self.time_end_ns > 0) {
-            if (ingestor.parseSealedSegmentTimeRange(base_name)) |seg| {
-                if (self.time_start_ns > 0 and seg.max_ns < self.time_start_ns) return false;
-                if (self.time_end_ns > 0 and seg.min_ns > self.time_end_ns) return false;
-            }
+        const is_archive = (detectArchiveFormat(base_name) != null);
+        if (!is_archive and (self.types_include.len > 0 or self.types_exclude.len > 0)) {
+            if (!libwebgrep.walk_types.matchesWithTable(
+                self.custom_types_table,
+                self.types_include,
+                self.types_exclude,
+                base_name,
+            )) return false;
         }
         return self.sourceMatchesProjectFilters(src_id, src_name);
+    }
+
+    fn readDirFileBounded(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        max_bytes: usize,
+    ) ?[]u8 {
+        var f = dir.openFile(io, sub_path, .{ .allow_directory = false }) catch return null;
+        defer f.close(io);
+        var rbuf: [4096]u8 = undefined;
+        var f_reader = f.reader(io, &rbuf);
+        return f_reader.interface.allocRemaining(allocator, .limited(max_bytes)) catch null;
+    }
+
+    fn loadDirIgnoreSet(
+        self: *JobRunner,
+        dir: std.Io.Dir,
+        rel_dir: []const u8,
+        parent_ignore: ?*const libwebgrep.walk_ignore.Set,
+    ) ?*const libwebgrep.walk_ignore.Set {
+        if (!self.req.respectIgnore) return null;
+        const max_ig_bytes: usize = 1024 * 1024;
+        const git_exclude_bytes: ?[]u8 = if (rel_dir.len == 0)
+            readDirFileBounded(self.gpa, self.io, dir, ".git/info/exclude", max_ig_bytes)
+        else
+            null;
+        defer if (git_exclude_bytes) |b| self.gpa.free(b);
+
+        const gitignore_bytes = readDirFileBounded(self.gpa, self.io, dir, ".gitignore", max_ig_bytes);
+        defer if (gitignore_bytes) |b| self.gpa.free(b);
+
+        const ignore_bytes = readDirFileBounded(self.gpa, self.io, dir, ".ignore", max_ig_bytes);
+        defer if (ignore_bytes) |b| self.gpa.free(b);
+
+        const rgignore_bytes = readDirFileBounded(self.gpa, self.io, dir, ".rgignore", max_ig_bytes);
+        defer if (rgignore_bytes) |b| self.gpa.free(b);
+
+        if (git_exclude_bytes == null and gitignore_bytes == null and ignore_bytes == null and rgignore_bytes == null) {
+            return parent_ignore;
+        }
+
+        var ig_list: std.ArrayList(libwebgrep.walk_glob.Glob) = .empty;
+
+        libwebgrep.walk_ignore.parseLayerInto(
+            self.job_arena,
+            .{
+                .git_exclude = git_exclude_bytes,
+                .gitignore = gitignore_bytes,
+                .ignore = ignore_bytes,
+                .rgignore = rgignore_bytes,
+            },
+            .{
+                .vcs = true,
+                .dot = true,
+                .exclude = (rel_dir.len == 0),
+                .max_rules = EngineLimits.max_glob_rules,
+                .max_rule_len = EngineLimits.max_glob_rule_len,
+                .max_brace_depth = EngineLimits.max_glob_brace_depth,
+            },
+            &ig_list,
+        ) catch return parent_ignore;
+
+        if (ig_list.items.len == 0) return parent_ignore;
+
+        const set_ptr = self.job_arena.create(libwebgrep.walk_ignore.Set) catch return parent_ignore;
+        set_ptr.* = libwebgrep.walk_ignore.build(
+            self.job_arena,
+            self.gpa,
+            parent_ignore,
+            rel_dir.len,
+            &.{},
+            ig_list.items,
+        ) catch return parent_ignore;
+        return set_ptr;
     }
 
     fn walkDirectoryForSource(
@@ -1076,8 +1758,22 @@ const JobRunner = struct {
         effective_contains: []const []const u8,
         effective_excludes: []const []const u8,
         rel_dir: []const u8,
+        parent_ignore: ?*const libwebgrep.walk_ignore.Set,
+        line_tp: *const time_parser.CompiledTimeParser,
+        task_time_mode: time_parser.TimeMode,
     ) !void {
         if (self.shouldStop()) return;
+
+        const dir_fid: ?libwebgrep.walk_file_id.Id = libwebgrep.walk_file_id.fromDir(dir) catch null;
+        if (dir_fid) |fid| {
+            if (fid.ino != 0) {
+                const gop = try self.visited_dir_ids.getOrPut(self.job_arena, fid);
+                if (gop.found_existing) return;
+            }
+        }
+
+        const active_ignore = self.loadDirIgnoreSet(dir, rel_dir, parent_ignore);
+        var ignore_scratch: [4096]u8 = undefined;
 
         var dir_arena_state = std.heap.ArenaAllocator.init(self.gpa);
         defer dir_arena_state.deinit();
@@ -1108,6 +1804,7 @@ const JobRunner = struct {
                         entries.appendAssumeCapacity(.{
                             .name = ce.name,
                             .is_dir = ce.is_dir,
+                            .is_symlink = false,
                         });
                     }
                     loaded_from_dir_cache = true;
@@ -1134,8 +1831,10 @@ const JobRunner = struct {
 
                     var is_dir = item.kind == .directory;
                     var is_file = item.kind == .file;
+                    var is_symlink = false;
                     if (item.kind == .sym_link or item.kind == .unknown) {
                         has_symlink = true;
+                        is_symlink = (item.kind == .sym_link);
                         const st = dir.statFile(self.io, item.name, .{}) catch continue;
                         is_dir = st.kind == .directory;
                         is_file = st.kind == .file;
@@ -1146,6 +1845,7 @@ const JobRunner = struct {
                     try entries.append(dir_arena, .{
                         .name = name_copy,
                         .is_dir = is_dir,
+                        .is_symlink = is_symlink,
                     });
                 }
             }
@@ -1183,6 +1883,12 @@ const JobRunner = struct {
             else
                 try std.fmt.allocPrint(dir_arena, "{s}/{s}", .{ rel_dir, entry.name });
 
+            if (active_ignore) |ig_set| {
+                if (libwebgrep.walk_ignore.isIgnored(ig_set, child_rel, entry.is_dir, &ignore_scratch)) {
+                    continue;
+                }
+            }
+
             if (entry.is_dir) {
                 var sub_dir = dir.openDir(self.io, entry.name, .{ .iterate = true }) catch continue;
                 defer sub_dir.close(self.io);
@@ -1195,6 +1901,9 @@ const JobRunner = struct {
                     effective_contains,
                     effective_excludes,
                     child_rel,
+                    active_ignore,
+                    line_tp,
+                    task_time_mode,
                 );
             } else {
                 const virtual_rel = if (src_name.len > 0)
@@ -1205,6 +1914,25 @@ const JobRunner = struct {
                 if (!self.fileMatchesSourceFilters(src_id, src_name, entry.name)) continue;
 
                 const st = dir.statFile(self.io, entry.name, .{}) catch continue;
+
+                const file_fid: ?libwebgrep.walk_file_id.Id = if (entry.is_symlink) blk_sym: {
+                    var sym_f = dir.openFile(self.io, entry.name, .{ .allow_directory = false }) catch break :blk_sym null;
+                    defer sym_f.close(self.io);
+                    break :blk_sym libwebgrep.walk_file_id.fromFile(self.io, sym_f) catch null;
+                } else if (st.inode != 0)
+                    libwebgrep.walk_file_id.Id{
+                        .dev = if (dir_fid) |df| df.dev else 0,
+                        .ino = @intCast(st.inode),
+                    }
+                else
+                    null;
+
+                if (file_fid) |ffid| {
+                    if (ffid.ino != 0) {
+                        const fgop = try self.visited_file_ids.getOrPut(self.job_arena, ffid);
+                        if (fgop.found_existing) continue;
+                    }
+                }
 
                 try self.enqueueTask(
                     parent_root_override,
@@ -1218,6 +1946,8 @@ const JobRunner = struct {
                     st.mtime.nanoseconds,
                     st.size,
                     st.inode,
+                    line_tp,
+                    task_time_mode,
                 );
             }
         }
@@ -1286,6 +2016,101 @@ const JobRunner = struct {
         }
     }
 
+    fn runWaterFillingForSubset(self: *JobRunner, subset_indices: []const usize, use_soft_quota: bool) void {
+        if (subset_indices.len == 0 or self.shouldStop()) return;
+
+        const max_res = self.req.maxResults;
+        const init_cur = self.total_matches.load(.acquire);
+        if (max_res > 0 and init_cur >= max_res) return;
+
+        self.active_task_indices.clearRetainingCapacity();
+        for (subset_indices) |idx| {
+            self.active_task_indices.appendAssumeCapacity(idx);
+        }
+
+        if (!use_soft_quota or max_res == 0 or subset_indices.len == 1) {
+            for (subset_indices) |idx| {
+                self.file_tasks.items[idx].soft_quota = 0;
+            }
+        } else {
+            const remaining_init = max_res - init_cur;
+            var subset_heat: u64 = 0;
+            for (subset_indices) |idx| {
+                subset_heat +|= self.file_tasks.items[idx].heat_score;
+            }
+            if (subset_heat == 0) subset_heat = 1;
+            const sub_n: u64 = @intCast(subset_indices.len);
+            const min_floor: u64 = @min(remaining_init, @max(@as(u64, 1), remaining_init / @max(@as(u64, 1), sub_n * 2)));
+            for (subset_indices) |idx| {
+                var t = &self.file_tasks.items[idx];
+                const raw_share = (remaining_init * t.heat_score) / subset_heat;
+                t.soft_quota = @max(min_floor, @min(remaining_init, raw_share));
+            }
+        }
+
+        // Phase 1: Heat-prioritized initial proportional pass across subset candidate files
+        self.executeWorkerPass();
+
+        // Phase 2+: Iterative Dynamic Density-Weighted Water-Filling for subset files that hit their soft quota
+        while (!self.shouldStop()) {
+            const cur_total = self.total_matches.load(.acquire);
+            if (max_res > 0 and cur_total >= max_res) break;
+
+            self.active_task_indices.clearRetainingCapacity();
+            for (subset_indices) |idx| {
+                var t = &self.file_tasks.items[idx];
+                if (t.paused_at_soft_quota) {
+                    const denom = @max(@as(u64, 4096), t.phase_bytes);
+                    const density_heat = @min(@as(u64, 2000), (t.emitted_in_file * 1024 * 1024) / denom);
+                    t.heat_score = t.base_heat + density_heat;
+                    self.active_task_indices.appendAssumeCapacity(idx);
+                }
+            }
+
+            const overflow_count = self.active_task_indices.items.len;
+            if (overflow_count == 0) break;
+
+            const IndexSortCtx = struct {
+                tasks: []const FileTask,
+                pub fn lessThan(ctx: @This(), a_idx: usize, b_idx: usize) bool {
+                    return FileTask.hotterThan({}, ctx.tasks[a_idx], ctx.tasks[b_idx]);
+                }
+            };
+            std.mem.sort(
+                usize,
+                self.active_task_indices.items,
+                IndexSortCtx{ .tasks = self.file_tasks.items },
+                IndexSortCtx.lessThan,
+            );
+
+            if (max_res == 0 or overflow_count == 1) {
+                for (self.active_task_indices.items) |idx| {
+                    self.file_tasks.items[idx].soft_quota = 0;
+                }
+            } else {
+                const remaining = max_res - cur_total;
+                var active_heat_sum: u64 = 0;
+                for (self.active_task_indices.items) |idx| {
+                    active_heat_sum +|= self.file_tasks.items[idx].heat_score;
+                }
+                if (active_heat_sum == 0) active_heat_sum = 1;
+
+                var allocated: u64 = 0;
+                for (self.active_task_indices.items, 0..) |idx, k| {
+                    var t = &self.file_tasks.items[idx];
+                    const share = if (k + 1 == overflow_count)
+                        (if (remaining > allocated) remaining - allocated else 1)
+                    else
+                        @max(@as(u64, 1), (remaining * t.heat_score) / active_heat_sum);
+                    allocated +|= share;
+                    t.soft_quota = t.emitted_in_file + share;
+                }
+            }
+
+            self.executeWorkerPass();
+        }
+    }
+
     fn executeWorkerPass(self: *JobRunner) void {
         const active_count = self.active_task_indices.items.len;
         if (active_count == 0 or self.shouldStop()) return;
@@ -1334,18 +2159,22 @@ const JobRunner = struct {
         hasher.update("\x00");
         hasher.update(self.req.case);
         hasher.update("\x00");
-        const flags: [6]u8 = .{
+        const flags: [5]u8 = .{
             @intFromBool(self.req.wholeWord),
             @intFromBool(self.req.wholeLine),
             @intFromBool(self.req.invert),
             @intFromBool(self.req.hidden),
             @intFromBool(self.req.respectIgnore),
-            @intCast(self.req.context & 0xff),
         };
         hasher.update(&flags);
+        hasher.update(std.mem.asBytes(&self.req.context));
         hasher.update(std.mem.asBytes(&self.req.maxResults));
+        hasher.update(std.mem.asBytes(&self.req.nearbyLines));
         hasher.update(std.mem.asBytes(&self.time_start_ns));
         hasher.update(std.mem.asBytes(&self.time_end_ns));
+        hasher.update(self.time_mode.asStr());
+        hasher.update(self.time_format_sig);
+        hasher.update(std.mem.asBytes(&self.tz_offset_min));
         if (self.req.replacement) |rep| {
             hasher.update(rep);
         }
@@ -1361,6 +2190,21 @@ const JobRunner = struct {
         }
         hasher.update("\x00");
         for (self.req.globs) |s| {
+            hasher.update(s);
+            hasher.update("\xff");
+        }
+        hasher.update("\x00");
+        for (self.req.fileGlobs) |s| {
+            hasher.update(s);
+            hasher.update("\xff");
+        }
+        hasher.update("\x00");
+        for (self.req.types) |s| {
+            hasher.update(s);
+            hasher.update("\xff");
+        }
+        hasher.update("\x00");
+        for (self.req.sources) |s| {
             hasher.update(s);
             hasher.update("\xff");
         }
@@ -1420,6 +2264,9 @@ const JobRunner = struct {
                     e.max_results != self.req.maxResults or
                     e.time_start_ns != self.time_start_ns or
                     e.time_end_ns != self.time_end_ns or
+                    !std.mem.eql(u8, e.time_mode, self.time_mode.asStr()) or
+                    !std.mem.eql(u8, e.time_format_sig, self.time_format_sig) or
+                    e.tz_offset_min != self.tz_offset_min or
                     e.whole_word != self.req.wholeWord or
                     e.whole_line != self.req.wholeLine or
                     e.invert != self.req.invert or
@@ -1520,15 +2367,8 @@ const JobRunner = struct {
         parsed_case: libwebgrep.CaseMode,
         default_case_insensitive: bool,
     ) bool {
-        if (self.time_start_ns > 0 or self.time_end_ns > 0) {
-            const fallback_year: u16 = if (task.mtime_ns > 0)
-                ingestor.currentYearUtc(@intCast(@max(0, task.mtime_ns)))
-            else
-                2026;
-            if (ingestor.parseUniversalLineTimestampNs(line_text, fallback_year)) |line_ns| {
-                if (self.time_start_ns > 0 and line_ns < self.time_start_ns) return false;
-                if (self.time_end_ns > 0 and line_ns > self.time_end_ns) return false;
-            } else if (task.mtime_ns > 0) {
+        if ((self.time_start_ns > 0 or self.time_end_ns > 0) and task.task_time_mode == .mtime) {
+            if (task.mtime_ns > 0) {
                 const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
                 if (self.time_start_ns > 0 and mtime_u64 < self.time_start_ns) return false;
                 if (self.time_end_ns > 0 and mtime_u64 > self.time_end_ns) return false;
@@ -1568,8 +2408,7 @@ const JobRunner = struct {
         }
         _ = default_case_insensitive;
         switch (self.matcher.*) {
-            .literal => |f_val| {
-                var f = f_val;
+            .literal => |*f| {
                 if (f.find(line_text, 0, .leftmost_first) == null) return false;
             },
             .multi => |*m| {
@@ -1582,6 +2421,33 @@ const JobRunner = struct {
         return true;
     }
 
+    fn computeArchiveFilterHash(self: *const JobRunner) u64 {
+        var hasher = std.hash.Wyhash.init(0x7a69675f61726368);
+        const flags: [2]u8 = .{
+            @intFromBool(self.req.hidden),
+            @intFromBool(self.req.respectIgnore),
+        };
+        hasher.update(&flags);
+        hasher.update("\x00");
+        for (self.req.types) |s| {
+            hasher.update(s);
+            hasher.update("\xff");
+        }
+        hasher.update("\x00");
+        for (self.activeFileGlobs()) |s| {
+            hasher.update(s);
+            hasher.update("\xff");
+        }
+        return hasher.final();
+    }
+
+    fn isArchiveUnrestricted(self: *const JobRunner) bool {
+        return self.req.types.len == 0 and
+            self.activeFileGlobs().len == 0 and
+            self.req.hidden and
+            !self.req.respectIgnore;
+    }
+
     fn tryFilterSupersetCache(self: *JobRunner, exact_hash: u64, tasks_fingerprint: u64, heat_epoch: u64) bool {
         const reg = self.registry orelse return false;
         if (self.req.invert or self.req.context > 0) return false;
@@ -1589,6 +2455,15 @@ const JobRunner = struct {
 
         const total_files = self.file_tasks.items.len;
         if (total_files == 0) return false;
+
+        var has_archive_task = false;
+        for (self.file_tasks.items) |ft| {
+            if (ft.archive_format != null) {
+                has_archive_task = true;
+                break;
+            }
+        }
+        const cur_arch_hash = self.computeArchiveFilterHash();
 
         const parsed_case = parseCaseMode(self.req.case);
         const is_case_insensitive = switch (parsed_case) {
@@ -1617,6 +2492,7 @@ const JobRunner = struct {
                 if (e.whole_word != self.req.wholeWord or e.whole_line != self.req.wholeLine) continue;
                 if (!std.mem.eql(u8, e.mode, self.req.mode)) continue;
                 if (!std.mem.eql(u8, e.case_mode, self.req.case)) continue;
+                if (has_archive_task and e.archive_filter_hash != cur_arch_hash and !e.archive_unrestricted) continue;
 
                 const exact_pat = std.mem.eql(u8, e.pattern, self.req.pattern);
                 if (!exact_pat) {
@@ -1637,9 +2513,19 @@ const JobRunner = struct {
                 }
                 if (!sliceIsSubset(e.contains, self.req.contains)) continue;
                 if (!sliceIsSubset(e.excludes, self.req.excludes)) continue;
-                // Superset time range must cover the requested time range
-                if (e.time_start_ns > self.time_start_ns) continue;
-                if (e.time_end_ns != 0 and (self.time_end_ns == 0 or e.time_end_ns < self.time_end_ns)) continue;
+                if (!std.mem.eql(u8, e.time_mode, self.time_mode.asStr())) continue;
+                if (!std.mem.eql(u8, e.time_format_sig, self.time_format_sig)) continue;
+                if (e.tz_offset_min != self.tz_offset_min) continue;
+                if (self.is_empty_text_time_browse) continue;
+                if ((e.time_start_ns > 0 or e.time_end_ns > 0) and e.pattern.len == 0 and e.contains.len == 0 and e.excludes.len == 0 and !e.invert) continue;
+                if (self.time_mode != .mtime) {
+                    // For .source/.content/.auto, exact window match preserves multi-line stack-trace inheritance
+                    if (e.time_start_ns != self.time_start_ns or e.time_end_ns != self.time_end_ns) continue;
+                } else {
+                    // Superset time range must cover the requested time range
+                    if (e.time_start_ns > self.time_start_ns) continue;
+                    if (e.time_end_ns != 0 and (self.time_end_ns == 0 or e.time_end_ns < self.time_end_ns)) continue;
+                }
 
                 // Strong Consistency Guard for >4096-byte long lines / lossy UTF-8 lines:
                 // If predicates changed (`pattern`, `contains`, or `excludes`), in-memory filtering on `ci.text`
@@ -1680,7 +2566,7 @@ const JobRunner = struct {
             const sup = best_entry orelse return false;
             const pattern_changed = !std.mem.eql(u8, sup.pattern, self.req.pattern);
             const primary_span_finder: ?libwebgrep.Finder = if (pattern_changed)
-                (libwebgrep.Finder.init(self.req.pattern, .{ .case = parsed_case }) catch return false)
+                (libwebgrep.Finder.init(self.req.pattern, EngineLimits.findOptions(parsed_case)) catch return false)
             else
                 null;
 
@@ -1698,8 +2584,23 @@ const JobRunner = struct {
 
             for (sup.items) |ci| {
                 if (ci.isContext) continue;
-                const task_idx = task_map.get(ci.file) orelse continue;
+                const sep_idx_opt = std.mem.indexOf(u8, ci.file, ARCHIVE_VIRTUAL_SEP);
+                const lookup_path = if (sep_idx_opt) |sep_idx| ci.file[0..sep_idx] else ci.file;
+                const task_idx = task_map.get(lookup_path) orelse continue;
                 const task = &self.file_tasks.items[task_idx];
+                if (sep_idx_opt) |sep_idx| {
+                    const entry_path = ci.file[sep_idx + ARCHIVE_VIRTUAL_SEP.len ..];
+                    const entry_base = std.fs.path.basename(entry_path);
+                    if (self.types_include.len > 0 or self.types_exclude.len > 0) {
+                        if (!libwebgrep.walk_types.matchesWithTable(
+                            self.custom_types_table,
+                            self.types_include,
+                            self.types_exclude,
+                            entry_base,
+                        )) continue;
+                    }
+                    if (!self.archiveEntryMatchesPathGlobs(task.rel_path, task.base_name, entry_path)) continue;
+                }
                 if (!self.lineMatchesTaskPredicates(task, ci.text, parsed_case, is_case_insensitive)) continue;
 
                 const spans: []HitSpan = if (!pattern_changed) blk: {
@@ -1710,10 +2611,10 @@ const JobRunner = struct {
                     break :blk sp_slice;
                 } else blk: {
                     var sp_list: std.ArrayList(HitSpan) = .empty;
-                    var pf = primary_span_finder orelse break :blk &.{};
+                    const pf_ptr = &(primary_span_finder orelse break :blk &.{});
                     var bpos: usize = 0;
                     while (bpos <= ci.text.len) {
-                        const hit = pf.find(ci.text, bpos, .leftmost_first) orelse break;
+                        const hit = pf_ptr.find(ci.text, bpos, .leftmost_first) orelse break;
                         if (hit.start < bpos or hit.end > ci.text.len) break;
                         if (hit.end > hit.start) {
                             sp_list.append(self.job_arena, .{
@@ -2002,6 +2903,17 @@ const JobRunner = struct {
             }
         }
 
+        const tf_sig_copy = if (self.time_format_sig.len > 0)
+            entry_arena.allocator().dupe(u8, self.time_format_sig) catch {
+                entry_arena.deinit();
+                return;
+            }
+        else
+            "";
+
+        const archive_unrestricted = self.isArchiveUnrestricted();
+        const archive_filter_hash = self.computeArchiveFilterHash();
+
         reg.search_cache.mutex.lockUncancelable(self.io);
         defer reg.search_cache.mutex.unlock(self.io);
 
@@ -2024,6 +2936,9 @@ const JobRunner = struct {
             .max_results = self.req.maxResults,
             .time_start_ns = self.time_start_ns,
             .time_end_ns = self.time_end_ns,
+            .time_mode = self.time_mode.asStr(),
+            .time_format_sig = tf_sig_copy,
+            .tz_offset_min = self.tz_offset_min,
             .contains = contains_copy,
             .excludes = excludes_copy,
             .file_mtimes = fm_copy,
@@ -2036,6 +2951,8 @@ const JobRunner = struct {
             .bytes_searched = self.bytes_searched.load(.acquire),
             .limit_hit = self.hit_max_results.load(.acquire),
             .all_lines_exact = !self.had_non_exact_line.load(.acquire),
+            .archive_unrestricted = archive_unrestricted,
+            .archive_filter_hash = archive_filter_hash,
             .approx_bytes = approx_bytes,
             .access_tick = reg.search_cache.tick,
         }) catch {
@@ -2054,9 +2971,8 @@ const JobRunner = struct {
         const exact_hash = self.computeExactQueryHash(tasks_fingerprint, heat_epoch);
 
         // Tier L1: Exact Query Frame Replay Cache (< 0.2ms)
-        // Caches only ever hold strict single-line results, so a cached "0 hits" still has to try the
-        // nearby-lines fallback (its results are never cached, keeping L1/L2 invariants exact).
-        if (self.tryReplayExactCache(exact_hash, tasks_fingerprint, heat_epoch)) {
+        // Live Docker streams append continuously without static (inode, size, mtime), so jobs touching Docker bypass L1/L2/L3.
+        if (!self.has_docker_tasks and self.tryReplayExactCache(exact_hash, tasks_fingerprint, heat_epoch)) {
             self.cache_hit_tier = "exact";
             self.tryNearbyFallbackAfterCache();
             return;
@@ -2065,7 +2981,7 @@ const JobRunner = struct {
         self.prepareHeatAndQuotas();
 
         // Tier L2: Progressive Superset In-Memory Narrowing Cache (< 0.8ms)
-        if (self.tryFilterSupersetCache(exact_hash, tasks_fingerprint, heat_epoch)) {
+        if (!self.has_docker_tasks and self.tryFilterSupersetCache(exact_hash, tasks_fingerprint, heat_epoch)) {
             self.cache_hit_tier = "superset";
             self.tryNearbyFallbackAfterCache();
             return;
@@ -2100,9 +3016,14 @@ const JobRunner = struct {
             .smart => !hasAsciiUpper(self.req.pattern),
         };
 
+        var normal_indices: std.ArrayList(usize) = .empty;
+        var colossal_indices: std.ArrayList(usize) = .empty;
+        normal_indices.ensureTotalCapacity(self.job_arena, total_files) catch return;
+        colossal_indices.ensureTotalCapacity(self.job_arena, total_files) catch return;
+
         for (0..total_files) |idx| {
-            if (can_use_negative_prune and req_literals_len > 0) {
-                const t = &self.file_tasks.items[idx];
+            const t = &self.file_tasks.items[idx];
+            if (!t.isDocker() and can_use_negative_prune and req_literals_len > 0 and (t.archive_format == null or self.isArchiveUnrestricted())) {
                 if (self.registry.?.search_cache.checkFilePrunedByNegativeCache(
                     self.io,
                     t.rel_path,
@@ -2119,76 +3040,22 @@ const JobRunner = struct {
                     continue;
                 }
             }
-            self.active_task_indices.appendAssumeCapacity(idx);
-        }
-
-        // If L3 pruning narrowed active files down to 1, grant it 100% of maxResults in Phase 1 directly
-        if (self.active_task_indices.items.len == 1) {
-            self.file_tasks.items[self.active_task_indices.items[0]].soft_quota = 0;
-        }
-
-        // Phase 1: Heat-prioritized initial proportional pass across active candidate files
-        self.executeWorkerPass();
-
-        // Phase 2+: Iterative Dynamic Density-Weighted Water-Filling for files that hit their soft quota
-        // while global `total_matches < maxResults`.
-        while (!self.shouldStop()) {
-            const max_res = self.req.maxResults;
-            const cur_total = self.total_matches.load(.acquire);
-            if (max_res > 0 and cur_total >= max_res) break;
-
-            self.active_task_indices.clearRetainingCapacity();
-            for (self.file_tasks.items, 0..) |*t, idx| {
-                if (t.paused_at_soft_quota) {
-                    const denom = @max(@as(u64, 4096), t.phase_bytes);
-                    const density_heat = @min(@as(u64, 2000), (t.emitted_in_file * 1024 * 1024) / denom);
-                    t.heat_score = t.base_heat + density_heat;
-                    self.active_task_indices.appendAssumeCapacity(idx);
-                }
-            }
-
-            const overflow_count = self.active_task_indices.items.len;
-            if (overflow_count == 0) break;
-
-            // Sort overflow indices so files with highest (base_heat + match_density) run first
-            const IndexSortCtx = struct {
-                tasks: []const FileTask,
-                pub fn lessThan(ctx: @This(), a_idx: usize, b_idx: usize) bool {
-                    return FileTask.hotterThan({}, ctx.tasks[a_idx], ctx.tasks[b_idx]);
-                }
-            };
-            std.mem.sort(
-                usize,
-                self.active_task_indices.items,
-                IndexSortCtx{ .tasks = self.file_tasks.items },
-                IndexSortCtx.lessThan,
-            );
-
-            if (max_res == 0 or overflow_count == 1) {
-                for (self.active_task_indices.items) |idx| {
-                    self.file_tasks.items[idx].soft_quota = 0;
-                }
+            if (t.isColossal()) {
+                colossal_indices.appendAssumeCapacity(idx);
             } else {
-                const remaining = max_res - cur_total;
-                var active_heat_sum: u64 = 0;
-                for (self.active_task_indices.items) |idx| {
-                    active_heat_sum +|= self.file_tasks.items[idx].heat_score;
-                }
-                if (active_heat_sum == 0) active_heat_sum = 1;
-
-                var allocated: u64 = 0;
-                for (self.active_task_indices.items, 0..) |idx, k| {
-                    var t = &self.file_tasks.items[idx];
-                    const share = if (k + 1 == overflow_count)
-                        (if (remaining > allocated) remaining - allocated else 1)
-                    else
-                        @max(@as(u64, 1), (remaining * t.heat_score) / active_heat_sum);
-                    allocated +|= share;
-                    t.soft_quota = t.emitted_in_file + share;
-                }
+                normal_indices.appendAssumeCapacity(idx);
             }
+        }
 
-            self.executeWorkerPass();
+        // Stage 1: Run complete Phase 1 + Phase 2+ elastic water-filling on normal files (<= 256 MiB) first
+        // so multi-GB files never stall Phase 1 or delay hitting maxResults on normal files.
+        if (normal_indices.items.len > 0) {
+            self.runWaterFillingForSubset(normal_indices.items, true);
+        }
+
+        // Stage 2: If normal files did not exhaust maxResults, scan colossal files (> 256 MiB) without soft_quota pauses.
+        if (!self.shouldStop() and colossal_indices.items.len > 0) {
+            self.runWaterFillingForSubset(colossal_indices.items, false);
         }
 
         // Block-Proximity Fallback (±15 lines):
@@ -2214,11 +3081,15 @@ const JobRunner = struct {
         if (self.pruned_by_negative_cache.load(.acquire)) {
             self.cache_hit_tier = "pruned";
         }
-        if (!self.cancel_flag.load(.acquire) and !self.send_failed.load(.acquire) and !self.had_scan_error.load(.acquire)) {
+        if (!self.has_docker_tasks and !self.cancel_flag.load(.acquire) and !self.send_failed.load(.acquire) and !self.had_scan_error.load(.acquire)) {
+            const final_heat_epoch: u64 = if (self.registry) |reg| reg.getHeatEpoch() else heat_epoch;
             self.should_commit_cache = true;
-            self.pending_exact_hash = exact_hash;
+            self.pending_exact_hash = if (final_heat_epoch == heat_epoch)
+                exact_hash
+            else
+                self.computeExactQueryHash(tasks_fingerprint, final_heat_epoch);
             self.pending_tasks_fingerprint = tasks_fingerprint;
-            self.pending_heat_epoch = heat_epoch;
+            self.pending_heat_epoch = final_heat_epoch;
         }
     }
 
@@ -2231,11 +3102,12 @@ const JobRunner = struct {
 
         var worker = WorkerContext{
             .runner = self,
-            .local_matcher = self.matcher.*,
             .batch_arena = &batch_arena_state,
             .scratch_pool = &scratch_pool,
+            .time_regex_scratch = libwebgrep.RegexScratch.init(self.gpa),
             .last_flush_ts = std.Io.Clock.awake.now(self.io),
         };
+        defer worker.time_regex_scratch.deinit();
         defer worker.batch_items.deinit(self.gpa);
 
         while (!self.shouldStop()) {
@@ -2295,6 +3167,43 @@ const JobRunner = struct {
         }
     }
 
+    fn runnerShouldStopCallback(ctx: *const anyopaque) bool {
+        const self: *const JobRunner = @ptrCast(@alignCast(ctx));
+        return self.shouldStop();
+    }
+
+    fn readBoundedStreamPrefixAlloc(
+        gpa: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        max_bytes: usize,
+    ) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(gpa);
+
+        var chunk: [32768]u8 = undefined;
+        while (buf.items.len < max_bytes) {
+            const want = @min(chunk.len, max_bytes - buf.items.len);
+            const n = docker_logs.readReaderSome(reader, chunk[0..want]) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (n == 0) break;
+            try buf.appendSlice(gpa, chunk[0..n]);
+        }
+
+        if (buf.items.len == max_bytes) {
+            var probe: [1]u8 = undefined;
+            const extra = docker_logs.readReaderSome(reader, &probe) catch 0;
+            if (extra > 0) {
+                if (std.mem.lastIndexOfScalar(u8, buf.items, '\n')) |last_nl| {
+                    buf.shrinkRetainingCapacity(last_nl + 1);
+                }
+            }
+        }
+
+        return buf.toOwnedSlice(gpa);
+    }
+
     fn runBlockProximityFallback(self: *JobRunner) bool {
         const parsed_case = parseCaseMode(self.req.case);
         const max_res = self.req.maxResults;
@@ -2310,8 +3219,10 @@ const JobRunner = struct {
 
         for (self.file_tasks.items) |*task| {
             if (self.shouldStop()) break;
-            if (task.file_size == 0 or task.file_size > max_fallback_file_bytes) continue;
-            if (file_api.hasCompressedExtension(task.base_name)) continue;
+            if (!task.isDocker()) {
+                if (task.file_size == 0 or task.file_size > max_fallback_file_bytes) continue;
+                if (task.archive_format != null or isSingleStreamCompressed(task.base_name)) continue;
+            }
 
             const pos_lit_count = task.effective_contains.len;
             const pos_re_count = self.contains_regexes.len;
@@ -2321,24 +3232,7 @@ const JobRunner = struct {
             var opened_parent: ?std.Io.Dir = null;
             defer if (opened_parent) |*d| d.close(self.io);
 
-            const parent_dir: std.Io.Dir = if (task.parent_dir_path) |p| blk: {
-                opened_parent = std.Io.Dir.cwd().openDir(self.io, p, .{}) catch continue;
-                break :blk opened_parent.?;
-            } else self.root_dir;
-
             var hot_lease: ?search_cache.HotFileLease = null;
-            if (self.registry) |reg| {
-                hot_lease = reg.search_cache.acquireHotFileSlice(
-                    self.io,
-                    task.rel_path,
-                    task.mtime_ns,
-                    task.file_size,
-                    task.inode,
-                    parent_dir,
-                    task.open_sub_path,
-                    search_cache.MAX_HOT_FILE_MAP_BYTES,
-                );
-            }
             defer if (hot_lease) |lease| {
                 self.registry.?.search_cache.releaseHotFileSlice(self.io, lease.slot_idx);
             };
@@ -2346,15 +3240,54 @@ const JobRunner = struct {
             var owned_buf: []u8 = &.{};
             defer if (owned_buf.len > 0) self.gpa.free(owned_buf);
 
-            const raw_slice: []const u8 = if (hot_lease) |lease|
-                lease.slice
-            else blk_read: {
+            const raw_slice: []const u8 = if (task.isDocker()) blk_docker: {
+                var log_reader = docker_logs.DockerLogReader.create(
+                    self.gpa,
+                    self.io,
+                    task.docker_transport.?,
+                    task.docker_container_id,
+                    .{
+                        .max_line_len = EngineLimits.max_line_len,
+                        .cancel_flag = self.cancel_flag,
+                        .stop_ctx = self,
+                        .stop_fn = runnerShouldStopCallback,
+                    },
+                ) catch continue;
+                defer log_reader.destroy();
+                owned_buf = readBoundedStreamPrefixAlloc(
+                    self.gpa,
+                    &log_reader.interface,
+                    @intCast(max_fallback_file_bytes),
+                ) catch continue;
+                break :blk_docker owned_buf;
+            } else blk_fs: {
+                const parent_dir: std.Io.Dir = if (task.parent_dir_path) |p| blk_p: {
+                    opened_parent = std.Io.Dir.cwd().openDir(self.io, p, .{}) catch continue;
+                    break :blk_p opened_parent.?;
+                } else self.root_dir;
+
+                if (self.registry) |reg| {
+                    hot_lease = reg.search_cache.acquireHotFileSlice(
+                        self.io,
+                        task.rel_path,
+                        task.mtime_ns,
+                        task.file_size,
+                        task.inode,
+                        parent_dir,
+                        task.open_sub_path,
+                        search_cache.MAX_HOT_FILE_MAP_BYTES,
+                    );
+                }
+
+                if (hot_lease) |lease| {
+                    break :blk_fs lease.slice;
+                }
                 var file = parent_dir.openFile(self.io, task.open_sub_path, .{ .allow_directory = false }) catch continue;
                 defer file.close(self.io);
                 const alloc_len: usize = @intCast(task.file_size);
                 owned_buf = self.gpa.alloc(u8, alloc_len) catch continue;
                 const n = file.readPositionalAll(self.io, owned_buf, 0) catch continue;
-                break :blk_read owned_buf[0..n];
+                break :blk_fs owned_buf[0..n];
             };
             if (raw_slice.len == 0) continue;
 
@@ -2524,63 +3457,6 @@ const JobRunner = struct {
                 else
                     safe_text;
 
-                var raw_prev: ?[]const u8 = null;
-                {
-                    var p = idx;
-                    while (p > w_start) {
-                        p -= 1;
-                        if (!line_items[p].excluded and (line_items[p].mask & ~li.mask) != 0) {
-                            raw_prev = line_items[p].text;
-                            break;
-                        }
-                    }
-                    if (raw_prev == null) {
-                        var b_steps: usize = 0;
-                        var bp = idx;
-                        while (bp > 0 and b_steps < 3) : (b_steps += 1) {
-                            bp -= 1;
-                            if (std.mem.trim(u8, line_items[bp].text, " \t\r").len > 0) {
-                                raw_prev = line_items[bp].text;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                var raw_next: ?[]const u8 = null;
-                {
-                    var n = idx + 1;
-                    while (n < w_end) : (n += 1) {
-                        if (!line_items[n].excluded and (line_items[n].mask & ~li.mask) != 0) {
-                            raw_next = line_items[n].text;
-                            break;
-                        }
-                    }
-                    if (raw_next == null) {
-                        var f_steps: usize = 0;
-                        var fn_idx = idx + 1;
-                        while (fn_idx < line_items.len and f_steps < 3) : ({
-                            fn_idx += 1;
-                            f_steps += 1;
-                        }) {
-                            if (std.mem.trim(u8, line_items[fn_idx].text, " \t\r").len > 0) {
-                                raw_next = line_items[fn_idx].text;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                const prev_duped: ?[]const u8 = if (raw_prev) |rp| blk: {
-                    const sp = file_api.sanitizeUtf8Truncated(self.job_arena, rp, 240) catch break :blk null;
-                    break :blk if (sp.ptr == rp.ptr) (self.job_arena.dupe(u8, sp) catch null) else sp;
-                } else null;
-
-                const next_duped: ?[]const u8 = if (raw_next) |rn| blk: {
-                    const sn = file_api.sanitizeUtf8Truncated(self.job_arena, rn, 240) catch break :blk null;
-                    break :blk if (sn.ptr == rn.ptr) (self.job_arena.dupe(u8, sn) catch null) else sn;
-                } else null;
-
                 var spans_list: std.ArrayList(HitSpan) = .empty;
                 self.collectAllQueryTermSpans(task, text_duped, parsed_case, &spans_list);
 
@@ -2594,8 +3470,8 @@ const JobRunner = struct {
                     .line = @intCast(idx + 1),
                     .col = col,
                     .text = text_duped,
-                    .prevText = prev_duped,
-                    .nextText = next_duped,
+                    .prevText = null,
+                    .nextText = null,
                     .replaced = null,
                     .isContext = false,
                     .spans = spans_list.items,
@@ -2644,8 +3520,7 @@ const JobRunner = struct {
 
         // 1. Primary matcher spans
         switch (self.matcher.*) {
-            .literal => |f_val| {
-                var f = f_val;
+            .literal => |*f| {
                 var bpos: usize = 0;
                 while (bpos <= text.len) {
                     const hit = f.find(text, bpos, .leftmost_first) orelse break;
@@ -2686,7 +3561,7 @@ const JobRunner = struct {
         // 2. Literal `effective_contains` spans
         for (task.effective_contains) |inc_lit| {
             if (inc_lit.len == 0) continue;
-            var f = libwebgrep.Finder.init(inc_lit, .{ .case = parsed_case }) catch continue;
+            var f = libwebgrep.Finder.init(inc_lit, EngineLimits.findOptions(parsed_case)) catch continue;
             var bpos: usize = 0;
             while (bpos <= text.len) {
                 const hit = f.find(text, bpos, .leftmost_first) orelse break;
@@ -2748,183 +3623,13 @@ const JobRunner = struct {
     }
 };
 
-fn findLineStartAtOrBefore(slice: []const u8, pos: usize) usize {
-    var k = @min(pos, slice.len);
-    while (k > 0) {
-        if (slice[k - 1] == '\n') return k;
-        k -= 1;
-    }
-    return 0;
-}
-
-fn countNewlinesFast(slice: []const u8) u64 {
-    var count: u64 = 0;
-    const Vec32 = @Vector(32, u8);
-    const nl_vec: Vec32 = @splat('\n');
-    var i: usize = 0;
-    while (i + 32 <= slice.len) : (i += 32) {
-        const chunk: Vec32 = slice[i..][0..32].*;
-        const mask: u32 = @bitCast(chunk == nl_vec);
-        count += @popCount(mask);
-    }
-    while (i < slice.len) : (i += 1) {
-        if (slice[i] == '\n') count += 1;
-    }
-    return count;
-}
-
-/// Walks backwards up to 32 lines from `line_start` to find the nearest timestamped parent line
-/// (so multi-line stack traces in Java/Python/Go logs inherit their parent event's timestamp).
-fn findLineTimestampWithLookbehind(slice: []const u8, line_start: usize, fallback_year: u16) ?u64 {
-    if (line_start < slice.len) {
-        if (ingestor.parseUniversalLineTimestampNs(slice[line_start..], fallback_year)) |ns| return ns;
-    }
-    var cur = line_start;
-    var steps: usize = 0;
-    while (cur > 0 and steps < 32) : (steps += 1) {
-        const prev_start = findLineStartAtOrBefore(slice, cur - 1);
-        if (ingestor.parseUniversalLineTimestampNs(slice[prev_start..cur], fallback_year)) |ns| {
-            return ns;
-        }
-        cur = prev_start;
-    }
-    return null;
-}
-
-pub const NarrowedTimeSlice = struct {
-    sub_slice: []const u8,
-    base_line_offset: u64,
-    is_time_series: bool,
-};
-
-/// Performs O(log N) binary search over an `mmap` file slice for any time-series log file
-/// (19-digit ns streams, ISO-8601, RFC3339, Log4j, Slash YMD, Nginx CLF, Syslog, JSONL),
-/// returning the narrowed `[sub_start..sub_end]` slice, `base_line_offset`, and `is_time_series`.
-/// Non-log files (code, HTML, Markdown, plain text) return `is_time_series = false` untouched.
-pub fn narrowMmapSliceByTimeRange(
-    slice: []const u8,
-    start_ns: u64,
-    end_ns: u64,
-) NarrowedTimeSlice {
-    return narrowMmapSliceByTimeRangeWithYear(slice, start_ns, end_ns, 2026);
-}
-
-pub fn narrowMmapSliceByTimeRangeWithYear(
-    slice: []const u8,
-    start_ns: u64,
-    end_ns: u64,
-    fallback_year: u16,
-) NarrowedTimeSlice {
-    if (slice.len < 10) {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
-    }
-
-    // Skip leading blank lines if any
-    var first_pos: usize = 0;
-    while (first_pos < slice.len and (slice[first_pos] == '\n' or slice[first_pos] == '\r')) : (first_pos += 1) {}
-    if (first_pos >= slice.len) {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
-    }
-
-    const first_ns = ingestor.parseUniversalLineTimestampNs(slice[first_pos..], fallback_year) orelse {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
-    };
-
-    // Inspect the last timestamped line near EOF to verify monotonic time-series ordering
-    var end_trim = slice.len;
-    while (end_trim > first_pos and (slice[end_trim - 1] == '\n' or slice[end_trim - 1] == '\r' or slice[end_trim - 1] == ' ')) {
-        end_trim -= 1;
-    }
-    const last_line_start = findLineStartAtOrBefore(slice, end_trim);
-    const last_ns = findLineTimestampWithLookbehind(slice[0..end_trim], last_line_start, fallback_year) orelse {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
-    };
-    if (last_ns < first_ns) {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = false };
-    }
-
-    if (start_ns == 0 and end_ns == 0) {
-        return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
-    }
-
-    // Whole-file range pruning: if [first_ns, last_ns] is completely outside [start_ns, end_ns], skip entire file!
-    if ((start_ns > 0 and last_ns < start_ns) or (end_ns > 0 and first_ns > end_ns)) {
-        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
-    }
-
-    var sub_start: usize = 0;
-    if (start_ns > 0 and first_ns < start_ns) {
-        var lo: usize = 0;
-        var hi: usize = slice.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const line_start = findLineStartAtOrBefore(slice, mid);
-            const line_end = if (std.mem.indexOfScalarPos(u8, slice, line_start, '\n')) |nl|
-                nl + 1
-            else
-                slice.len;
-
-            if (findLineTimestampWithLookbehind(slice, line_start, fallback_year)) |line_ns| {
-                if (line_ns < start_ns) {
-                    lo = line_end;
-                } else {
-                    hi = line_start;
-                }
-            } else {
-                return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
-            }
-        }
-        sub_start = lo;
-    }
-
-    if (sub_start >= slice.len) {
-        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
-    }
-
-    var sub_end: usize = slice.len;
-    if (end_ns > 0 and last_ns > end_ns) {
-        var lo: usize = sub_start;
-        var hi: usize = slice.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            var line_start = findLineStartAtOrBefore(slice, mid);
-            if (line_start < lo) line_start = lo;
-            const line_end = if (std.mem.indexOfScalarPos(u8, slice, line_start, '\n')) |nl|
-                nl + 1
-            else
-                slice.len;
-
-            if (findLineTimestampWithLookbehind(slice, line_start, fallback_year)) |line_ns| {
-                if (line_ns <= end_ns) {
-                    lo = line_end;
-                } else {
-                    hi = line_start;
-                }
-            } else {
-                return .{ .sub_slice = slice, .base_line_offset = 0, .is_time_series = true };
-            }
-        }
-        sub_end = lo;
-    }
-
-    if (sub_start >= sub_end) {
-        return .{ .sub_slice = slice[0..0], .base_line_offset = 0, .is_time_series = true };
-    }
-
-    const base_lines = if (sub_start > 0) countNewlinesFast(slice[0..sub_start]) else 0;
-    return .{
-        .sub_slice = slice[sub_start..sub_end],
-        .base_line_offset = base_lines,
-        .is_time_series = true,
-    };
-}
-
 const WorkerContext = struct {
     runner: *JobRunner,
-    local_matcher: MatcherUnion,
     batch_arena: *std.heap.ArenaAllocator,
     batch_items: std.ArrayList(HitItem) = .empty,
     scratch_pool: *libwebgrep.Scratch,
+    time_regex_scratch: libwebgrep.RegexScratch,
+    time_prefix_cache: time_parser.PrefixEpochCache = .{},
     last_flush_ts: std.Io.Timestamp,
 
     fn searchOneTask(self: *WorkerContext, task: *FileTask) void {
@@ -2944,7 +3649,7 @@ const WorkerContext = struct {
             break :blk opened_parent.?;
         } else self.runner.root_dir;
 
-        const compression: libwebgrep.Compression = if (file_api.hasCompressedExtension(task.base_name))
+        const compression: libwebgrep.Compression = if (isSingleStreamCompressed(task.base_name))
             .auto
         else
             .none;
@@ -2961,12 +3666,15 @@ const WorkerContext = struct {
             .smart => !hasAsciiUpper(self.runner.req.pattern),
         };
 
-        // Strong Consistency Config:
-        // Never cap `max_source_bytes`, `max_request_bytes`, `max_output_bytes`, or `time_budget_ns`!
-        // Files > 64 MiB (e.g. 91 MB, 99 MB, 195 MB, 203 MB logs) must be scanned 100% to EOF without silent truncation.
+        // Strong Consistency Service Config:
+        // Explicitly populate full EngineLimits budgets so `searchSourceSlice` / `resumeSourceSlice`
+        // (which use `serviceConfig` under the hood) never fall back to the 16 MiB default cap!
+        const effective_ctx = @min(self.runner.req.context, EngineLimits.max_context_lines);
         const cfg = libwebgrep.SearchConfig{
             .line_numbers = true,
+            .encoding = .auto,
             .compression = compression,
+            .max_compression_ratio = EngineLimits.max_compression_ratio,
             .whole_word = self.runner.req.wholeWord,
             .whole_line = self.runner.req.wholeLine,
             .invert = self.runner.req.invert,
@@ -2977,23 +3685,26 @@ const WorkerContext = struct {
             .contains_regexes = self.runner.contains_regexes,
             .excludes_regexes = self.runner.excludes_regexes,
             .replacement = replacement,
-            .context = @min(self.runner.req.context, libwebgrep.SearchConfig.context_lines_hard_cap),
+            .context = effective_ctx,
+            .max_context_lines = EngineLimits.max_context_lines,
+            .max_line_len = EngineLimits.max_line_len,
             .buffer_size = libwebgrep.SearchConfig.optimalBufferSize(self.runner.active_worker_count),
             .progress_interval = 512 * 1024,
-            .max_source_bytes = null,
-            .max_request_bytes = null,
-            .max_output_bytes = null,
-            .time_budget_ns = null,
+            .max_source_bytes = EngineLimits.max_source_bytes,
+            .max_request_bytes = EngineLimits.max_request_bytes,
+            .max_output_bytes = EngineLimits.max_output_bytes,
+            .time_budget_ns = EngineLimits.time_budget_ns,
+            .max_decode_bytes = EngineLimits.max_decode_bytes,
+            .max_decompressed_bytes = EngineLimits.max_decompressed_bytes,
+            .max_before_bytes = EngineLimits.max_before_bytes,
+            .max_queued_event_bytes = EngineLimits.max_queued_event_bytes,
             .allocator = self.runner.gpa,
             .decode_allocator = self.runner.gpa,
             .scratch_pool = self.scratch_pool,
             .cancel = self.runner.cancel_flag,
         };
 
-        const fallback_year: u16 = if (task.mtime_ns > 0)
-            ingestor.currentYearUtc(@intCast(@max(0, task.mtime_ns)))
-        else
-            2026;
+        const fallback_ctx = time_parser.FallbackTimeContext.fromMtimeAndTz(task.mtime_ns, self.runner.tz_offset_min);
 
         var sink = FileSink{
             .worker = self,
@@ -3002,12 +3713,22 @@ const WorkerContext = struct {
             .source_id = task.source_id,
             .source_name = task.source_name,
             .case_insensitive = is_case_insensitive,
-            .fallback_year = fallback_year,
+            .fallback_ctx = fallback_ctx,
         };
+
+        if (task.isDocker()) {
+            const task_is_mtime_summary_only_docker = self.runner.is_empty_text_time_browse and task.task_time_mode == .mtime;
+            var docker_local_cfg = cfg;
+            if (task_is_mtime_summary_only_docker) {
+                docker_local_cfg.max_count = 1;
+            }
+            self.searchDockerTask(&sink, task, docker_local_cfg, task_is_mtime_summary_only_docker);
+            return;
+        }
 
         var hot_lease: ?search_cache.HotFileLease = null;
         if (self.runner.registry) |reg| {
-            if (compression == .none and task.file_size > 0) {
+            if (compression == .none and task.archive_format == null and task.file_size > 0) {
                 hot_lease = reg.search_cache.acquireHotFileSlice(
                     self.runner.io,
                     task.rel_path,
@@ -3026,79 +3747,236 @@ const WorkerContext = struct {
 
         const has_time_filter = (self.runner.time_start_ns > 0 or self.runner.time_end_ns > 0);
 
-        const maybe_res = if (hot_lease) |lease| blk_mmap: {
-            var active_slice = lease.slice;
-            sink.full_slice = lease.slice;
-            if (has_time_filter) {
-                const narrowed = narrowMmapSliceByTimeRangeWithYear(
-                    lease.slice,
-                    self.runner.time_start_ns,
-                    self.runner.time_end_ns,
-                    fallback_year,
-                );
-                sink.is_time_series = narrowed.is_time_series;
-                if (narrowed.is_time_series) {
-                    active_slice = narrowed.sub_slice;
-                    sink.base_line_offset = narrowed.base_line_offset;
-                } else if (task.mtime_ns > 0) {
-                    // Document / Code / HTML file: filter at file level via stat.mtime!
-                    const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
-                    if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
-                        (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
-                    {
-                        active_slice = lease.slice[0..0];
-                    }
-                }
-            }
-            if (active_slice.len > 0 and
-                @intFromPtr(active_slice.ptr) >= @intFromPtr(lease.slice.ptr) and
-                @intFromPtr(active_slice.ptr) <= @intFromPtr(lease.slice.ptr) + lease.slice.len)
-            {
-                sink.active_slice_offset = @intFromPtr(active_slice.ptr) - @intFromPtr(lease.slice.ptr);
-            }
-            break :blk_mmap (switch (self.local_matcher) {
-                .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, f, cfg),
-                .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, m, cfg),
-                .regex => |*r| libwebgrep.searchSlice(FileSink, &sink, active_slice, task.rel_path, r, cfg),
-            } catch null);
-        } else blk: {
-            var file = parent_dir.openFile(self.runner.io, task.open_sub_path, .{ .allow_directory = false }) catch {
+        var opened_fallback_file: ?std.Io.File = null;
+        defer if (opened_fallback_file) |*f| f.close(self.runner.io);
+
+        var scoped_mm: ?std.Io.File.MemoryMap = null;
+        defer if (scoped_mm) |*mm| mm.destroy(self.runner.io);
+
+        const max_scoped_map_bytes = if (task.archive_format != null)
+            EngineLimits.max_archive_slice_map_bytes
+        else
+            search_cache.MAX_HOT_FILE_MAP_BYTES;
+
+        const maybe_mapped_slice: ?[]const u8 = if (hot_lease) |lease|
+            lease.slice
+        else if (compression == .none and task.file_size > 0 and task.file_size <= max_scoped_map_bytes) blk_scoped: {
+            const f = parent_dir.openFile(self.runner.io, task.open_sub_path, .{ .allow_directory = false }) catch {
                 self.runner.had_scan_error.store(true, .release);
                 return;
             };
-            defer file.close(self.runner.io);
-            if (compression == .none) {
-                sink.open_file = file;
+            opened_fallback_file = f;
+            if (std.math.cast(usize, task.file_size)) |map_len| {
+                if (map_len > 0) {
+                    if (std.Io.File.MemoryMap.create(self.runner.io, f, .{
+                        .len = map_len,
+                        .protection = .{ .read = true, .write = false },
+                        .populate = false,
+                    })) |mm| {
+                        scoped_mm = mm;
+                        break :blk_scoped scoped_mm.?.memory[0..map_len];
+                    } else |_| {}
+                }
             }
+            break :blk_scoped null;
+        } else null;
 
-            if (has_time_filter and compression == .none) {
-                var peek_buf: [256]u8 = undefined;
-                const peek_n = file.readPositionalAll(self.runner.io, &peek_buf, 0) catch 0;
-                var first_pos: usize = 0;
-                while (first_pos < peek_n and (peek_buf[first_pos] == '\n' or peek_buf[first_pos] == '\r')) : (first_pos += 1) {}
-                sink.is_time_series = first_pos < peek_n and
-                    (ingestor.parseUniversalLineTimestampNs(peek_buf[first_pos..peek_n], fallback_year) != null);
-                if (!sink.is_time_series and task.mtime_ns > 0) {
-                    const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
-                    if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
-                        (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
-                    {
-                        break :blk (switch (self.local_matcher) {
-                            .literal => |*f| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, f, cfg),
-                            .multi => |*m| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, m, cfg),
-                            .regex => |*r| libwebgrep.searchSlice(FileSink, &sink, "", task.rel_path, r, cfg),
-                        } catch null);
-                    }
+        const task_is_mtime_summary_only = self.runner.is_empty_text_time_browse and task.task_time_mode == .mtime;
+        var local_cfg = cfg;
+        if (task_is_mtime_summary_only) {
+            local_cfg.max_count = 1;
+        }
+
+        if (task.archive_format) |archive_fmt| {
+            self.searchArchiveTask(&sink, task, archive_fmt, maybe_mapped_slice, parent_dir, &opened_fallback_file, local_cfg);
+            return;
+        }
+
+        const maybe_res = if (maybe_mapped_slice) |mapped_slice| blk_mmap: {
+            sink.full_mapped_slice = mapped_slice;
+            var full_active_slice = mapped_slice;
+            if (has_time_filter) {
+                switch (task.task_time_mode) {
+                    .mtime => {
+                        sink.check_line_timestamps = false;
+                        if (task.mtime_ns > 0) {
+                            const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                            if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                                (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                            {
+                                full_active_slice = mapped_slice[0..0];
+                            }
+                        }
+                    },
+                    .content => {
+                        const narrowed = time_parser.narrowSliceByTimeParser(
+                            mapped_slice,
+                            task.line_time_parser,
+                            self.runner.time_start_ns,
+                            self.runner.time_end_ns,
+                            fallback_ctx,
+                            &self.time_regex_scratch,
+                            &self.time_prefix_cache,
+                            5 * std.time.ns_per_s,
+                        );
+                        switch (narrowed.status) {
+                            .no_timestamps => {
+                                full_active_slice = mapped_slice[0..0];
+                                sink.check_line_timestamps = false;
+                                sink.file_has_timestamps = false;
+                            },
+                            .ordered_series => {
+                                full_active_slice = narrowed.sub_slice;
+                                sink.sub_start_offset = narrowed.sub_start;
+                                sink.base_line_offset = narrowed.base_line_offset;
+                                sink.check_line_timestamps = true;
+                                sink.file_has_timestamps = true;
+                            },
+                            .unordered_has_ts => {
+                                full_active_slice = mapped_slice;
+                                sink.check_line_timestamps = true;
+                                sink.file_has_timestamps = true;
+                            },
+                        }
+                    },
+                    .auto, .source => {
+                        const narrowed = time_parser.narrowSliceByTimeParser(
+                            mapped_slice,
+                            task.line_time_parser,
+                            self.runner.time_start_ns,
+                            self.runner.time_end_ns,
+                            fallback_ctx,
+                            &self.time_regex_scratch,
+                            &self.time_prefix_cache,
+                            5 * std.time.ns_per_s,
+                        );
+                        switch (narrowed.status) {
+                            .ordered_series => {
+                                full_active_slice = narrowed.sub_slice;
+                                sink.sub_start_offset = narrowed.sub_start;
+                                sink.base_line_offset = narrowed.base_line_offset;
+                                sink.check_line_timestamps = true;
+                                sink.file_has_timestamps = true;
+                            },
+                            .unordered_has_ts => {
+                                full_active_slice = mapped_slice;
+                                sink.check_line_timestamps = true;
+                                sink.file_has_timestamps = true;
+                            },
+                            .no_timestamps => {
+                                sink.check_line_timestamps = false;
+                                sink.file_has_timestamps = false;
+                                if (task.mtime_ns > 0) {
+                                    const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                                    if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                                        (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                                    {
+                                        full_active_slice = mapped_slice[0..0];
+                                    }
+                                }
+                            },
+                        }
+                    },
                 }
             }
 
-            var read_buf: [65536]u8 = undefined;
-            var file_reader = file.reader(self.runner.io, &read_buf);
+            break :blk_mmap self.searchMappedSlice(&sink, task, full_active_slice, local_cfg);
+        } else blk: {
+            var file = if (opened_fallback_file) |f| f else parent_dir.openFile(self.runner.io, task.open_sub_path, .{ .allow_directory = false }) catch {
+                self.runner.had_scan_error.store(true, .release);
+                return;
+            };
+            if (opened_fallback_file == null) {
+                opened_fallback_file = file;
+            }
 
-            break :blk switch (self.local_matcher) {
-                .literal => |*f| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, f, cfg),
-                .multi => |*m| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, m, cfg),
-                .regex => |*r| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, r, cfg),
+            if (has_time_filter) {
+                if (task.task_time_mode == .mtime) {
+                    sink.check_line_timestamps = false;
+                    if (task.mtime_ns > 0) {
+                        const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                        if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                            (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                        {
+                            break :blk (switch (self.runner.matcher.*) {
+                                .literal => |*f| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", f, local_cfg),
+                                .multi => |*m| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", m, local_cfg),
+                                .regex => |*r| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", r, local_cfg),
+                            } catch null);
+                        }
+                    }
+                } else if (compression == .none) {
+                    var peek_buf: [16 * 1024]u8 = undefined;
+                    const peek_n = file.readPositionalAll(self.runner.io, &peek_buf, 0) catch 0;
+                    var has_ts = false;
+                    var pos: usize = 0;
+                    var lines_checked: usize = 0;
+                    while (pos < peek_n and lines_checked < 64) {
+                        while (pos < peek_n and (peek_buf[pos] == '\n' or peek_buf[pos] == '\r')) : (pos += 1) {}
+                        if (pos >= peek_n) break;
+                        const nl = std.mem.indexOfScalarPos(u8, peek_buf[0..peek_n], pos, '\n') orelse peek_n;
+                        const peek_line = peek_buf[pos..nl];
+                        if (peek_line.len > 0) {
+                            lines_checked += 1;
+                            if (task.line_time_parser.parseLine(peek_line, fallback_ctx, &self.time_regex_scratch, &self.time_prefix_cache) != null) {
+                                has_ts = true;
+                                break;
+                            }
+                        }
+                        pos = if (nl < peek_n) nl + 1 else peek_n;
+                    }
+                    sink.file_has_timestamps = has_ts;
+                    if (task.task_time_mode == .content) {
+                        sink.check_line_timestamps = true;
+                        if (!has_ts and self.runner.req.pattern.len == 0) {
+                            break :blk (switch (self.runner.matcher.*) {
+                                .literal => |*f| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", f, local_cfg),
+                                .multi => |*m| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", m, local_cfg),
+                                .regex => |*r| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", r, local_cfg),
+                            } catch null);
+                        }
+                    } else {
+                        sink.check_line_timestamps = has_ts;
+                        if (!has_ts and task.mtime_ns > 0) {
+                            const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                            if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                                (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                            {
+                                break :blk (switch (self.runner.matcher.*) {
+                                    .literal => |*f| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", f, local_cfg),
+                                    .multi => |*m| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", m, local_cfg),
+                                    .regex => |*r| libwebgrep.searchSourceSlice(FileSink, &sink, task.rel_path, "", r, local_cfg),
+                                } catch null);
+                            }
+                        }
+                    }
+                } else {
+                    sink.check_line_timestamps = true;
+                    sink.file_has_timestamps = (task.task_time_mode == .content);
+                }
+            }
+
+            var active_cfg = local_cfg;
+            if (task.paused_result) |*prev| {
+                active_cfg.resume_from = prev.resume_at orelse 0;
+                active_cfg.continuation = &prev.resume_state;
+            }
+
+            if (compression == .none) {
+                break :blk switch (self.runner.matcher.*) {
+                    .literal => |*f| libwebgrep.searcher.searchFile(FileSink, self.runner.gpa, self.runner.io, &sink, file, task.rel_path, f, active_cfg),
+                    .multi => |*m| libwebgrep.searcher.searchFile(FileSink, self.runner.gpa, self.runner.io, &sink, file, task.rel_path, m, active_cfg),
+                    .regex => |*r| libwebgrep.searcher.searchFile(FileSink, self.runner.gpa, self.runner.io, &sink, file, task.rel_path, r, active_cfg),
+                } catch null;
+            }
+
+            var fallback_buf: [65536]u8 = undefined;
+            var file_reader = file.reader(self.runner.io, &fallback_buf);
+
+            break :blk switch (self.runner.matcher.*) {
+                .literal => |*f| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, f, active_cfg),
+                .multi => |*m| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, m, active_cfg),
+                .regex => |*r| libwebgrep.searchReader(FileSink, self.runner.gpa, &sink, &file_reader.interface, task.rel_path, r, active_cfg),
             } catch null;
         };
 
@@ -3113,12 +3991,17 @@ const WorkerContext = struct {
 
         var task_scanned_complete = false;
         if (maybe_res) |res| {
+            if (res.paused) {
+                task.paused_result = res;
+            } else {
+                task.paused_result = null;
+            }
             const bytes = if (res.bytes_searched > 0) res.bytes_searched else res.bytes_read;
             if (bytes > task.phase_bytes) {
                 _ = self.runner.bytes_searched.fetchAdd(bytes - task.phase_bytes, .monotonic);
                 task.phase_bytes = bytes;
             }
-            task_scanned_complete = res.scanned_all and res.soft_error == null and res.limit_hit == .none;
+            task_scanned_complete = (res.scanned_all or res.outcome == .binary_quit or task_is_mtime_summary_only) and res.soft_error == null and res.limit_hit == .none;
             if (!task_scanned_complete and !task.paused_at_soft_quota and !self.runner.shouldStop()) {
                 self.runner.had_scan_error.store(true, .release);
             }
@@ -3131,10 +4014,11 @@ const WorkerContext = struct {
             !self.runner.shouldStop() and
             !task.paused_at_soft_quota and
             !sink.file_had_match and
-            task.emitted_in_file == 0)
+            task.emitted_in_file == 0 and
+            task.archive_format == null)
         {
             if (self.runner.registry) |reg| {
-                const is_plain_literal = switch (self.local_matcher) {
+                const is_plain_literal = switch (self.runner.matcher.*) {
                     .literal => true,
                     else => false,
                 };
@@ -3170,10 +4054,271 @@ const WorkerContext = struct {
         }
     }
 
+    fn searchDockerTask(
+        self: *WorkerContext,
+        sink: *FileSink,
+        task: *FileTask,
+        local_cfg: libwebgrep.SearchConfig,
+        task_is_mtime_summary_only: bool,
+    ) void {
+        const has_time_filter = (self.runner.time_start_ns > 0 or self.runner.time_end_ns > 0);
+        if (has_time_filter) {
+            if (task.task_time_mode == .mtime) {
+                sink.check_line_timestamps = false;
+                sink.file_has_timestamps = false;
+            } else {
+                sink.check_line_timestamps = true;
+                sink.file_has_timestamps = true;
+            }
+        }
+
+        // Push `[since, until]` bounds down to `/containers/{id}/logs` ONLY when auto-detecting
+        // RFC3339Nano content timestamps (matching frontend `/api/file?since=` so 1-based line numbers align 1:1).
+        const can_push_time = has_time_filter and
+            task.docker_allow_time_pushdown and
+            task.task_time_mode != .mtime and
+            task.line_time_parser.mode == .auto;
+        const since_sec: ?u64 = if (can_push_time and self.runner.time_start_ns > 0) blk_s: {
+            const s = (self.runner.time_start_ns / std.time.ns_per_s) -| 2;
+            break :blk_s if (s > 0) s else null;
+        } else null;
+        const until_sec: ?u64 = if (can_push_time and self.runner.time_end_ns > 0)
+            (self.runner.time_end_ns / std.time.ns_per_s) +| 2
+        else
+            null;
+
+        var log_reader = docker_logs.DockerLogReader.create(
+            self.runner.gpa,
+            self.runner.io,
+            task.docker_transport.?,
+            task.docker_container_id,
+            .{
+                .since_sec = since_sec,
+                .until_sec = until_sec,
+                .max_line_len = EngineLimits.max_line_len,
+                .cancel_flag = self.runner.cancel_flag,
+                .stop_ctx = self.runner,
+                .stop_fn = JobRunner.runnerShouldStopCallback,
+            },
+        ) catch |err| {
+            if (err == error.ContainerNotFound or err == error.LogsUnsupportedByDriver) {
+                if (!task.counted_file_searched) {
+                    task.counted_file_searched = true;
+                    _ = self.runner.files_searched.fetchAdd(1, .monotonic);
+                }
+                return;
+            }
+            if (err != error.Canceled and !self.runner.shouldStop()) {
+                self.runner.had_scan_error.store(true, .release);
+            }
+            return;
+        };
+        defer log_reader.destroy();
+
+        var docker_cfg = local_cfg;
+        docker_cfg.compression = .none;
+
+        const maybe_res: ?libwebgrep.Result = switch (self.runner.matcher.*) {
+            .literal => |*f| libwebgrep.searchSource(FileSink, self.runner.gpa, sink, &log_reader.interface, task.rel_path, f, docker_cfg) catch null,
+            .multi => |*m| libwebgrep.searchSource(FileSink, self.runner.gpa, sink, &log_reader.interface, task.rel_path, m, docker_cfg) catch null,
+            .regex => |*r| libwebgrep.searchSource(FileSink, self.runner.gpa, sink, &log_reader.interface, task.rel_path, r, docker_cfg) catch null,
+        };
+
+        if (!task.counted_file_searched) {
+            task.counted_file_searched = true;
+            _ = self.runner.files_searched.fetchAdd(1, .monotonic);
+        }
+        if (!task.counted_file_matched and (sink.file_had_match or task.emitted_in_file > 0)) {
+            task.counted_file_matched = true;
+            _ = self.runner.files_matched.fetchAdd(1, .monotonic);
+        }
+
+        if (maybe_res) |res| {
+            const bytes = if (res.bytes_searched > 0) res.bytes_searched else res.bytes_read;
+            if (bytes > task.phase_bytes) {
+                _ = self.runner.bytes_searched.fetchAdd(bytes - task.phase_bytes, .monotonic);
+                task.phase_bytes = bytes;
+            }
+            const ok = (res.scanned_all or res.outcome == .binary_quit or task_is_mtime_summary_only) and
+                res.soft_error == null and
+                res.limit_hit == .none and
+                !log_reader.had_error;
+            if (!ok and !self.runner.shouldStop()) {
+                self.runner.had_scan_error.store(true, .release);
+            }
+        } else if (!self.runner.shouldStop()) {
+            self.runner.had_scan_error.store(true, .release);
+        }
+
+        if (!self.runner.shouldStop()) {
+            self.maybeFlushStreaming(true);
+            self.runner.maybeSendProgress(0);
+        }
+    }
+
+    fn searchMappedSlice(
+        self: *WorkerContext,
+        sink: *FileSink,
+        task: *FileTask,
+        full_active_slice: []const u8,
+        cfg: libwebgrep.SearchConfig,
+    ) ?libwebgrep.Result {
+        if (task.paused_result) |prev| {
+            return (switch (self.runner.matcher.*) {
+                .literal => |*f| libwebgrep.resumeSourceSlice(FileSink, sink, task.rel_path, full_active_slice, f, cfg, prev),
+                .multi => |*m| libwebgrep.resumeSourceSlice(FileSink, sink, task.rel_path, full_active_slice, m, cfg, prev),
+                .regex => |*r| libwebgrep.resumeSourceSlice(FileSink, sink, task.rel_path, full_active_slice, r, cfg, prev),
+            } catch null);
+        }
+        return (switch (self.runner.matcher.*) {
+            .literal => |*f| libwebgrep.searchSourceSlice(FileSink, sink, task.rel_path, full_active_slice, f, cfg),
+            .multi => |*m| libwebgrep.searchSourceSlice(FileSink, sink, task.rel_path, full_active_slice, m, cfg),
+            .regex => |*r| libwebgrep.searchSourceSlice(FileSink, sink, task.rel_path, full_active_slice, r, cfg),
+        } catch null);
+    }
+
+    fn searchArchiveTask(
+        self: *WorkerContext,
+        sink: *FileSink,
+        task: *FileTask,
+        archive_fmt: libwebgrep.ArchiveFormat,
+        maybe_mapped_slice: ?[]const u8,
+        parent_dir: std.Io.Dir,
+        opened_fallback_file: *?std.Io.File,
+        cfg: libwebgrep.SearchConfig,
+    ) void {
+        if ((self.runner.time_start_ns > 0 or self.runner.time_end_ns > 0) and task.task_time_mode == .mtime) {
+            if (task.mtime_ns > 0) {
+                const mtime_u64: u64 = @intCast(@max(0, task.mtime_ns));
+                if ((self.runner.time_start_ns > 0 and mtime_u64 < self.runner.time_start_ns) or
+                    (self.runner.time_end_ns > 0 and mtime_u64 > self.runner.time_end_ns))
+                {
+                    if (!task.counted_file_searched) {
+                        task.counted_file_searched = true;
+                        _ = self.runner.files_searched.fetchAdd(1, .monotonic);
+                    }
+                    return;
+                }
+            }
+        }
+
+        var archive_search_cfg = cfg;
+        archive_search_cfg.compression = .none;
+        const has_time_filter = (self.runner.time_start_ns > 0 or self.runner.time_end_ns > 0);
+        if (has_time_filter and task.task_time_mode != .mtime) {
+            sink.check_line_timestamps = true;
+            sink.file_has_timestamps = (task.task_time_mode == .content);
+        }
+
+        const tree_cfg = libwebgrep.TreeConfig{
+            .search = archive_search_cfg,
+            .archive = EngineLimits.archiveOptions(archive_fmt),
+            .globs = self.runner.archiveEntryGlobs(task.rel_path, task.base_name),
+            .iglob = true,
+            .types = self.runner.types_include,
+            .types_not = self.runner.types_exclude,
+            .custom_types = self.runner.custom_types_table,
+            .respect_gitignore = self.runner.req.respectIgnore,
+            .respect_ignore = self.runner.req.respectIgnore,
+            .respect_rgignore = self.runner.req.respectIgnore,
+            .hidden = self.runner.req.hidden,
+            .max_entries = EngineLimits.max_archive_entries,
+            .max_filesize = EngineLimits.max_archive_entry_bytes,
+            .max_glob_rules = EngineLimits.max_glob_rules,
+            .max_glob_rule_len = EngineLimits.max_glob_rule_len,
+            .max_glob_brace_depth = EngineLimits.max_glob_brace_depth,
+        };
+
+        const maybe_summary: ?libwebgrep.Summary = if (maybe_mapped_slice) |slice| blk_slice: {
+            break :blk_slice (switch (self.runner.matcher.*) {
+                .literal => |*f| libwebgrep.searchArchiveSlice(FileSink, self.runner.gpa, self.runner.io, sink, slice, f, tree_cfg),
+                .multi => |*m| libwebgrep.searchArchiveSlice(FileSink, self.runner.gpa, self.runner.io, sink, slice, m, tree_cfg),
+                .regex => |*r| libwebgrep.searchArchiveSlice(FileSink, self.runner.gpa, self.runner.io, sink, slice, r, tree_cfg),
+            } catch null);
+        } else blk_stream: {
+            var file = if (opened_fallback_file.*) |f| f else parent_dir.openFile(self.runner.io, task.open_sub_path, .{ .allow_directory = false }) catch {
+                self.runner.had_scan_error.store(true, .release);
+                return;
+            };
+            if (opened_fallback_file.* == null) {
+                opened_fallback_file.* = file;
+            }
+            var archive_buf: [65536]u8 = undefined;
+            var file_reader = file.reader(self.runner.io, &archive_buf);
+            break :blk_stream (switch (self.runner.matcher.*) {
+                .literal => |*f| libwebgrep.searchArchive(FileSink, self.runner.gpa, self.runner.io, sink, &file_reader.interface, f, tree_cfg),
+                .multi => |*m| libwebgrep.searchArchive(FileSink, self.runner.gpa, self.runner.io, sink, &file_reader.interface, m, tree_cfg),
+                .regex => |*r| libwebgrep.searchArchive(FileSink, self.runner.gpa, self.runner.io, sink, &file_reader.interface, r, tree_cfg),
+            } catch null);
+        };
+
+        if (!task.counted_file_searched) {
+            task.counted_file_searched = true;
+            _ = self.runner.files_searched.fetchAdd(1, .monotonic);
+        }
+        if (!task.counted_file_matched and (sink.file_had_match or task.emitted_in_file > 0)) {
+            task.counted_file_matched = true;
+            _ = self.runner.files_matched.fetchAdd(1, .monotonic);
+        }
+
+        if (maybe_summary) |summary| {
+            const bytes = if (summary.bytes_searched > 0) summary.bytes_searched else task.file_size;
+            if (bytes > task.phase_bytes) {
+                _ = self.runner.bytes_searched.fetchAdd(bytes - task.phase_bytes, .monotonic);
+                task.phase_bytes = bytes;
+            }
+            if (summary.sources_failed > 0 and !self.runner.shouldStop()) {
+                self.runner.had_scan_error.store(true, .release);
+            } else if (!self.runner.shouldStop() and
+                !sink.file_had_match and
+                task.emitted_in_file == 0 and
+                self.runner.isArchiveUnrestricted())
+            {
+                if (self.runner.registry) |reg| {
+                    const is_plain_literal = switch (self.runner.matcher.*) {
+                        .literal => true,
+                        else => false,
+                    };
+                    if (is_plain_literal and
+                        self.runner.time_start_ns == 0 and
+                        self.runner.time_end_ns == 0 and
+                        std.mem.eql(u8, self.runner.req.mode, "literal") and
+                        !self.runner.req.invert and
+                        !self.runner.req.wholeWord and
+                        !self.runner.req.wholeLine and
+                        task.effective_contains.len == 0 and
+                        task.effective_excludes.len == 0 and
+                        self.runner.contains_regexes.len == 0 and
+                        self.runner.excludes_regexes.len == 0)
+                    {
+                        reg.search_cache.recordZeroHitFile(
+                            self.runner.io,
+                            task.rel_path,
+                            task.mtime_ns,
+                            task.file_size,
+                            task.inode,
+                            task.phase_bytes,
+                            self.runner.req.pattern,
+                            sink.case_insensitive,
+                        );
+                    }
+                }
+            }
+        } else if (!self.runner.shouldStop()) {
+            self.runner.had_scan_error.store(true, .release);
+        }
+
+        if (!self.runner.shouldStop()) {
+            self.maybeFlushStreaming(true);
+            self.runner.maybeSendProgress(0);
+        }
+    }
+
     /// Universal real-time streaming flush rule (identical across literal, multi, and regex modes):
     /// 1. First screen batch (`batches_flushed == 0`): flush immediately on the very first match (`count >= 1`).
-    /// 2. Early batches (`batches_flushed < 4`): flush at 16 items or 16ms.
-    /// 3. Steady streaming (`batches_flushed >= 4`): flush at 64 items or 25ms (~40fps).
+    /// 2. Early batches (`batches_flushed < 4`): flush at 32 items or 16ms.
+    /// 3. Mid batches (`batches_flushed < 12`): flush at 128 items or 25ms.
+    /// 4. Steady high-volume streaming (`batches_flushed >= 12`): flush at 512 items or 35ms (cuts 20k-record frames by 7x).
     fn maybeFlushStreaming(self: *WorkerContext, force_time_check: bool) void {
         const count = self.batch_items.items.len;
         if (count == 0 or self.runner.send_failed.load(.acquire)) return;
@@ -3187,7 +4332,12 @@ const WorkerContext = struct {
             return;
         }
 
-        const item_cap: usize = if (flushed_so_far < 4) 16 else 64;
+        const item_cap: usize = if (flushed_so_far < 4)
+            32
+        else if (flushed_so_far < 12)
+            128
+        else
+            512;
         if (count >= item_cap) {
             _ = self.runner.batches_flushed.fetchAdd(1, .monotonic);
             self.flushBatch() catch {
@@ -3196,11 +4346,13 @@ const WorkerContext = struct {
             return;
         }
 
-        if (force_time_check or flushed_so_far < 4 or count >= 4) {
+        if (force_time_check or flushed_so_far < 4 or count >= 16) {
             const min_ns: i64 = if (flushed_so_far < 4)
                 16 * std.time.ns_per_ms
+            else if (flushed_so_far < 12)
+                25 * std.time.ns_per_ms
             else
-                25 * std.time.ns_per_ms;
+                35 * std.time.ns_per_ms;
             const elapsed_ns = self.last_flush_ts.untilNow(self.runner.io, .awake).toNanoseconds();
             if (elapsed_ns >= min_ns) {
                 _ = self.runner.batches_flushed.fetchAdd(1, .monotonic);
@@ -3275,82 +4427,36 @@ const WorkerContext = struct {
     }
 };
 
-const NeighborLines = struct {
-    prev: ?[]const u8 = null,
-    next: ?[]const u8 = null,
-};
-
-fn extractNeighborLines(slice: []const u8, pos_in_line: usize, partial_head: bool, partial_tail: bool) NeighborLines {
-    if (slice.len == 0 or pos_in_line > slice.len) return .{};
-    const line_start = findLineStartAtOrBefore(slice, pos_in_line);
-    if (line_start == 0 and partial_head) return .{};
-    const line_end = std.mem.indexOfScalarPos(u8, slice, line_start, '\n') orelse slice.len;
-
-    var prev_line: ?[]const u8 = null;
-    var cur_end = line_start;
-    var b_steps: usize = 0;
-    while (cur_end > 0 and b_steps < 3) : (b_steps += 1) {
-        const p_end = cur_end - 1;
-        const p_start = findLineStartAtOrBefore(slice, p_end);
-        if (p_start == 0 and partial_head) break;
-        const cand = std.mem.trimEnd(u8, slice[p_start..p_end], "\r");
-        if (std.mem.trim(u8, cand, " \t").len > 0) {
-            prev_line = cand;
-            break;
-        }
-        cur_end = p_start;
-    }
-
-    var next_line: ?[]const u8 = null;
-    var cur_start = if (line_end < slice.len) line_end + 1 else slice.len;
-    var f_steps: usize = 0;
-    while (cur_start < slice.len and f_steps < 3) : (f_steps += 1) {
-        const n_end_opt = std.mem.indexOfScalarPos(u8, slice, cur_start, '\n');
-        if (n_end_opt == null and partial_tail) break;
-        const n_end = n_end_opt orelse slice.len;
-        const cand = std.mem.trimEnd(u8, slice[cur_start..n_end], "\r");
-        if (std.mem.trim(u8, cand, " \t").len > 0) {
-            next_line = cand;
-            break;
-        }
-        cur_start = if (n_end < slice.len) n_end + 1 else slice.len;
-    }
-
-    return .{ .prev = prev_line, .next = next_line };
-}
-
-fn unwrapOffset(val: anytype) u64 {
-    return switch (@typeInfo(@TypeOf(val))) {
-        .optional => val orelse 0,
-        .int, .comptime_int => @intCast(val),
-        else => 0,
-    };
-}
-
 const FileSink = struct {
     worker: *WorkerContext,
     task: *FileTask,
     rel_path: []const u8,
     source_id: []const u8 = "",
     source_name: []const u8 = "",
+    current_archive_entry: []const u8 = "",
     case_insensitive: bool = true,
     file_had_match: bool = false,
     base_line_offset: u64 = 0,
-    is_time_series: bool = false,
-    fallback_year: u16 = 2026,
+    sub_start_offset: usize = 0,
+    full_mapped_slice: ?[]const u8 = null,
+    check_line_timestamps: bool = false,
+    file_has_timestamps: bool = false,
+    fallback_ctx: time_parser.FallbackTimeContext = .{},
+    has_last_line_ts: bool = false,
     last_line_ns: u64 = 0,
-    full_slice: ?[]const u8 = null,
-    active_slice_offset: usize = 0,
-    open_file: ?std.Io.File = null,
 
-    fn toLineEvent(self: *const FileSink, line: libwebgrep.Line) libwebgrep.LineEvent {
+    pub fn control(self: *const FileSink) libwebgrep.Flow {
+        return if (self.task.paused_at_soft_quota) .pause else .stop;
+    }
+
+    fn toLineEvent(self: *FileSink, line: libwebgrep.Line) libwebgrep.LineEvent {
         const u16_column = if (line.matches.len > 0)
             @as(u64, line.matches[0].u16_start) + 1
         else
             line.u16_column;
         return .{
-            .source_id = self.rel_path,
-            .line_number = (line.number orelse 0) + self.base_line_offset,
+            .source_id = if (self.current_archive_entry.len > 0) self.current_archive_entry else self.rel_path,
+            .line_number = line.number orelse 0,
             .column = line.column,
             .u16_column = u16_column,
             .absolute_offset = line.offset,
@@ -3368,11 +4474,11 @@ const FileSink = struct {
     }
 
     pub fn matched(self: *FileSink, line: libwebgrep.Line) bool {
-        return self.event(.{ .match = self.toLineEvent(line) });
+        return self.event(.{ .match = self.toLineEvent(line) }) == .cont;
     }
 
     pub fn context(self: *FileSink, line: libwebgrep.Line) bool {
-        return self.event(.{ .context = self.toLineEvent(line) });
+        return self.event(.{ .context = self.toLineEvent(line) }) == .cont;
     }
 
     pub fn progress(self: *FileSink, bytes_searched: u64, match_count: u64, matched_lines: u64) bool {
@@ -3381,94 +4487,167 @@ const FileSink = struct {
             .bytes_searched = bytes_searched,
             .matches = match_count,
             .matched_lines = matched_lines,
-        } });
+        } }) == .cont;
     }
 
-    pub fn event(self: *FileSink, ev: libwebgrep.Event) bool {
+    pub fn event(self: *FileSink, ev: libwebgrep.Event) libwebgrep.Flow {
         const runner = self.worker.runner;
-        if (runner.shouldStop()) return false;
+        if (runner.shouldStop()) return .stop;
+
+        const is_archive = (self.task.archive_format != null);
 
         switch (ev) {
+            .begin => |b| {
+                self.last_line_ns = 0;
+                self.has_last_line_ts = false;
+                if (is_archive) {
+                    self.current_archive_entry = b.source_id;
+                }
+                return .cont;
+            },
             .match => |line| {
-                const line_no = if (line.line_number > 0) line.line_number else 1;
-                if (line_no <= self.task.resume_after_line) {
-                    return true;
+                const raw_line_no = if (line.line_number > 0) line.line_number else 1;
+                const line_no = raw_line_no + self.base_line_offset;
+                if (!is_archive and line_no <= self.task.resume_after_line) {
+                    return .cont;
                 }
 
-                if ((runner.time_start_ns > 0 or runner.time_end_ns > 0) and self.is_time_series) {
+                if (is_archive) {
+                    const entry_path = if (line.source_id.len > 0) line.source_id else self.current_archive_entry;
+                    if (!runner.archiveEntryMatchesPathGlobs(self.rel_path, self.task.base_name, entry_path)) {
+                        return .cont;
+                    }
+                }
+
+                if ((runner.time_start_ns > 0 or runner.time_end_ns > 0) and self.check_line_timestamps) {
                     const raw_text = if (line.text.len > 0) line.text else line.bytes;
-                    const line_ns = ingestor.parseUniversalLineTimestampNs(raw_text, self.fallback_year) orelse self.last_line_ns;
-                    if (line_ns > 0) {
+                    var maybe_line_ns = self.task.line_time_parser.parseLine(
+                        raw_text,
+                        self.fallback_ctx,
+                        &self.worker.time_regex_scratch,
+                        &self.worker.time_prefix_cache,
+                    );
+                    if (maybe_line_ns == null and !is_archive) {
+                        if (self.full_mapped_slice) |mapped| {
+                            const rel_off: usize = @intCast(@min(line.absolute_offset, mapped.len -| self.sub_start_offset));
+                            const abs_pos = self.sub_start_offset + rel_off;
+                            const line_start = time_parser.findLineStartAtOrBefore(mapped, @min(abs_pos, mapped.len));
+                            maybe_line_ns = time_parser.findLineTimestampWithLookbehind(
+                                mapped,
+                                line_start,
+                                self.task.line_time_parser,
+                                self.fallback_ctx,
+                                &self.worker.time_regex_scratch,
+                                &self.worker.time_prefix_cache,
+                            );
+                        }
+                    }
+                    if (maybe_line_ns == null and self.has_last_line_ts and time_parser.isLikelyContinuationLine(raw_text)) {
+                        maybe_line_ns = self.last_line_ns;
+                    }
+                    if (maybe_line_ns) |line_ns| {
                         self.last_line_ns = line_ns;
-                        if (runner.time_start_ns > 0 and line_ns < runner.time_start_ns) return true;
-                        if (runner.time_end_ns > 0 and line_ns > runner.time_end_ns) return true;
+                        self.has_last_line_ts = true;
+                        if (runner.time_start_ns > 0 and line_ns < runner.time_start_ns) return .cont;
+                        if (runner.time_end_ns > 0 and line_ns > runner.time_end_ns) return .cont;
+                    } else if (self.task.task_time_mode == .content or self.file_has_timestamps) {
+                        return .cont;
+                    } else if (self.task.mtime_ns > 0) {
+                        const mtime_u64: u64 = @intCast(@max(0, self.task.mtime_ns));
+                        if (runner.time_start_ns > 0 and mtime_u64 < runner.time_start_ns) return .cont;
+                        if (runner.time_end_ns > 0 and mtime_u64 > runner.time_end_ns) return .cont;
                     }
                 }
 
                 const max_res = runner.req.maxResults;
                 if (max_res > 0 and runner.total_matches.load(.monotonic) >= max_res) {
                     runner.hit_max_results.store(true, .release);
-                    return false;
+                    return .stop;
                 }
 
                 const prev_total = runner.total_matches.fetchAdd(1, .monotonic);
                 if (max_res > 0 and prev_total >= max_res) {
                     _ = runner.total_matches.fetchSub(1, .monotonic);
                     runner.hit_max_results.store(true, .release);
-                    return false;
+                    return .stop;
                 }
 
                 self.file_had_match = true;
                 self.task.emitted_in_file += 1;
-                self.task.resume_after_line = line_no;
+                if (!is_archive) {
+                    self.task.resume_after_line = line_no;
+                }
+                const emitted_now = self.task.emitted_in_file;
                 _ = runner.matched_lines.fetchAdd(1, .monotonic);
 
-                self.appendLineEvent(line, false, 0) catch {
-                    return false;
+                var adjusted_line = line;
+                adjusted_line.line_number = line_no;
+                self.appendLineEvent(adjusted_line, false, 0) catch {
+                    return .stop;
                 };
 
                 self.worker.maybeFlushStreaming(false);
-                if (runner.send_failed.load(.acquire)) return false;
+                if (runner.send_failed.load(.acquire)) return .stop;
 
                 if (max_res > 0 and prev_total + 1 >= max_res) {
                     runner.hit_max_results.store(true, .release);
-                    return false;
+                    return .stop;
                 }
 
-                if (self.task.soft_quota > 0 and self.task.emitted_in_file >= self.task.soft_quota) {
+                if (!is_archive and !self.task.isDocker() and self.task.soft_quota > 0 and emitted_now >= self.task.soft_quota) {
                     self.task.paused_at_soft_quota = true;
-                    return false;
+                    return .pause;
                 }
-                return true;
+                return .cont;
             },
             .context => |line| {
-                const line_no = if (line.line_number > 0) line.line_number else 1;
-                if (line_no <= self.task.resume_after_line) {
-                    return true;
+                const raw_line_no = if (line.line_number > 0) line.line_number else 1;
+                const line_no = raw_line_no + self.base_line_offset;
+                if (!is_archive and line_no <= self.task.resume_after_line) {
+                    return .cont;
                 }
-                self.appendLineEvent(line, true, 0) catch {
-                    return false;
+                if (is_archive) {
+                    const entry_path = if (line.source_id.len > 0) line.source_id else self.current_archive_entry;
+                    if (!runner.archiveEntryMatchesPathGlobs(self.rel_path, self.task.base_name, entry_path)) {
+                        return .cont;
+                    }
+                }
+                var adjusted_line = line;
+                adjusted_line.line_number = line_no;
+                self.appendLineEvent(adjusted_line, true, 0) catch {
+                    return .stop;
                 };
                 self.worker.maybeFlushStreaming(false);
-                if (runner.send_failed.load(.acquire)) return false;
-                return true;
+                if (runner.send_failed.load(.acquire)) return .stop;
+                return .cont;
             },
             .progress => |prog| {
-                if (prog.bytes_searched > self.task.phase_bytes) {
+                if (!is_archive and prog.bytes_searched > self.task.phase_bytes) {
                     _ = runner.bytes_searched.fetchAdd(prog.bytes_searched - self.task.phase_bytes, .monotonic);
                     self.task.phase_bytes = prog.bytes_searched;
                 }
                 self.worker.maybeFlushStreaming(true);
                 runner.maybeSendProgress(0);
-                return !runner.shouldStop();
+                return if (runner.shouldStop()) .stop else .cont;
             },
-            else => return true,
+            else => return .cont,
         }
     }
 
     fn appendLineEvent(self: *FileSink, line: libwebgrep.LineEvent, is_context: bool, max_spans: usize) !void {
         const arena = self.worker.batch_arena.allocator();
-        const file_duped = try arena.dupe(u8, self.rel_path);
+        const is_archive = (self.task.archive_format != null);
+        const file_duped = if (is_archive) blk_vpath: {
+            const raw_entry = if (line.source_id.len > 0 and !std.mem.eql(u8, line.source_id, self.rel_path))
+                line.source_id
+            else
+                self.current_archive_entry;
+            const entry_path = std.mem.trimStart(u8, raw_entry, "./");
+            if (entry_path.len > 0) {
+                break :blk_vpath try formatArchiveVirtualPathAlloc(arena, self.rel_path, entry_path);
+            }
+            break :blk_vpath try arena.dupe(u8, self.rel_path);
+        } else try arena.dupe(u8, self.rel_path);
 
         const raw_text = if (line.text.len > 0) line.text else line.bytes;
         const safe_text = try file_api.sanitizeUtf8Truncated(arena, raw_text, 4096);
@@ -3485,51 +4664,9 @@ const FileSink = struct {
             break :blk if (safe_rep.ptr == rep.ptr) try arena.dupe(u8, safe_rep) else safe_rep;
         } else null;
 
-        var prev_duped: ?[]const u8 = null;
-        var next_duped: ?[]const u8 = null;
-
         var spans_list: std.ArrayList(HitSpan) = .empty;
         const runner = self.worker.runner;
         if (!is_context) {
-            const raw_off_u64 = blk_off: {
-                const r_off = unwrapOffset(line.raw_offset);
-                break :blk_off if (r_off > 0) r_off else unwrapOffset(line.absolute_offset);
-            };
-            var win_buf: [1536]u8 = undefined;
-            const neighbors: NeighborLines = if (self.full_slice) |full| blk_full: {
-                const slice_start = @intFromPtr(full.ptr);
-                const slice_end = slice_start + full.len;
-                const bytes_ptr = @intFromPtr(line.bytes.ptr);
-                const approx_pos: usize = if (line.bytes.len > 0 and bytes_ptr >= slice_start and bytes_ptr <= slice_end)
-                    bytes_ptr - slice_start
-                else
-                    @min(full.len, self.active_slice_offset + @as(usize, @intCast(raw_off_u64)));
-                break :blk_full extractNeighborLines(full, approx_pos, false, false);
-            } else if (self.open_file) |f| blk_file: {
-                const win_start: u64 = raw_off_u64 -| 512;
-                const n = f.readPositionalAll(runner.io, &win_buf, win_start) catch 0;
-                if (n > 0 and raw_off_u64 >= win_start and (raw_off_u64 - win_start) <= n) {
-                    break :blk_file extractNeighborLines(
-                        win_buf[0..n],
-                        @intCast(raw_off_u64 - win_start),
-                        win_start > 0,
-                        n == win_buf.len,
-                    );
-                }
-                break :blk_file .{};
-            } else .{};
-
-            if (neighbors.prev) |rp| {
-                if (file_api.sanitizeUtf8Truncated(arena, rp, 240)) |sp| {
-                    prev_duped = if (sp.ptr == rp.ptr) (arena.dupe(u8, sp) catch null) else sp;
-                } else |_| {}
-            }
-            if (neighbors.next) |rn| {
-                if (file_api.sanitizeUtf8Truncated(arena, rn, 240)) |sn| {
-                    next_duped = if (sn.ptr == rn.ptr) (arena.dupe(u8, sn) catch null) else sn;
-                } else |_| {}
-            }
-
             if (runner.swapped_primary_regex_first and runner.contains_regexes.len > 0) {
                 const primary_re = &runner.contains_regexes[0];
                 var bpos: usize = 0;
@@ -3545,8 +4682,7 @@ const FileSink = struct {
                     if (hit.end <= bpos) break;
                     bpos = hit.end;
                 }
-            } else if (runner.swapped_primary_finder) |pf_val| {
-                var pf = pf_val;
+            } else if (runner.swapped_primary_finder) |*pf| {
                 var bpos: usize = 0;
                 while (bpos <= text_duped.len) {
                     const hit = pf.find(text_duped, bpos, .leftmost_first) orelse break;
@@ -3582,8 +4718,8 @@ const FileSink = struct {
             .line = if (line.line_number > 0) line.line_number else 1,
             .col = col,
             .text = text_duped,
-            .prevText = prev_duped,
-            .nextText = next_duped,
+            .prevText = null,
+            .nextText = null,
             .replaced = replaced_duped,
             .isContext = is_context,
             .spans = spans_list.items,
@@ -4469,106 +5605,6 @@ test "search_job: scoped whole-word modifiers ($w, $cw, $rw, $rcw) on indented l
     try std.testing.expectEqual(@as(u64, 2), c_contains_w.matched_lines);
 }
 
-test "search_job: 19-digit nanosecond segment pruning, mmap binary search, and line numbers" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(io, "streams/gw");
-
-    // Segment 1: [1730340001000000000, 1730340003000000000]
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "streams/gw/1730340001000000000-1730340003000000000.log",
-        .data = "1730340001000000000 ERROR old_event_1\n" ++
-            "1730340002000000000 ERROR old_event_2\n" ++
-            "1730340003000000000 ERROR old_event_3\n",
-    });
-
-    // Segment 2: [1730340010000000000, 1730340050000000000]
-    const seg2_data =
-        "1730340010000000000 ERROR mid_event_line1\n" ++
-        "1730340020000000000 ERROR mid_event_line2\n" ++
-        "1730340030000000000 ERROR mid_event_line3\n" ++
-        "1730340040000000000 ERROR mid_event_line4\n" ++
-        "1730340050000000000 ERROR mid_event_line5\n";
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "streams/gw/1730340010000000000-1730340050000000000.log",
-        .data = seg2_data,
-    });
-
-    // Direct unit test on `narrowMmapSliceByTimeRange`
-    const narrowed = narrowMmapSliceByTimeRange(
-        seg2_data,
-        1730340020000000000,
-        1730340040000000000,
-    );
-    try std.testing.expectEqual(@as(u64, 1), narrowed.base_line_offset);
-    try std.testing.expect(std.mem.startsWith(u8, narrowed.sub_slice, "1730340020000000000 ERROR mid_event_line2\n"));
-    try std.testing.expect(std.mem.endsWith(u8, narrowed.sub_slice, "1730340040000000000 ERROR mid_event_line4\n"));
-
-    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const root_real = try gpa.dupe(u8, path_buf[0..n]);
-    defer gpa.free(root_real);
-
-    var reg = source_registry.SourceRegistry.init(gpa, io, root_real, null);
-    defer reg.deinit(io);
-
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const gw_dir_path = try std.fmt.allocPrint(arena_state.allocator(), "{s}/streams/gw", .{root_real});
-    try reg.upsertSource(arena_state.allocator(), io, .{
-        .kind = "dir",
-        .name = "gw",
-        .path = gw_dir_path,
-        .enabled = true,
-    });
-
-    const LineCollector = struct {
-        allocator: std.mem.Allocator,
-        files_searched: u64 = 0,
-        matched_lines: u64 = 0,
-        first_line_no: u64 = 0,
-
-        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
-                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
-                    .ignore_unknown_fields = true,
-                });
-                defer parsed.deinit();
-                if (parsed.value.items.len > 0 and self.first_line_no == 0) {
-                    self.first_line_no = parsed.value.items[0].line;
-                }
-            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
-                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
-                    .ignore_unknown_fields = true,
-                });
-                defer parsed.deinit();
-                self.files_searched = parsed.value.filesSearched;
-                self.matched_lines = parsed.value.matchedLines;
-            }
-        }
-    };
-
-    var cancel = std.atomic.Value(bool).init(false);
-    var col = LineCollector{ .allocator = gpa };
-    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
-        .id = 1,
-        .pattern = "ERROR",
-        .timeStartNs = 1730340020000000000,
-        .timeEndNs = 1730340040000000000,
-    }, &cancel, .{ .ctx = &col, .sendFn = LineCollector.send });
-
-    // Segment 1 was pruned by filename without even opening it (`files_searched == 1`),
-    // and inside Segment 2 only lines 2, 3, 4 matched (`matched_lines == 3`, `first_line_no == 2`)!
-    try std.testing.expectEqual(@as(u64, 1), col.files_searched);
-    try std.testing.expectEqual(@as(u64, 3), col.matched_lines);
-    try std.testing.expectEqual(@as(u64, 2), col.first_line_no);
-}
-
 test "search_job: dual-granularity time filter on ISO-8601/Nginx/JSONL logs (with stack traces) AND code/HTML files via stat.mtime" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -4636,8 +5672,8 @@ test "search_job: dual-granularity time filter on ISO-8601/Nginx/JSONL logs (wit
     // A. Search `PaymentService` inside historical log window [2026-10-31T10:15:02Z, 2026-10-31T10:15:03Z]:
     //    - `spring.log` is a time-series log: matches both line 2 (`ERROR ... PaymentService`) AND line 3 (stack trace `at ... PaymentService.java:88` via lookbehind inheritance)!
     //    - `app.zig` and `index.html` have `mtime = now` (outside the narrow 1-second window if `timeEndNs` is 10:15:03Z, or inside if `timeEndNs == 0`).
-    const t_start = ingestor.parseTimestampToNs("2026-10-31T10:15:02Z", 2026).?;
-    const t_end = ingestor.parseTimestampToNs("2026-10-31T10:15:03Z", 2026).?;
+    const t_start = time_parser.parseTimestampValueNs("2026-10-31T10:15:02Z", .{}, null).?;
+    const t_end = time_parser.parseTimestampValueNs("2026-10-31T10:15:03Z", .{}, null).?;
 
     var col_log_window = SimpleCollector{ .allocator = gpa };
     try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
@@ -4650,7 +5686,7 @@ test "search_job: dual-granularity time filter on ISO-8601/Nginx/JSONL logs (wit
 
     // B. Search `PaymentService` with `timeStartNs = now - 60s` (`$t(1m)`):
     //    - `app.zig` and `index.html` were just modified (`mtime >= now - 60s`), so both code and HTML files match (1 line each = 2 lines)!
-    const now_ns = ingestor.currentUnixNano(io);
+    const now_ns = time_parser.currentUnixNano(io);
     var col_recent = SimpleCollector{ .allocator = gpa };
     try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
         .id = 11,
@@ -4731,6 +5767,18 @@ test "search_job: $@(zedis-rust) pub fn async members falls back to ±15-line bl
     };
 
     var cancel = std.atomic.Value(bool).init(false);
+
+    // Default (`nearbyLines = 0`) keeps the search strictly single-line.
+    var col_default_strict = BlockCollector{ .allocator = gpa };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 98,
+        .pattern = "pub",
+        .contains = &.{ "fn", "async", "members" },
+        .globs = &.{"zedis-rust"},
+    }, &cancel, .{ .ctx = &col_default_strict, .sendFn = BlockCollector.send });
+    try std.testing.expectEqual(@as(u64, 0), col_default_strict.matched_lines);
+    try std.testing.expectEqual(@as(u32, 0), col_default_strict.nearby_lines);
+
     var col = BlockCollector{ .allocator = gpa };
     try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
         .id = 99,
@@ -4738,6 +5786,7 @@ test "search_job: $@(zedis-rust) pub fn async members falls back to ±15-line bl
         .contains = &.{ "fn", "async", "members" },
         .globs = &.{"zedis-rust"},
         .sources = &.{"other-unrelated-source"},
+        .nearbyLines = 15,
     }, &cancel, .{ .ctx = &col, .sendFn = BlockCollector.send });
 
     try std.testing.expect(col.matched_lines >= 1);
@@ -4753,6 +5802,7 @@ test "search_job: $@(zedis-rust) pub fn async members falls back to ±15-line bl
         .pattern = "pub",
         .contains = &.{ "fn", "async", "members" },
         .globs = &.{"zedis-rust"},
+        .nearbyLines = 15,
     }, &cancel, .{ .ctx = &col_again, .sendFn = BlockCollector.send });
     try std.testing.expectEqual(col.matched_lines, col_again.matched_lines);
     try std.testing.expectEqual(@as(u32, 15), col_again.nearby_lines);
@@ -4786,17 +5836,1408 @@ test "search_job: $@(zedis-rust) pub fn async members falls back to ±15-line bl
     try std.testing.expectEqual(@as(u64, 0), col_glob_neg.matched_lines);
 }
 
-test "search_job: libwebgrep v0.4.1 alt_prefilter & precomputed_dfa selectivity planner" {
+test "search_job: libwebgrep v0.5.0 alt_prefilter & precomputed_dfa selectivity planner" {
     const gpa = std.testing.allocator;
 
-    var re_alt = try libwebgrep.Regex.init(gpa, "ERROR_CRITICAL|FATAL_PANIC", .{ .case = .sensitive });
+    var re_alt = try libwebgrep.Regex.init(gpa, "ERROR_CRITICAL|FATAL_PANIC", EngineLimits.regexOptions(.sensitive));
     defer re_alt.deinit();
     try std.testing.expect(re_alt.alt_prefilter != null);
     // An 11-char exact alternation (`min_alt_len = 11`) must outscore a weak 2-char literal `in` (`25`).
     try std.testing.expect(computeRegexSelectivity(&re_alt) > computeLiteralSelectivity("in"));
 
-    var re_dfa = try libwebgrep.Regex.init(gpa, "\\d{4}", .{ .case = .sensitive });
+    var re_dfa = try libwebgrep.Regex.init(gpa, "\\d{4}", EngineLimits.regexOptions(.sensitive));
     defer re_dfa.deinit();
     // Unanchored digit regex has no literal prefilter and must still score lower than any 2+ char literal.
     try std.testing.expect(computeRegexSelectivity(&re_dfa) < computeLiteralSelectivity("fn"));
+}
+
+test "search_job: libwebgrep v0.5.0 caller-configured limits (context > 10 & regex repeat > 1000)" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file_buf: std.ArrayList(u8) = .empty;
+    defer file_buf.deinit(gpa);
+    for (1..26) |line_idx| {
+        const line_str = try std.fmt.allocPrint(gpa, "ctx_before_{d:0>2}\n", .{line_idx});
+        defer gpa.free(line_str);
+        try file_buf.appendSlice(gpa, line_str);
+    }
+    try file_buf.appendSlice(gpa, "MATCH_TARGET_V050\n");
+    for (1..26) |line_idx| {
+        const line_str = try std.fmt.allocPrint(gpa, "ctx_after_{d:0>2}\n", .{line_idx});
+        defer gpa.free(line_str);
+        try file_buf.appendSlice(gpa, line_str);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "deep_context.log", .data = file_buf.items });
+
+    const CtxCollector = struct {
+        allocator: std.mem.Allocator,
+        hit_items: usize = 0,
+        ctx_items: usize = 0,
+        matched_lines: u64 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
+                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                for (parsed.value.items) |it| {
+                    if (it.isContext) {
+                        self.ctx_items += 1;
+                    } else {
+                        self.hit_items += 1;
+                    }
+                }
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    var col = CtxCollector{ .allocator = gpa };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 500,
+        .pattern = "MATCH_TARGET_V050",
+        .context = 20, // Exceeds former v0.4.1 hardcoded cap of 10!
+    }, &cancel, .{ .ctx = &col, .sendFn = CtxCollector.send });
+
+    try std.testing.expectEqual(@as(u64, 1), col.matched_lines);
+    try std.testing.expectEqual(@as(usize, 1), col.hit_items);
+    try std.testing.expectEqual(@as(usize, 40), col.ctx_items); // 20 before + 20 after
+
+    // Verify EngineLimits.regexOptions allows repeat > 1000
+    var re_repeat = try libwebgrep.Regex.init(gpa, "x{1200}", EngineLimits.regexOptions(.sensitive));
+    defer re_repeat.deinit();
+}
+
+fn writeTestTarOctal(field: []u8, val: u64) void {
+    @memset(field, '0');
+    if (field.len > 0) field[field.len - 1] = 0;
+    var v = val;
+    var idx: usize = if (field.len >= 2) field.len - 2 else 0;
+    while (v > 0) {
+        field[idx] = @intCast('0' + (v & 7));
+        v >>= 3;
+        if (idx == 0) break;
+        idx -= 1;
+    }
+}
+
+fn finalizeTestTarHeader(header: *[512]u8) void {
+    @memcpy(header[257..263], "ustar\x00");
+    @memcpy(header[263..265], "00");
+    @memset(header[148..156], ' ');
+    var sum: u64 = 0;
+    for (header) |b| sum += b;
+    writeTestTarOctal(header[148..155], sum);
+    header[155] = ' ';
+}
+
+fn appendTestTarEntry(out: *std.ArrayList(u8), allocator: std.mem.Allocator, path: []const u8, typeflag: u8, data: []const u8) !void {
+    var header: [512]u8 = @splat(0);
+    const name_len = @min(path.len, 100);
+    @memcpy(header[0..name_len], path[0..name_len]);
+    writeTestTarOctal(header[100..108], 0o644);
+    writeTestTarOctal(header[108..116], 0);
+    writeTestTarOctal(header[116..124], 0);
+    writeTestTarOctal(header[124..136], if (typeflag == '0') data.len else 0);
+    writeTestTarOctal(header[136..148], 0);
+    header[156] = typeflag;
+    finalizeTestTarHeader(&header);
+    try out.appendSlice(allocator, &header);
+    if (typeflag == '0' and data.len > 0) {
+        try out.appendSlice(allocator, data);
+        const rem = data.len % 512;
+        if (rem != 0) {
+            const pad = 512 - rem;
+            try out.appendNTimes(allocator, 0, pad);
+        }
+    }
+}
+
+test "search_job: libwebgrep v0.5.0 zero-disk-landing archive direct search (:: virtual path & TreeConfig filters)" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var tar_bytes: std.ArrayList(u8) = .empty;
+    defer tar_bytes.deinit(gpa);
+    try appendTestTarEntry(&tar_bytes, gpa, "src/engine.zig", '0', "pub fn archive_needle() void {}\n");
+    try appendTestTarEntry(&tar_bytes, gpa, "docs/guide.md", '0', "# archive_needle documentation\n");
+    try tar_bytes.appendNTimes(gpa, 0, 1024);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.tar", .data = tar_bytes.items });
+
+    const ArchiveHitCollector = struct {
+        allocator: std.mem.Allocator,
+        files: std.ArrayList([]u8) = .empty,
+        matched_lines: u64 = 0,
+
+        fn deinit(self: *@This()) void {
+            for (self.files.items) |f| self.allocator.free(f);
+            self.files.deinit(self.allocator);
+        }
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
+                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                for (parsed.value.items) |it| {
+                    try self.files.append(self.allocator, try self.allocator.dupe(u8, it.file));
+                }
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // 1. Unfiltered archive search returns both entries formatted as `bundle.tar::<entry_path>`
+    var col_all = ArchiveHitCollector{ .allocator = gpa };
+    defer col_all.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 601,
+        .pattern = "archive_needle",
+    }, &cancel, .{ .ctx = &col_all, .sendFn = ArchiveHitCollector.send });
+
+    try std.testing.expectEqual(@as(u64, 2), col_all.matched_lines);
+    try std.testing.expectEqual(@as(usize, 2), col_all.files.items.len);
+    var saw_zig = false;
+    var saw_md = false;
+    for (col_all.files.items) |vpath| {
+        if (std.mem.eql(u8, vpath, "bundle.tar::src/engine.zig")) saw_zig = true;
+        if (std.mem.eql(u8, vpath, "bundle.tar::docs/guide.md")) saw_md = true;
+    }
+    try std.testing.expect(saw_zig and saw_md);
+
+    // 2. `types = &.{"zig"}` filters inside the archive via TreeConfig, keeping only `bundle.tar::src/engine.zig`
+    var col_zig = ArchiveHitCollector{ .allocator = gpa };
+    defer col_zig.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 602,
+        .pattern = "archive_needle",
+        .types = &.{"zig"},
+    }, &cancel, .{ .ctx = &col_zig, .sendFn = ArchiveHitCollector.send });
+
+    try std.testing.expectEqual(@as(u64, 1), col_zig.matched_lines);
+    try std.testing.expectEqual(@as(usize, 1), col_zig.files.items.len);
+    try std.testing.expectEqualStrings("bundle.tar::src/engine.zig", col_zig.files.items[0]);
+}
+
+test "search_job: libwebgrep v0.5.0 structured CompileDiagnostic regex error reporting" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "sample.txt", .data = "hello world\n" });
+
+    const ErrCollector = struct {
+        allocator: std.mem.Allocator,
+        error_msg: ?[]u8 = null,
+
+        fn deinit(self: *@This()) void {
+            if (self.error_msg) |m| self.allocator.free(m);
+        }
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"error\"") != null) {
+                var parsed = try std.json.parseFromSlice(ErrorFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                if (self.error_msg) |old| self.allocator.free(old);
+                self.error_msg = try self.allocator.dupe(u8, parsed.value.message);
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    var err_col = ErrCollector{ .allocator = gpa };
+    defer err_col.deinit();
+
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 603,
+        .pattern = "[unclosed",
+        .mode = "regex",
+    }, &cancel, .{ .ctx = &err_col, .sendFn = ErrCollector.send });
+
+    try std.testing.expect(err_col.error_msg != null);
+    const msg = err_col.error_msg.?;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Regex compile error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "line 1, column ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "offset ") != null);
+}
+
+test "search_job: libwebgrep v0.5.0 walk_types, walk_ignore (.gitignore), walk_glob brace expansion, and UTF-16LE BOM Encoding.auto" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "ignored_dir/\n*_ignored.rs\n" });
+    try tmp.dir.createDirPath(io, "ignored_dir");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ignored_dir/secret.rs", .data = "walk_target_v050 in ignored dir\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "skip_ignored.rs", .data = "walk_target_v050 in ignored file\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "keep.rs", .data = "fn walk_target_v050() {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "script.py", .data = "def walk_target_v050(): pass\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "walk_target_v050 in plain text\n" });
+
+    // UTF-16LE with BOM (`0xFF, 0xFE`) containing "utf16_bom_target\n"
+    const utf16le_bytes = [_]u8{
+        0xFF, 0xFE,
+        'u',  0x00,
+        't',  0x00,
+        'f',  0x00,
+        '1',  0x00,
+        '6',  0x00,
+        '_',  0x00,
+        'b',  0x00,
+        'o',  0x00,
+        'm',  0x00,
+        '_',  0x00,
+        't',  0x00,
+        'a',  0x00,
+        'r',  0x00,
+        'g',  0x00,
+        'e',  0x00,
+        't',  0x00,
+        '\n', 0x00,
+    };
+    try tmp.dir.writeFile(io, .{ .sub_path = "unicode_log.log", .data = &utf16le_bytes });
+
+    const CountCollector = struct {
+        allocator: std.mem.Allocator,
+        matched_lines: u64 = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // 1. `respectIgnore = true` + brace-expanded `fileGlobs = &.{"*.{rs,py}"}` -> matches `keep.rs` and `script.py` (2 lines), skipping `.gitignore` matches and `notes.txt`!
+    var col_ignore = CountCollector{ .allocator = gpa };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 604,
+        .pattern = "walk_target_v050",
+        .respectIgnore = true,
+        .fileGlobs = &.{"*.{rs,py}"},
+    }, &cancel, .{ .ctx = &col_ignore, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 2), col_ignore.matched_lines);
+
+    // 2. `walk_types` built-in language alias (`rust`) + `respectIgnore = true` -> matches only `keep.rs` (1 line)
+    var col_rust = CountCollector{ .allocator = gpa };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 605,
+        .pattern = "walk_target_v050",
+        .respectIgnore = true,
+        .types = &.{"rust"},
+    }, &cancel, .{ .ctx = &col_rust, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 1), col_rust.matched_lines);
+
+    // 3. UTF-16LE BOM automatic transcoding via `Encoding.auto` + `searchSourceSlice`
+    var col_utf16 = CountCollector{ .allocator = gpa };
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 606,
+        .pattern = "utf16_bom_target",
+    }, &cancel, .{ .ctx = &col_utf16, .sendFn = CountCollector.send });
+    try std.testing.expectEqual(@as(u64, 1), col_utf16.matched_lines);
+}
+
+test "search_job: strict single-line matching, literal spaces, explicit $c/$w/$r/$rcw flags, and invalid scoped regex error frame" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const sample_data =
+        "2026-11-12 [INFO] ErrorCode 404 retry in 50ms\n" ++
+        "2026-11-12 [INFO] errorcode 4040 retry in 50ms\n" ++
+        "2026-11-12 [WARN] ErrorCode2 404 retry in 50ms\n" ++
+        "2026-11-12 [ERROR] $r([unclosed) literal line\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "strict.log", .data = sample_data });
+
+    const TestCollector = struct {
+        allocator: std.mem.Allocator,
+        matched_lines: u64 = 0,
+        error_msg: ?[]u8 = null,
+
+        fn deinit(self: *@This()) void {
+            if (self.error_msg) |m| self.allocator.free(m);
+        }
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"error\"") != null) {
+                var parsed = try std.json.parseFromSlice(ErrorFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                if (self.error_msg) |old| self.allocator.free(old);
+                self.error_msg = try self.allocator.dupe(u8, parsed.value.message);
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // (a) Plain case-insensitive search with literal spaces matches all 3 lines containing "retry in 50ms" and "errorcode"
+    var col_plain = TestCollector{ .allocator = gpa };
+    defer col_plain.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 701,
+        .pattern = "ErrorCode",
+        .case = "insensitive",
+        .contains = &.{"retry in 50ms"},
+    }, &cancel, .{ .ctx = &col_plain, .sendFn = TestCollector.send });
+    try std.testing.expectEqual(@as(u64, 3), col_plain.matched_lines);
+
+    // (b) Explicit `$c(ErrorCode)` + `$w(ErrorCode)` (`$cw(ErrorCode)`) + `$rcw(404)` matches only line 1
+    var col_scoped = TestCollector{ .allocator = gpa };
+    defer col_scoped.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 702,
+        .pattern = "$cw(ErrorCode)",
+        .case = "insensitive",
+        .contains = &.{ "$rcw(\\d{3})", "retry in 50ms" },
+    }, &cancel, .{ .ctx = &col_scoped, .sendFn = TestCollector.send });
+    try std.testing.expectEqual(@as(u64, 1), col_scoped.matched_lines);
+
+    // (c) Invalid `$r([unclosed)` in `contains` or `excludes` emits an error frame instead of falling back to literal
+    var col_bad_contains = TestCollector{ .allocator = gpa };
+    defer col_bad_contains.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 703,
+        .pattern = "2026-11-12",
+        .case = "insensitive",
+        .contains = &.{"$r([unclosed)"},
+    }, &cancel, .{ .ctx = &col_bad_contains, .sendFn = TestCollector.send });
+    try std.testing.expect(col_bad_contains.error_msg != null);
+    try std.testing.expectEqual(@as(u64, 0), col_bad_contains.matched_lines);
+
+    var col_bad_excludes = TestCollector{ .allocator = gpa };
+    defer col_bad_excludes.deinit();
+    try executeSearch(gpa, io, tmp.dir, .{
+        .id = 704,
+        .pattern = "2026-11-12",
+        .case = "insensitive",
+        .excludes = &.{"$r([unclosed)"},
+    }, &cancel, .{ .ctx = &col_bad_excludes, .sendFn = TestCollector.send });
+    try std.testing.expect(col_bad_excludes.error_msg != null);
+    try std.testing.expectEqual(@as(u64, 0), col_bad_excludes.matched_lines);
+}
+
+test "search_job: orthogonal content vs mtime, mtime 1-line summary, per-source/query timeFormat, lookbehind, and cache isolation" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "data");
+    try tmp.dir.createDirPath(io, "logs_src");
+    try tmp.dir.createDirPath(io, "json_src");
+
+    // 1. Mixed directory: log (timestamps + stack trace), zig code, markdown, and custom bracketed format
+    const app_log =
+        "2026-11-14T10:00:00Z INFO start\n" ++
+        "2026-11-14T10:05:00Z ERROR boom_in_window\n" ++
+        "    at com.example.Service.handle(Service.java:42)\n" ++
+        "2026-11-14T10:20:00Z ERROR outside_window\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs_src/app.log", .data = app_log });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "logs_src/code.zig",
+        .data = "const boom_in_window = 1;\nconst Service_handle = 2;\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "logs_src/notes.md",
+        .data = "# Notes\nboom_in_window documentation\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "logs_src/custom.txt",
+        .data = "TS=[14@11@2026 10:05:00] custom_regex_hit\nTS=[14@11@2026 10:20:00] custom_regex_miss\n",
+    });
+
+    // 2. JSON source with nested epoch timestamp
+    const sec_1005: u64 = @intCast(time_parser.civilToEpochSeconds(2026, 11, 14, 10, 5, 0).?);
+    const sec_1020: u64 = @intCast(time_parser.civilToEpochSeconds(2026, 11, 14, 10, 20, 0).?);
+    const json_data = try std.fmt.allocPrint(
+        arena,
+        "{{\"meta\":{{\"ts\":{d}}},\"msg\":\"json_boom\"}}\n{{\"meta\":{{\"ts\":{d}}},\"msg\":\"json_outside\"}}\n",
+        .{ sec_1005, sec_1020 },
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "json_src/events.jsonl", .data = json_data });
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buf);
+    const root_real = path_buf[0..root_len];
+
+    const data_path = try std.fmt.allocPrint(arena, "{s}/data", .{root_real});
+    const logs_path = try std.fmt.allocPrint(arena, "{s}/logs_src", .{root_real});
+    const json_path = try std.fmt.allocPrint(arena, "{s}/json_src", .{root_real});
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, data_path, null);
+    defer reg.deinit(io);
+
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "logs_src",
+        .config = .{ .path = logs_path },
+        .enabled = true,
+    });
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "json_src",
+        .config = .{ .path = json_path, .timeFormat = "json:meta.ts" },
+        .enabled = true,
+    });
+
+    const st_app = try tmp.dir.statFile(io, "logs_src/app.log", .{});
+    const file_mtime_ms: u64 = @intCast(@max(0, @divFloor(st_app.mtime.nanoseconds, std.time.ns_per_ms)));
+
+    const E2ECollector = struct {
+        allocator: std.mem.Allocator,
+        files_searched: u64 = 0,
+        files_matched: u64 = 0,
+        matched_lines: u64 = 0,
+        cache_hit: [32]u8 = undefined,
+        cache_hit_len: usize = 0,
+        error_msg: ?[]u8 = null,
+
+        fn deinit(self: *@This()) void {
+            if (self.error_msg) |m| self.allocator.free(m);
+        }
+
+        fn cacheTier(self: *const @This()) []const u8 {
+            return self.cache_hit[0..self.cache_hit_len];
+        }
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.files_searched = parsed.value.filesSearched;
+                self.files_matched = parsed.value.filesMatched;
+                self.matched_lines = parsed.value.matchedLines;
+                const cp_len = @min(parsed.value.cacheHit.len, self.cache_hit.len);
+                @memcpy(self.cache_hit[0..cp_len], parsed.value.cacheHit[0..cp_len]);
+                self.cache_hit_len = cp_len;
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"error\"") != null) {
+                var parsed = try std.json.parseFromSlice(ErrorFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                if (self.error_msg) |old| self.allocator.free(old);
+                self.error_msg = try self.allocator.dupe(u8, parsed.value.message);
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    const win_lo_ms: u64 = (sec_1005 - 60) * 1000;
+    const win_hi_ms: u64 = (sec_1005 + 60) * 1000;
+
+    // (a) `timeMode = "content"` strictly excludes untimestamped code.zig / notes.md (NO mtime fallback)
+    var c_content = E2ECollector{ .allocator = gpa };
+    defer c_content.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 801,
+        .pattern = "boom_in_window",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_content, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 1), c_content.files_matched);
+    try std.testing.expectEqual(@as(u64, 1), c_content.matched_lines);
+
+    // (b) `timeMode = "mtime"` with empty query emits 1 summary line per mtime-matched file (all 4 files in logs_src)
+    var c_mtime_summary = E2ECollector{ .allocator = gpa };
+    defer c_mtime_summary.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 802,
+        .pattern = "",
+        .sources = &.{"logs_src"},
+        .timeMode = "mtime",
+        .timeStartMs = file_mtime_ms - 60_000,
+        .timeEndMs = file_mtime_ms + 60_000,
+    }, &cancel, .{ .ctx = &c_mtime_summary, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 4), c_mtime_summary.files_matched);
+    try std.testing.expectEqual(@as(u64, 4), c_mtime_summary.matched_lines);
+
+    // (c) Stack-trace continuation lookbehind when parent timestamped line does NOT contain the query keyword
+    var c_stack = E2ECollector{ .allocator = gpa };
+    defer c_stack.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 803,
+        .pattern = "Service.java",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_stack, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 1), c_stack.matched_lines);
+
+    // Stack frame must NOT leak into a later window that starts after 10:05:00
+    var c_stack_miss = E2ECollector{ .allocator = gpa };
+    defer c_stack_miss.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 804,
+        .pattern = "Service.java",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeStartMs = (sec_1005 + 60) * 1000,
+        .timeEndMs = (sec_1020 + 60) * 1000,
+    }, &cancel, .{ .ctx = &c_stack_miss, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 0), c_stack_miss.matched_lines);
+
+    // (d) Per-source `config.timeFormat` ("json:meta.ts") + L1 exact replay check
+    var c_json1 = E2ECollector{ .allocator = gpa };
+    defer c_json1.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 805,
+        .pattern = "json_",
+        .sources = &.{"json_src"},
+        .timeMode = "content",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_json1, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 1), c_json1.matched_lines);
+
+    var c_json2 = E2ECollector{ .allocator = gpa };
+    defer c_json2.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 806,
+        .pattern = "json_",
+        .sources = &.{"json_src"},
+        .timeMode = "content",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_json2, .sendFn = E2ECollector.send });
+    try std.testing.expectEqualStrings("exact", c_json2.cacheTier());
+    try std.testing.expectEqual(@as(u64, 1), c_json2.matched_lines);
+
+    // (e) Query-level `regex:` override & cache isolation against empty `timeFormat`
+    var c_custom_none = E2ECollector{ .allocator = gpa };
+    defer c_custom_none.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 807,
+        .pattern = "custom_regex",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeFormat = "",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_custom_none, .sendFn = E2ECollector.send });
+    try std.testing.expectEqual(@as(u64, 0), c_custom_none.matched_lines);
+
+    var c_custom_re = E2ECollector{ .allocator = gpa };
+    defer c_custom_re.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 808,
+        .pattern = "custom_regex",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeFormat = "regex:TS=\\[(?P<d>\\d{2})@(?P<m>\\d{2})@(?P<Y>\\d{4}) (?P<H>\\d{2}):(?P<M>\\d{2}):(?P<S>\\d{2})\\]",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_custom_re, .sendFn = E2ECollector.send });
+    try std.testing.expect(!std.mem.eql(u8, c_custom_re.cacheTier(), "exact"));
+    try std.testing.expectEqual(@as(u64, 1), c_custom_re.matched_lines);
+
+    // (f) Invalid regex timeFormat returns CompileDiagnostic error frame
+    var c_bad_tf = E2ECollector{ .allocator = gpa };
+    defer c_bad_tf.deinit();
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 809,
+        .pattern = "custom_regex",
+        .sources = &.{"logs_src"},
+        .timeMode = "content",
+        .timeFormat = "regex:(unclosed",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c_bad_tf, .sendFn = E2ECollector.send });
+    try std.testing.expect(c_bad_tf.error_msg != null);
+    try std.testing.expectEqual(@as(u64, 0), c_bad_tf.matched_lines);
+}
+
+test "search_job: per-source non-stacked timeMode=source across mtime code source and content log sources" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "data");
+    try tmp.dir.createDirPath(io, "code_src");
+    try tmp.dir.createDirPath(io, "auto_log_src");
+    try tmp.dir.createDirPath(io, "json_src");
+
+    // 1. Code source (no timeFormat -> mtime only; historical logs inside must match file mtime, NOT line time)
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "code_src/main.zig",
+        .data = "pub fn boot() void {}\npub fn shutdown() void {}\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "code_src/README.md",
+        .data = "# Overview\nHistorical 2020-01-01T00:00:00Z example\n",
+    });
+
+    // 2. Auto log source (timeFormat = "auto" -> line time ONLY, file mtime is NOW >> historical window 10:04..10:06!)
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "auto_log_src/service.log",
+        .data = "2026-11-14T10:01:00Z INFO startup\n" ++
+            "2026-11-14T10:04:30Z ERROR hit_one\n" ++
+            "2026-11-14T10:05:15Z ERROR hit_two\n" ++
+            "2026-11-14T10:20:00Z ERROR outside_hi\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "auto_log_src/untimestamped.txt",
+        .data = "plain text hit_one without timestamp\n",
+    });
+
+    // 3. Custom JSON source (timeFormat = "json:meta.ts" -> line time ONLY)
+    const sec_1005: u64 = @intCast(time_parser.civilToEpochSeconds(2026, 11, 14, 10, 5, 0).?);
+    const sec_1020: u64 = @intCast(time_parser.civilToEpochSeconds(2026, 11, 14, 10, 20, 0).?);
+    const json_data = try std.fmt.allocPrint(
+        arena,
+        "{{\"meta\":{{\"ts\":{d}}},\"msg\":\"hit_json\"}}\n{{\"meta\":{{\"ts\":{d}}},\"msg\":\"miss_json\"}}\n",
+        .{ sec_1005, sec_1020 },
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "json_src/events.jsonl", .data = json_data });
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buf);
+    const root_real = path_buf[0..root_len];
+
+    const data_path = try std.fmt.allocPrint(arena, "{s}/data", .{root_real});
+    const code_path = try std.fmt.allocPrint(arena, "{s}/code_src", .{root_real});
+    const auto_log_path = try std.fmt.allocPrint(arena, "{s}/auto_log_src", .{root_real});
+    const json_path = try std.fmt.allocPrint(arena, "{s}/json_src", .{root_real});
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, data_path, null);
+    defer reg.deinit(io);
+
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "code_src",
+        .config = .{ .path = code_path },
+        .enabled = true,
+    });
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "auto_log_src",
+        .config = .{ .path = auto_log_path, .timeFormat = "auto" },
+        .enabled = true,
+    });
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "json_src",
+        .config = .{ .path = json_path, .timeFormat = "json:meta.ts" },
+        .enabled = true,
+    });
+
+    const st_code = try tmp.dir.statFile(io, "code_src/main.zig", .{});
+    const mtime_ms: u64 = @intCast(@max(0, @divFloor(st_code.mtime.nanoseconds, std.time.ns_per_ms)));
+
+    const Collector = struct {
+        matched_lines: u64 = 0,
+        files_matched: u64 = 0,
+        cache_hit: [16]u8 = undefined,
+        cache_len: usize = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, std.heap.page_allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+                self.files_matched = parsed.value.filesMatched;
+                const n = @min(parsed.value.cacheHit.len, self.cache_hit.len);
+                @memcpy(self.cache_hit[0..n], parsed.value.cacheHit[0..n]);
+                self.cache_len = n;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    const win_lo_ms: u64 = (sec_1005 - 60) * 1000;
+    const win_hi_ms: u64 = (sec_1005 + 60) * 1000;
+
+    // 1. Historical window [10:04, 10:06]:
+    //    - `auto_log_src` & `json_src` match their in-line timestamps (2 + 1 = 3 lines), ignoring file mtime (> now)!
+    //    - untimestamped.txt inside `auto_log_src` returns 0 hits (strict line time).
+    //    - `code_src` (mtime mode) is pruned by mtime because mtime (~now) > win_hi_ms -> 0 hits!
+    var c1 = Collector{};
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 901,
+        .pattern = "hit_",
+        .sources = &.{ "code_src", "auto_log_src", "json_src" },
+        .timeMode = "source",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c1, .sendFn = Collector.send });
+    try std.testing.expectEqual(@as(u64, 2), c1.files_matched);
+    try std.testing.expectEqual(@as(u64, 3), c1.matched_lines);
+
+    // 2. Empty-keyword time browse over [10:04, 10:06] emits ALL matching log lines from content-time sources
+    //    (2 lines in service.log + 1 line in events.jsonl = 3 lines), while `code_src` is excluded by mtime.
+    var c2 = Collector{};
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 902,
+        .pattern = "",
+        .sources = &.{ "code_src", "auto_log_src", "json_src" },
+        .timeMode = "source",
+        .timeStartMs = win_lo_ms,
+        .timeEndMs = win_hi_ms,
+    }, &cancel, .{ .ctx = &c2, .sendFn = Collector.send });
+    try std.testing.expectEqual(@as(u64, 2), c2.files_matched);
+    try std.testing.expectEqual(@as(u64, 3), c2.matched_lines);
+
+    // 3. Recent window around `mtime` + empty pattern:
+    //    - `code_src` emits exactly 1 summary line per mtime-matched file (2 files -> 2 lines)!
+    var c3 = Collector{};
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 903,
+        .pattern = "",
+        .sources = &.{"code_src"},
+        .timeMode = "source",
+        .timeStartMs = mtime_ms - 60_000,
+        .timeEndMs = mtime_ms + 60_000,
+    }, &cancel, .{ .ctx = &c3, .sendFn = Collector.send });
+    try std.testing.expectEqual(@as(u64, 2), c3.files_matched);
+    try std.testing.expectEqual(@as(u64, 2), c3.matched_lines);
+
+    // 4. Switching `code_src` to `timeFormat = "auto"` via upsertSource isolates cache via `time_format_sig`
+    //    and now evaluates `code_src` strictly by line time -> untimestamped `main.zig` & `README.md` emit 0 lines!
+    try reg.upsertSource(arena, io, .{
+        .kind = "dir",
+        .name = "code_src",
+        .config = .{ .path = code_path, .timeFormat = "auto" },
+        .enabled = true,
+    });
+    var c4 = Collector{};
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 904,
+        .pattern = "",
+        .sources = &.{"code_src"},
+        .timeMode = "source",
+        .timeStartMs = mtime_ms - 60_000,
+        .timeEndMs = mtime_ms + 60_000,
+    }, &cancel, .{ .ctx = &c4, .sendFn = Collector.send });
+    try std.testing.expectEqual(@as(u64, 0), c4.matched_lines);
+}
+
+test "Docker E2E search: multi-level convergence, >16KiB demux, file-type filter, line-time until pushdown, 501 tolerance, and live-append cache bypass" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp_path_len = try tmp.dir.realPath(io, &real_buf);
+    const tmp_path = try arena.dupe(u8, real_buf[0..tmp_path_len]);
+
+    const sock_rel_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/sj.sock", .{tmp.sub_path});
+    const ua = try std.Io.net.UnixAddress.init(sock_rel_path);
+    var srv = try ua.listen(io, .{});
+
+    const MockServer = struct {
+        server: *std.Io.net.Server,
+        io: std.Io,
+        stop: std.atomic.Value(bool) = .init(false),
+        live_appended: std.atomic.Value(bool) = .init(false),
+        uri_mu: std.Io.Mutex = .init,
+        last_logs_uri: [512]u8 = undefined,
+        last_logs_uri_len: usize = 0,
+
+        fn run(ctx: *@This()) void {
+            const alloc = std.heap.page_allocator;
+            while (!ctx.stop.load(.acquire)) {
+                const conn = ctx.server.accept(ctx.io) catch break;
+                ctx.handleConn(alloc, conn) catch {};
+            }
+        }
+
+        fn snapshotLastUri(ctx: *@This(), out: []u8) []const u8 {
+            ctx.uri_mu.lockUncancelable(ctx.io);
+            defer ctx.uri_mu.unlock(ctx.io);
+            const n = @min(out.len, ctx.last_logs_uri_len);
+            @memcpy(out[0..n], ctx.last_logs_uri[0..n]);
+            return out[0..n];
+        }
+
+        fn handleConn(ctx: *@This(), alloc: std.mem.Allocator, conn: std.Io.net.Stream) !void {
+            defer conn.close(ctx.io);
+            var rbuf: [4096]u8 = undefined;
+            var wbuf: [4096]u8 = undefined;
+            var r = conn.reader(ctx.io, &rbuf);
+            var w = conn.writer(ctx.io, &wbuf);
+
+            var req_buf: [2048]u8 = undefined;
+            var total: usize = 0;
+            while (total < req_buf.len) {
+                const n = docker_logs.readReaderSome(&r.interface, req_buf[total..]) catch break;
+                if (n == 0) break;
+                total += n;
+                if (docker_logs.findHeaderEnd(req_buf[0..total]) != null) break;
+            }
+            const req_head = req_buf[0..total];
+            const line_end = std.mem.indexOfScalar(u8, req_head, '\n') orelse return;
+            const first_line = std.mem.trimEnd(u8, req_head[0..line_end], "\r");
+
+            if (std.mem.indexOf(u8, first_line, "GET /_ping ") != null) {
+                try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+                try w.interface.flush();
+                return;
+            }
+
+            if (std.mem.indexOf(u8, first_line, "GET /containers/json") != null) {
+                const body =
+                    \\[
+                    \\  {"Id":"1111111111112222222222223333333333334444444444445555555555556666","Names":["/gateway"],"Image":"envoy:v1.31","State":"running","Status":"Up 1h","Created":1763114400},
+                    \\  {"Id":"2222222222223333333333334444444444445555555555556666777777778888","Names":["/worker-tty"],"Image":"alpine:3.20","State":"running","Status":"Up 1h","Created":1763114400},
+                    \\  {"Id":"3333333333334444444444445555555555556666666666667777777777778888","Names":["/no-log-driver"],"Image":"pause:3.9","State":"running","Status":"Up 1h","Created":1763114400}
+                    \\]
+                ;
+                try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n");
+                try docker_logs.writeChunkedBody(&w.interface, body, 64);
+                try w.interface.flush();
+                return;
+            }
+
+            if (std.mem.indexOf(u8, first_line, "/logs") != null) {
+                ctx.uri_mu.lockUncancelable(ctx.io);
+                const copy_n = @min(first_line.len, ctx.last_logs_uri.len);
+                @memcpy(ctx.last_logs_uri[0..copy_n], first_line[0..copy_n]);
+                ctx.last_logs_uri_len = copy_n;
+                ctx.uri_mu.unlock(ctx.io);
+            }
+
+            // Container 1: `gateway` (multiplexed stdout + stderr + >16 KiB split line + optional live append)
+            if (std.mem.indexOf(u8, first_line, "/containers/111111111111") != null) {
+                var since_filter_sec: ?u64 = null;
+                if (std.mem.indexOf(u8, first_line, "since=")) |s_idx| {
+                    const rest = first_line[s_idx + 6 ..];
+                    var end_idx: usize = 0;
+                    while (end_idx < rest.len and std.ascii.isDigit(rest[end_idx])) : (end_idx += 1) {}
+                    if (end_idx > 0) {
+                        since_filter_sec = std.fmt.parseInt(u64, rest[0..end_idx], 10) catch null;
+                    }
+                }
+                var tp_line1 = time_parser.CompiledTimeParser{};
+                const line1_sec: u64 = @intCast(@divFloor(
+                    tp_line1.parseLine("2026-11-14T10:00:00Z", .{}, null, null).?,
+                    std.time.ns_per_s,
+                ));
+
+                var mux: std.ArrayList(u8) = .empty;
+                defer mux.deinit(alloc);
+
+                // Line 1 (10:00:00Z, stdout) — honored by Docker `--since`
+                if (since_filter_sec == null or line1_sec >= since_filter_sec.?) {
+                    try docker_logs.appendDockerMuxFrame(
+                        alloc,
+                        &mux,
+                        1,
+                        "2026-11-14T10:00:00.100000000Z {\"service\":\"gateway\",\"status\":200,\"trace\":\"TR-100\",\"env\":\"prod\"}\n",
+                    );
+                }
+
+                // Split >16 KiB stdout frame (10:05:00.250Z) + interleaved stderr frame (flushes as Line 2) + continuation stdout frame (flushes as Line 3)
+                var part1: std.ArrayList(u8) = .empty;
+                defer part1.deinit(alloc);
+                try part1.appendSlice(alloc, "2026-11-14T10:05:00.250000000Z {\"service\":\"gateway\",\"status\":502,\"trace\":\"TR-200\",\"pad\":\"");
+                try part1.appendNTimes(alloc, 'X', 16420);
+                try docker_logs.appendDockerMuxFrame(alloc, &mux, 1, part1.items);
+
+                // Line 2 (10:05:00.600Z, stderr)
+                try docker_logs.appendDockerMuxFrame(
+                    alloc,
+                    &mux,
+                    2,
+                    "2026-11-14T10:05:00.600000000Z [STDERR] status=502 trace=TR-201 env=prod debug_noise\n",
+                );
+
+                // Line 3 continuation (duplicate Docker timestamp stripped!)
+                try docker_logs.appendDockerMuxFrame(
+                    alloc,
+                    &mux,
+                    1,
+                    "2026-11-14T10:05:00.250000000Z _SPLIT_END\",\"env\":\"prod\"}\n",
+                );
+
+                // Line 4 (10:10:00Z, stdout)
+                try docker_logs.appendDockerMuxFrame(
+                    alloc,
+                    &mux,
+                    1,
+                    "2026-11-14T10:10:00.900000000Z {\"service\":\"gateway\",\"status\":502,\"trace\":\"TR-300\",\"env\":\"staging\"}\n",
+                );
+
+                // Optional live-appended Line 5
+                if (ctx.live_appended.load(.acquire)) {
+                    try docker_logs.appendDockerMuxFrame(
+                        alloc,
+                        &mux,
+                        1,
+                        "2026-11-14T10:12:00.000000000Z {\"service\":\"gateway\",\"status\":502,\"trace\":\"TR-LIVE-999\",\"env\":\"prod\"}\n",
+                    );
+                }
+
+                try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+                try docker_logs.writeChunkedBody(&w.interface, mux.items, 53);
+                try w.interface.flush();
+                return;
+            }
+
+            // Container 2: `worker-tty` (Tty: true raw-stream)
+            if (std.mem.indexOf(u8, first_line, "/containers/222222222222") != null) {
+                const raw_tty = "2026-11-14T10:05:30.000000000Z worker status=502 trace=TR-TTY env=prod\r\n";
+                try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+                try docker_logs.writeChunkedBody(&w.interface, raw_tty, 19);
+                try w.interface.flush();
+                return;
+            }
+
+            // Container 3: `no-log-driver` (`--log-driver=none` returns HTTP 501)
+            if (std.mem.indexOf(u8, first_line, "/containers/333333333333") != null) {
+                const msg = "{\"message\":\"configured logging driver does not support reading\"}";
+                try w.interface.print("HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ msg.len, msg });
+                try w.interface.flush();
+                return;
+            }
+
+            try w.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            try w.interface.flush();
+        }
+    };
+
+    var mock = MockServer{ .server = &srv, .io = io };
+    const srv_thread = try std.Thread.spawn(.{}, MockServer.run, .{&mock});
+    defer {
+        mock.stop.store(true, .release);
+        if (ua.connect(io)) |wake_conn| {
+            wake_conn.close(io);
+        } else |_| {}
+        srv.deinit(io);
+        srv_thread.join();
+    }
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, tmp_path, null);
+    defer reg.deinit(io);
+    reg.docker_host = sock_rel_path;
+
+    try reg.upsertSource(arena, io, .{
+        .kind = "docker",
+        .name = "docker",
+        .config = .{ .path = "auto" },
+        .enabled = true,
+    });
+
+    const Collector = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mu: std.Io.Mutex = .init,
+        matched_lines: u64 = 0,
+        files_matched: u64 = 0,
+        files_searched: u64 = 0,
+        gateway_lines: std.ArrayList(u64) = .empty,
+        cache_hit: [32]u8 = undefined,
+        cache_len: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            self.gateway_lines.deinit(self.allocator);
+        }
+
+        fn tier(self: *const @This()) []const u8 {
+            return self.cache_hit[0..self.cache_len];
+        }
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.mu.lockUncancelable(self.io);
+            defer self.mu.unlock(self.io);
+
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"hits\"") != null) {
+                var parsed = try std.json.parseFromSlice(HitsFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                for (parsed.value.items) |it| {
+                    if (std.mem.eql(u8, it.file, "docker/gateway")) {
+                        try self.gateway_lines.append(self.allocator, it.line);
+                    }
+                }
+            } else if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, self.allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.matched_lines = parsed.value.matchedLines;
+                self.files_matched = parsed.value.filesMatched;
+                self.files_searched = parsed.value.filesSearched;
+                const ch = parsed.value.cacheHit;
+                const n = @min(ch.len, self.cache_hit.len);
+                @memcpy(self.cache_hit[0..n], ch[0..n]);
+                self.cache_len = n;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+
+    // 1. Multi-level same-line convergence (`502` + `prod` - `debug_noise`) across >16 KiB multiplexed + raw TTY + 501 container
+    {
+        var c1 = Collector{ .allocator = gpa, .io = io };
+        defer c1.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1001,
+            .pattern = "502",
+            .contains = &.{"prod"},
+            .excludes = &.{"debug_noise"},
+        }, &cancel, .{ .ctx = &c1, .sendFn = Collector.send });
+
+        try std.testing.expectEqual(@as(u64, 3), c1.files_searched);
+        try std.testing.expectEqual(@as(u64, 2), c1.files_matched);
+        try std.testing.expectEqual(@as(u64, 2), c1.matched_lines);
+        try std.testing.expectEqualStrings("none", c1.tier());
+        try std.testing.expectEqual(@as(usize, 1), c1.gateway_lines.items.len);
+        try std.testing.expectEqual(@as(u64, 3), c1.gateway_lines.items[0]);
+
+        // `/api/file` line 3 on `docker/gateway` must match the exact >16 KiB reassembled record
+        const preview_l3 = try reg.buildLinePreviewJson(arena, io, "docker/gateway", 3, 0);
+        try std.testing.expect(std.mem.indexOf(u8, preview_l3, "TR-200") != null);
+        try std.testing.expect(std.mem.indexOf(u8, preview_l3, "_SPLIT_END") != null);
+    }
+
+    // 2. Scope file-type filter: `types = ["log"]` matches Docker containers, `types = ["zig"]` excludes them
+    {
+        var c_log = Collector{ .allocator = gpa, .io = io };
+        defer c_log.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1002,
+            .pattern = "TR-100",
+            .types = &.{"log"},
+        }, &cancel, .{ .ctx = &c_log, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 1), c_log.matched_lines);
+
+        var c_zig = Collector{ .allocator = gpa, .io = io };
+        defer c_zig.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1003,
+            .pattern = "TR-100",
+            .types = &.{"zig"},
+        }, &cancel, .{ .ctx = &c_zig, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 0), c_zig.matched_lines);
+    }
+
+    // 3. Nanosecond line-timestamp window [10:04:00Z, 10:06:00Z] pushes BOTH `since=` and `until=` in `.auto`
+    // mode and aligns 1:1 with `/api/file?since=`, while non-auto `timeFormat` skips `since`/`until` pushdown!
+    {
+        var tp = time_parser.CompiledTimeParser{};
+        const lo_ns = tp.parseLine("2026-11-14T10:04:00Z", .{}, null, null).?;
+        const hi_ns = tp.parseLine("2026-11-14T10:06:00Z", .{}, null, null).?;
+        const expected_since_sec = (@as(u64, @intCast(lo_ns)) / std.time.ns_per_s) -| 2;
+
+        var c_time = Collector{ .allocator = gpa, .io = io };
+        defer c_time.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1004,
+            .pattern = "TR-",
+            .timeMode = "source",
+            .timeStartMs = lo_ns / std.time.ns_per_ms,
+            .timeEndMs = hi_ns / std.time.ns_per_ms,
+        }, &cancel, .{ .ctx = &c_time, .sendFn = Collector.send });
+
+        var uri_scratch: [512]u8 = undefined;
+        const seen_uri = mock.snapshotLastUri(&uri_scratch);
+        try std.testing.expect(std.mem.indexOf(u8, seen_uri, "until=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seen_uri, "since=") != null);
+
+        // With `since=10:03:58Z`, `gateway` emits lines 1 & 2 (10:05:00Z) + `worker-tty` line 1 (10:05:30Z) = 3 matches!
+        try std.testing.expectEqual(@as(u64, 3), c_time.matched_lines);
+        try std.testing.expectEqual(@as(usize, 2), c_time.gateway_lines.items.len);
+        try std.testing.expectEqual(@as(u64, 1), c_time.gateway_lines.items[0]);
+        try std.testing.expectEqual(@as(u64, 2), c_time.gateway_lines.items[1]);
+
+        const aligned_preview = try reg.buildLinePreviewJsonWithSince(
+            arena,
+            io,
+            "docker/gateway",
+            c_time.gateway_lines.items[1],
+            0,
+            expected_since_sec,
+        );
+        try std.testing.expect(std.mem.indexOf(u8, aligned_preview, "_SPLIT_END") != null);
+
+        // Non-auto `timeFormat` must NOT push `since=` or `until=`
+        var c_custom = Collector{ .allocator = gpa, .io = io };
+        defer c_custom.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1014,
+            .pattern = "TR-",
+            .timeMode = "content",
+            .timeFormat = "%Y-%m-%dT%H:%M:%S",
+            .timeStartMs = lo_ns / std.time.ns_per_ms,
+            .timeEndMs = hi_ns / std.time.ns_per_ms,
+        }, &cancel, .{ .ctx = &c_custom, .sendFn = Collector.send });
+
+        const seen_custom_uri = mock.snapshotLastUri(&uri_scratch);
+        try std.testing.expect(std.mem.indexOf(u8, seen_custom_uri, "since=") == null);
+        try std.testing.expect(std.mem.indexOf(u8, seen_custom_uri, "until=") == null);
+        try std.testing.expectEqual(@as(u64, 3), c_custom.matched_lines);
+        try std.testing.expectEqual(@as(u64, 3), c_custom.gateway_lines.items[1]);
+    }
+
+    // 4. Live-append cache bypass: appending a new line to a running container is immediately visible on repeat query (`cacheHit == "none"`)
+    {
+        var c_before = Collector{ .allocator = gpa, .io = io };
+        defer c_before.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1005,
+            .pattern = "TR-LIVE-999",
+        }, &cancel, .{ .ctx = &c_before, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 0), c_before.matched_lines);
+        try std.testing.expectEqualStrings("none", c_before.tier());
+
+        mock.live_appended.store(true, .release);
+
+        var c_after = Collector{ .allocator = gpa, .io = io };
+        defer c_after.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1006,
+            .pattern = "TR-LIVE-999",
+        }, &cancel, .{ .ctx = &c_after, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 1), c_after.matched_lines);
+        try std.testing.expectEqualStrings("none", c_after.tier());
+        try std.testing.expectEqual(@as(u64, 5), c_after.gateway_lines.items[0]);
+    }
+
+    // 5. Multi-line proximity (`nearbyLines > 0`) matches terms spanning adjacent Docker container lines in RAM (zero disk writes)
+    {
+        var c_strict = Collector{ .allocator = gpa, .io = io };
+        defer c_strict.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1007,
+            .pattern = "TR-300",
+            .contains = &.{"TR-LIVE-999"},
+            .nearbyLines = 0,
+        }, &cancel, .{ .ctx = &c_strict, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 0), c_strict.matched_lines);
+
+        var c_nearby = Collector{ .allocator = gpa, .io = io };
+        defer c_nearby.deinit();
+        try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+            .id = 1008,
+            .pattern = "TR-300",
+            .contains = &.{"TR-LIVE-999"},
+            .nearbyLines = 5,
+        }, &cancel, .{ .ctx = &c_nearby, .sendFn = Collector.send });
+        try std.testing.expectEqual(@as(u64, 1), c_nearby.matched_lines);
+        try std.testing.expectEqualStrings("nearby", c_nearby.tier());
+    }
+}
+
+test "Docker E2E search: >16 MiB stream nearbyLines bounded prefix read matches without StreamTooLarge" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp_path_len = try tmp.dir.realPath(io, &real_buf);
+    const tmp_path = try arena.dupe(u8, real_buf[0..tmp_path_len]);
+
+    const sock_rel_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/big.sock", .{tmp.sub_path});
+    const ua = try std.Io.net.UnixAddress.init(sock_rel_path);
+    var srv = try ua.listen(io, .{});
+
+    const BigServer = struct {
+        server: *std.Io.net.Server,
+        io: std.Io,
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(ctx: *@This()) void {
+            while (!ctx.stop.load(.acquire)) {
+                const conn = ctx.server.accept(ctx.io) catch break;
+                ctx.handleConn(conn) catch {};
+            }
+        }
+
+        fn handleConn(ctx: *@This(), conn: std.Io.net.Stream) !void {
+            defer conn.close(ctx.io);
+            var rbuf: [2048]u8 = undefined;
+            var wbuf: [32768]u8 = undefined;
+            var r = conn.reader(ctx.io, &rbuf);
+            var w = conn.writer(ctx.io, &wbuf);
+
+            var req_buf: [2048]u8 = undefined;
+            var total: usize = 0;
+            while (total < req_buf.len) {
+                const n = docker_logs.readReaderSome(&r.interface, req_buf[total..]) catch break;
+                if (n == 0) break;
+                total += n;
+                if (docker_logs.findHeaderEnd(req_buf[0..total]) != null) break;
+            }
+            const req_head = req_buf[0..total];
+            const line_end = std.mem.indexOfScalar(u8, req_head, '\n') orelse return;
+            const first_line = std.mem.trimEnd(u8, req_head[0..line_end], "\r");
+
+            if (std.mem.indexOf(u8, first_line, "GET /_ping ") != null) {
+                try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+                try w.interface.flush();
+                return;
+            }
+            if (std.mem.indexOf(u8, first_line, "GET /containers/json") != null) {
+                const body =
+                    \\[{"Id":"4444444444445555555555556666666666667777777777778888888888889999","Names":["/big-stream"],"Image":"nginx:latest","State":"running","Status":"Up","Created":1763114400}]
+                ;
+                try w.interface.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+                try w.interface.flush();
+                return;
+            }
+            if (std.mem.indexOf(u8, first_line, "/containers/444444444444") != null) {
+                const head_lines =
+                    "2026-11-14T10:00:00Z ALPHA_PREFIX_HIT\n" ++
+                    "2026-11-14T10:00:01Z BETA_PREFIX_HIT\n";
+                const pad_line = "2026-11-14T10:00:02Z pad_filler_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+                const pad_repeats: usize = 165_000; // ~16.5 MiB > 16 MiB
+                const total_len: usize = head_lines.len + pad_repeats * pad_line.len;
+                try w.interface.print(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\nContent-Length: {d}\r\n\r\n",
+                    .{total_len},
+                );
+                try w.interface.writeAll(head_lines);
+                var i: usize = 0;
+                while (i < pad_repeats) : (i += 1) {
+                    try w.interface.writeAll(pad_line);
+                }
+                try w.interface.flush();
+                return;
+            }
+            try w.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            try w.interface.flush();
+        }
+    };
+
+    var mock = BigServer{ .server = &srv, .io = io };
+    const th = try std.Thread.spawn(.{}, BigServer.run, .{&mock});
+    defer {
+        mock.stop.store(true, .release);
+        if (ua.connect(io)) |wc| wc.close(io) else |_| {}
+        srv.deinit(io);
+        th.join();
+    }
+
+    var reg = source_registry.SourceRegistry.init(gpa, io, tmp_path, null);
+    defer reg.deinit(io);
+    reg.docker_host = sock_rel_path;
+    try reg.upsertSource(arena, io, .{
+        .kind = "docker",
+        .name = "docker",
+        .config = .{ .path = "auto" },
+        .enabled = true,
+    });
+
+    const DoneCollector = struct {
+        io: std.Io,
+        mu: std.Io.Mutex = .init,
+        matched_lines: u64 = 0,
+        tier_buf: [32]u8 = undefined,
+        tier_len: usize = 0,
+
+        fn send(ctx: *anyopaque, json_text: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, json_text, "\"type\":\"done\"") != null) {
+                var parsed = try std.json.parseFromSlice(DoneFrame, std.heap.page_allocator, json_text, .{
+                    .ignore_unknown_fields = true,
+                });
+                defer parsed.deinit();
+                self.mu.lockUncancelable(self.io);
+                defer self.mu.unlock(self.io);
+                self.matched_lines = parsed.value.matchedLines;
+                const tn = @min(parsed.value.cacheHit.len, self.tier_buf.len);
+                @memcpy(self.tier_buf[0..tn], parsed.value.cacheHit[0..tn]);
+                self.tier_len = tn;
+            }
+        }
+    };
+
+    var cancel = std.atomic.Value(bool).init(false);
+    var col = DoneCollector{ .io = io };
+    try executeSearchWithRegistry(gpa, io, tmp.dir, &reg, .{
+        .id = 2001,
+        .pattern = "ALPHA_PREFIX_HIT",
+        .contains = &.{"BETA_PREFIX_HIT"},
+        .nearbyLines = 5,
+    }, &cancel, .{ .ctx = &col, .sendFn = DoneCollector.send });
+
+    try std.testing.expectEqual(@as(u64, 1), col.matched_lines);
+    try std.testing.expectEqualStrings("nearby", col.tier_buf[0..col.tier_len]);
 }

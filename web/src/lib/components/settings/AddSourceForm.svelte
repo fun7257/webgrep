@@ -2,16 +2,16 @@
   import { workbench } from '$lib/state.svelte';
   import type { DirSuggestEntry } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
-  import StreamGuideCard from './StreamGuideCard.svelte';
+  import SourceTimeFormatEditor from './SourceTimeFormatEditor.svelte';
   import {
     AlertTriangle,
     ChevronRight,
+    Container,
     FileText,
     Folder,
     FolderOpen,
     Loader2,
     Plus,
-    Radio,
     X,
   } from 'lucide-svelte';
 
@@ -24,9 +24,12 @@
 
   const t = $derived(workbench.t.ui);
 
-  let kind = $state<'dir' | 'file' | 'stream'>('dir');
+  let kind = $state<'dir' | 'file' | 'docker'>('dir');
   let pathInput = $state('');
   let nameInput = $state('');
+  let timeFormatInput = $state('');
+  let timeFormatTouched = $state(false);
+  let timeFormatValid = $state(true);
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
 
@@ -35,41 +38,77 @@
   let selectedIdx = $state(0);
   let suggestTimer: ReturnType<typeof setTimeout> | null = null;
   let pathEl = $state<HTMLInputElement | null>(null);
-  let streamNameEl = $state<HTMLInputElement | null>(null);
 
   const derivedName = $derived.by(() => {
     const clean = pathInput.trim().replace(/\/+$/, '');
+    if (kind === 'docker') {
+      const sep = clean.indexOf('::');
+      if (sep !== -1) {
+        const target = clean.slice(sep + 2).trim();
+        if (target) return target;
+      }
+      return 'docker';
+    }
     if (!clean) return '';
     const parts = clean.split('/');
     return parts[parts.length - 1] || '';
   });
 
   function queueSuggest(val: string) {
-    if (kind === 'stream') return;
     if (suggestTimer) clearTimeout(suggestTimer);
+    const reqKind = kind;
     suggestTimer = setTimeout(async () => {
-      const list = await workbench.fetchDirSuggestions(val, kind === 'file' ? 'file' : 'dir');
+      const list = await workbench.fetchDirSuggestions(val, reqKind);
+      if (kind !== reqKind) return;
       suggestions = list;
       selectedIdx = 0;
       showSuggest = list.length > 0;
     }, 60);
   }
 
-  function selectKind(next: 'dir' | 'file' | 'stream') {
+  function selectKind(next: 'dir' | 'file' | 'docker') {
     if (kind === next) return;
+    const prev = kind;
     kind = next;
     submitError = null;
-    if (next === 'stream') {
-      showSuggest = false;
-      requestAnimationFrame(() => streamNameEl?.focus());
-    } else {
-      queueSuggest(pathInput);
-      requestAnimationFrame(() => pathEl?.focus());
+    if (next === 'docker') {
+      if (!timeFormatTouched && !timeFormatInput) {
+        timeFormatInput = 'auto';
+      }
+      const cur = pathInput.trim();
+      const isDockerEndpoint =
+        cur === 'auto' ||
+        cur.includes('::') ||
+        cur.startsWith('unix://') ||
+        cur.startsWith('tcp://') ||
+        cur.startsWith('http://') ||
+        cur.endsWith('.sock') ||
+        cur.includes('/containers');
+      if (cur && !isDockerEndpoint) {
+        pathInput = '';
+      }
+    } else if (prev === 'docker') {
+      if (!timeFormatTouched && timeFormatInput === 'auto') {
+        timeFormatInput = '';
+      }
+      const cur = pathInput.trim();
+      if (
+        cur === 'auto' ||
+        cur.includes('::') ||
+        cur.startsWith('unix://') ||
+        cur.startsWith('tcp://') ||
+        cur.startsWith('http://') ||
+        cur.endsWith('.sock')
+      ) {
+        pathInput = '';
+      }
     }
+    queueSuggest(pathInput);
+    requestAnimationFrame(() => pathEl?.focus());
   }
 
   function apply(entry: DirSuggestEntry, drill: boolean) {
-    const isDirectory = entry.isDir !== false;
+    const isDirectory = entry.isDir === true;
     const shouldDrill = isDirectory && (drill || kind === 'file');
     const next = shouldDrill ? (entry.path.endsWith('/') ? entry.path : `${entry.path}/`) : entry.path;
     pathInput = next;
@@ -121,28 +160,17 @@
   }
 
   async function submit() {
-    if (kind === 'stream') {
-      const targetStream = (nameInput.trim() || 'app-logs').trim();
-      submitting = true;
-      submitError = null;
-      try {
-        await workbench.ingestTestLog(targetStream);
-        nameInput = '';
-        ondone();
-      } catch (err) {
-        submitError = err instanceof Error ? err.message : t.addFailed;
-      } finally {
-        submitting = false;
-      }
-      return;
-    }
-
-    const cleanPath = pathInput.trim();
+    const rawTrimmed = pathInput.trim();
+    const cleanPath = kind === 'docker' ? rawTrimmed || 'auto' : rawTrimmed;
     if (!cleanPath) {
       submitError = kind === 'file' ? t.pathRequiredFile : t.pathRequiredDir;
       return;
     }
-    const finalName = (nameInput.trim() || derivedName || 'project').trim();
+    if (!timeFormatValid) {
+      submitError = t.sourceTimeCustomRequired;
+      return;
+    }
+    const finalName = (nameInput.trim() || derivedName || (kind === 'docker' ? 'docker' : 'project')).trim();
     submitting = true;
     submitError = null;
     try {
@@ -152,9 +180,13 @@
         path: cleanPath,
         config: { path: cleanPath },
         enabled: true,
+        timeFormat: timeFormatInput.trim(),
       });
       pathInput = '';
       nameInput = '';
+      timeFormatTouched = false;
+      timeFormatInput = kind === 'docker' ? 'auto' : '';
+      timeFormatValid = true;
       showSuggest = false;
       ondone();
     } catch (err) {
@@ -165,7 +197,7 @@
   }
 
   const inputCls =
-    'h-10 w-full rounded-lg border border-border/80 bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-foreground/50 focus:outline-none';
+    'h-10 w-full rounded-lg border border-border/80 bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-foreground/50 focus:outline-none [@media(any-pointer:coarse)]:text-[16px]';
 </script>
 
 <div class="space-y-2.5 rounded-xl border border-border/60 bg-secondary/20 p-3">
@@ -173,39 +205,18 @@
     <Segmented
       value={kind}
       options={[
-        { value: 'dir', icon: Folder, title: t.kindDirDesc },
-        { value: 'file', icon: FileText, title: t.kindFileDesc },
-        { value: 'stream', icon: Radio, title: t.kindStreamDesc },
+        { value: 'dir', label: t.dir, icon: Folder, title: t.kindDirDesc },
+        { value: 'file', label: t.file, icon: FileText, title: t.kindFileDesc },
+        { value: 'docker', label: t.docker, icon: Container, title: t.kindDockerDesc },
       ]}
       onchange={selectKind}
     />
   </div>
 
-  {#if kind === 'stream'}
-    <div class="relative">
-      <Radio class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      <input
-        bind:this={streamNameEl}
-        type="text"
-        bind:value={nameInput}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            void submit();
-          }
-        }}
-        title={t.streamNamePlaceholder}
-        placeholder={t.streamNamePlaceholder}
-        spellcheck="false"
-        autocomplete="off"
-        class={`${inputCls} pl-9 pr-3`}
-      />
-    </div>
-
-    <StreamGuideCard serviceName={nameInput || 'app-logs'} />
-  {:else}
-    <div class="relative">
-      {#if kind === 'file'}
+  <div class="relative">
+      {#if kind === 'docker'}
+        <Container class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      {:else if kind === 'file'}
         <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
       {:else}
         <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -220,8 +231,12 @@
         }}
         onfocus={() => queueSuggest(pathInput)}
         onkeydown={onPathKeydown}
-        title={kind === 'file' ? t.filePath : t.dirPath}
-        placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
+        title={kind === 'docker' ? t.dockerEndpoint : kind === 'file' ? t.filePath : t.dirPath}
+        placeholder={kind === 'docker'
+          ? t.dockerPlaceholder
+          : kind === 'file'
+            ? t.filePlaceholder
+            : t.dirPlaceholder}
         spellcheck="false"
         autocomplete="off"
         class={`${inputCls} pl-9 pr-3`}
@@ -235,7 +250,7 @@
           class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
         >
           {#each suggestions as entry, idx (entry.path)}
-            {@const isDir = entry.isDir !== false}
+            {@const isDir = entry.isDir === true}
             <div
               class={`flex items-center rounded-lg ${
                 idx === selectedIdx ? 'bg-secondary' : 'hover:bg-secondary/50'
@@ -247,7 +262,9 @@
                 onclick={() => apply(entry, false)}
                 class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs"
               >
-                {#if isDir}
+                {#if kind === 'docker' && !isDir}
+                  <Container class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {:else if isDir}
                   <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 {:else}
                   <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -284,13 +301,24 @@
       title={t.nameOptional}
       placeholder={derivedName
         ? `${t.defaultNamePrefix}${derivedName}`
-        : kind === 'file'
-          ? t.defaultFileName
-          : t.defaultDirName}
+        : kind === 'docker'
+          ? t.defaultDockerName
+          : kind === 'file'
+            ? t.defaultFileName
+            : t.defaultDirName}
       spellcheck="false"
       class={`${inputCls} px-3`}
     />
-  {/if}
+
+    <SourceTimeFormatEditor
+      value={timeFormatInput}
+      onchange={(fmt, valid) => {
+        timeFormatTouched = true;
+        timeFormatInput = fmt;
+        timeFormatValid = valid;
+      }}
+      onsubmit={() => void submit()}
+    />
 
   {#if submitError}
     <div class="flex items-center justify-between gap-2 rounded-lg bg-status/10 px-2.5 py-2 text-xs text-status">
@@ -306,7 +334,7 @@
 
   <button
     type="button"
-    disabled={submitting || (kind !== 'stream' && !pathInput.trim())}
+    disabled={submitting || (kind !== 'docker' && !pathInput.trim()) || !timeFormatValid}
     onclick={submit}
     title={t.addSource}
     aria-label={t.addSource}

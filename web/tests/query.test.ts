@@ -1,186 +1,335 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  formatSearchTerm,
-  parseDollarFlags,
-  parseSearchQuery,
-  removeInlineModifierFromPattern,
-  toggleTermExclusion,
+  buildQueryCacheKeys,
+  compileSearchQuery,
+  computeDockerPreviewSinceSec,
+  createQueryStep,
+  encodeStepToWire,
+  formatHistoryLabel,
+  parseTimeModifierSpec,
 } from '../src/lib/query.ts';
+import {
+  TIME_FORMAT_PRESETS,
+  buildCalendarMonthGrid,
+  buildCustomRangeSpec,
+  formatTimeScopeLabel,
+  parseCustomRangeDraft,
+  parsePastedDateTime,
+} from '../src/lib/time-range.ts';
+import type { ScopeFilter } from '../src/lib/types.ts';
 import {
   analyzeStructuredLine,
   buildHighlightSegments,
   decodeHumanEscapes,
   extractLeadingNanoTimestamp,
-  getCachedHitSnippet,
+  getCachedHighlightSegments,
   highlightCodeWithMatches,
   universalPrettyStructure,
 } from '../src/lib/utils.ts';
 
-describe('removeInlineModifierFromPattern (pill removal)', () => {
-  it('removes -error from "upstream-error -error" without corrupting upstream-error', () => {
-    const next = removeInlineModifierFromPattern('upstream-error -error', '-error');
-    assert.equal(next, 'upstream-error');
-  });
+const EMPTY_SCOPE: ScopeFilter = { sources: [], excludedSources: [], types: [], timePreset: '' };
 
-  it('removes middle modifier pill while preserving surrounding tokens', () => {
-    const next = removeInlineModifierFromPattern(
-      'ERROR -healthcheck +payment @testdata -@legacy',
-      '-healthcheck'
+describe('Structured Query Model & Compiler', () => {
+  it('encodeStepToWire keeps plain text literal (spaces, -O3, in:foo, /api/v1) and encodes flags cleanly', () => {
+    assert.equal(encodeStepToWire(createQueryStep('hello world')), 'hello world');
+    assert.equal(encodeStepToWire(createQueryStep('-O3')), '-O3');
+    assert.equal(encodeStepToWire(createQueryStep('in:src/')), 'in:src/');
+    assert.equal(encodeStepToWire(createQueryStep('/api/v1')), '/api/v1');
+
+    assert.equal(
+      encodeStepToWire(createQueryStep('Error', { caseSensitive: true })),
+      '$c(Error)'
     );
-    assert.equal(next, 'ERROR +payment @testdata -@legacy');
-  });
-
-  it('removes scoped $w / $cw / $r tokens cleanly', () => {
-    const next = removeInlineModifierFromPattern(
-      'payment $w(ErrorCode) -$r(timeout|retry)',
-      '-$r(timeout|retry)'
+    assert.equal(
+      encodeStepToWire(createQueryStep('Error', { wholeWord: true })),
+      '$w(Error)'
     );
-    assert.equal(next, 'payment $w(ErrorCode)');
-  });
-});
+    assert.equal(
+      encodeStepToWire(createQueryStep('Error', { caseSensitive: true, wholeWord: true })),
+      '$cw(Error)'
+    );
+    assert.equal(
+      encodeStepToWire(createQueryStep('pub\\s+fn', { isRegex: true })),
+      '$r(pub\\s+fn)'
+    );
+    assert.equal(
+      encodeStepToWire(createQueryStep('pub\\s+fn', { isRegex: true, caseSensitive: true, wholeWord: true })),
+      '$rcw(pub\\s+fn)'
+    );
 
-const SOURCES = [{ id: 'u-1', name: 'zedis-rust' }, { name: 'testdata' }, { name: 'legacy' }];
-
-describe('parseSearchQuery (space / - / "" / in: / time: / /re/ / smart case)', () => {
-  it('space-separated terms are all required; first one is the primary wire pattern', () => {
-    const q = parseSearchQuery('pub fn async members');
-    assert.equal(q.primaryPattern, 'pub');
-    assert.equal(q.primaryRaw, 'pub');
-    assert.deepEqual(q.contains, ['fn', 'async', 'members']);
-    assert.deepEqual(q.excludes, []);
-  });
-
-  it('-word excludes, "phrase" keeps spaces, and a quoted leading dash stays literal', () => {
-    const q = parseSearchQuery('error -timeout "retry in 50ms" -"health check" "-O3"');
-    assert.equal(q.primaryPattern, 'error');
-    assert.deepEqual(q.contains, ['retry in 50ms', '$c(-O3)']);
-    assert.deepEqual(q.excludes, ['timeout', 'health check']);
-    assert.ok(q.modifiers.some((m) => m.kind === 'include' && m.value === '"retry in 50ms"'));
+    // Literal strings matching `$flags(...)` are escaped as `$r(...)` so backend doesn't reinterpret them
+    assert.equal(encodeStepToWire(createQueryStep('$r(x)')), '$r(\\$r\\(x\\))');
   });
 
-  it('symbols that are not operators stay literal (->, --release, "status":, @Vector(64, u8))', () => {
-    const q = parseSearchQuery('-> --release "status": @Vector(64, u8) @import("std")', Date.now(), SOURCES);
-    assert.equal(q.primaryPattern, '->');
-    assert.deepEqual(q.contains, ['--release', '"status":', '$c(@Vector(64, u8))', '@import("std")']);
-    assert.deepEqual(q.globs, []);
-    assert.deepEqual(q.excludes, []);
-  });
-
-  it('a lone -O3 / -v is a search, not an exclusion', () => {
-    const q = parseSearchQuery('-O3');
-    assert.equal(q.primaryPattern, '$c(-O3)');
-    assert.deepEqual(q.excludes, []);
-  });
-
-  it('in: covers data sources, file types and paths; -in: excludes; comma = OR', () => {
-    const q = parseSearchQuery('members in:zedis-rust -in:legacy in:.rs,*.go -in:*_test.rs in:src/ in:server', Date.now(), SOURCES);
-    assert.deepEqual(q.globs, ['zedis-rust', '!legacy']);
-    assert.deepEqual(q.fileGlobs, ['*.rs', '*.go', '!*_test.rs', 'src/', 'server']);
-    assert.equal(q.primaryPattern, 'members');
-    assert.deepEqual(q.contains, []);
-    assert.ok(q.modifiers.some((m) => m.kind === 'exclude-file' && m.value === 'legacy'));
-    // `in:a,b` with two sources is ONE globs entry (backend ORs names inside an entry, ANDs entries).
-    assert.deepEqual(parseSearchQuery('x in:zedis-rust,testdata', Date.now(), SOURCES).globs, ['zedis-rust,testdata']);
-    // Qualifier keys are case-insensitive; an empty value is still being typed.
-    const typing = parseSearchQuery('members IN:zedis-rust in:', Date.now(), SOURCES);
-    assert.deepEqual(typing.globs, ['zedis-rust']);
-    assert.deepEqual(typing.contains, []);
-  });
-
-  it('@ is plain text again (legacy @source only for an exact source name); other key: words stay literal', () => {
-    const q = parseSearchQuery('@Vector @testdata http://x key:value "in:x"', Date.now(), SOURCES);
-    assert.equal(q.primaryPattern, '$c(@Vector)');
-    assert.deepEqual(q.globs, ['testdata']);
-    assert.deepEqual(q.contains, ['http://x', 'key:value', 'in:x']);
-  });
-
-  it('smart case: uppercase letters make that term case-sensitive', () => {
-    const q = parseSearchQuery('Error timeout -DEBUG');
-    assert.equal(q.primaryPattern, '$c(Error)');
-    assert.deepEqual(q.contains, ['timeout']);
-    assert.deepEqual(q.excludes, ['$c(DEBUG)']);
-  });
-
-  it('/re/ is a regex for that term only; plain paths like /api/ stay literal', () => {
-    const q = parseSearchQuery('/pub\\s+fn/ -/DEBUG|TRACE/ /api/v1 /\\d{4}');
-    assert.equal(q.primaryPattern, '$r(pub\\s+fn)');
-    assert.deepEqual(q.excludes, ['$rc(DEBUG|TRACE)']);
-    assert.deepEqual(q.contains, ['/api/v1', '$r(\\d{4})']);
-    assert.equal(q.hasScopedRegex, true);
-    assert.ok(q.modifiers.some((m) => m.kind === 'exclude' && m.value === '/DEBUG|TRACE/'));
-  });
-
-  it('literal text that looks like a $x( modifier is escaped on the wire', () => {
-    const q = parseSearchQuery('"$r(x)"');
-    assert.equal(q.primaryPattern, '$r(\\$r\\(x\\))');
-  });
-
-  it('legacy $(), $-(), $@(), $r(), $c(), $w() keep working', () => {
-    const q = parseSearchQuery('$(pub fn init) $-(retry in 50ms) $@(testdata) $-@(legacy) $cw(ErrorCode) -$r(DEBUG|TRACE)', Date.now(), SOURCES);
-    assert.equal(q.primaryPattern, 'pub fn init');
-    assert.deepEqual(q.contains, ['$cw(ErrorCode)']);
-    assert.deepEqual(q.excludes, ['retry in 50ms', '$rc(DEBUG|TRACE)']);
-    assert.deepEqual(q.globs, ['testdata', '!legacy']);
-    assert.equal(q.hasScopedCase, true);
-    assert.equal(q.hasScopedWord, true);
-  });
-
-  it('ignores bare operators and empty functions while typing', () => {
-    const q = parseSearchQuery('error - $ $() $-() $@() $w()');
-    assert.equal(q.primaryPattern, 'error');
-    assert.deepEqual(q.contains, []);
-    assert.deepEqual(q.excludes, []);
-    assert.deepEqual(q.globs, []);
-  });
-
-  it('recognizes all dollar flag combinations', () => {
-    assert.deepEqual(parseDollarFlags('$r'), { regex: true, caseSensitive: false, wholeWord: false });
-    assert.deepEqual(parseDollarFlags('$cw'), { regex: false, caseSensitive: true, wholeWord: true });
-    assert.deepEqual(parseDollarFlags('$rcw'), { regex: true, caseSensitive: true, wholeWord: true });
-  });
-
-  it('parses $t(...) relative and explicit time range modifiers', () => {
+  it('compileSearchQuery compiles multi-level same-line convergence (+ / -) and independent ScopeFilter', () => {
     const fixedNow = 1730340900000;
-    const qRel = parseSearchQuery('time:15m timeout in:testdata', fixedNow, SOURCES);
-    assert.equal(qRel.primaryPattern, 'timeout');
-    assert.equal(qRel.hasScopedTime, true);
-    assert.equal(qRel.timeStartMs, fixedNow - 15 * 60 * 1000);
-    assert.equal(qRel.timeEndMs, 0);
-    assert.deepEqual(qRel.globs, ['testdata']);
-    assert.ok(qRel.modifiers.some((m) => m.kind === 'flag' && m.value === '15m'));
+    const steps = [
+      createQueryStep('error', { caseSensitive: true }),
+      createQueryStep('timeout', { wholeWord: true }),
+      createQueryStep('healthcheck', { exclude: true }),
+    ];
+    const draft = createQueryStep('pg_pool_\\d+', { isRegex: true });
+    const scope: ScopeFilter = {
+      sources: ['src-1'],
+      excludedSources: ['src-legacy'],
+      types: ['log', 'json'],
+      timePreset: '15m',
+    };
 
-    const qDay = parseSearchQuery('time:2026-10-31 timeout', fixedNow);
-    assert.ok(qDay.timeStartMs > 0);
-    assert.ok(qDay.timeEndMs > qDay.timeStartMs);
+    const compiled = compileSearchQuery(steps, draft, scope, fixedNow);
+    assert.equal(compiled.hasExecutableQuery, true);
+    assert.equal(compiled.primaryPattern, '$c(error)');
+    assert.deepEqual(compiled.contains, ['$w(timeout)', '$r(pg_pool_\\d+)']);
+    assert.deepEqual(compiled.excludes, ['healthcheck']);
+    assert.deepEqual(compiled.sources, ['src-1']);
+    assert.deepEqual(compiled.globs, ['!src-legacy']);
+    assert.deepEqual(compiled.types, ['log', 'json']);
+    assert.equal(compiled.timeStartMs, fixedNow - 15 * 60 * 1000);
+    assert.equal(compiled.timeEndMs, 0);
+  });
 
-    const qWindow = parseSearchQuery('time:10:00..10:30 timeout', fixedNow);
-    assert.equal(qWindow.timeEndMs - qWindow.timeStartMs, 30 * 60 * 1000 + 59999);
+  it('compileSearchQuery supports time-only browsing when steps and draft are empty', () => {
+    const fixedNow = 1730340900000;
+    const compiled = compileSearchQuery([], null, { ...EMPTY_SCOPE, timePreset: 'today' }, fixedNow);
+    assert.equal(compiled.hasExecutableQuery, true);
+    assert.equal(compiled.primaryPattern, '');
+    assert.ok(compiled.timeStartMs > 0);
+  });
 
-    const qToday = parseSearchQuery('time:today timeout', fixedNow);
+  it('parseTimeModifierSpec parses relative, today, yesterday, and explicit ranges', () => {
+    const fixedNow = 1730340900000;
+    const rel = parseTimeModifierSpec('15m', fixedNow);
+    assert.deepEqual(rel, { startMs: fixedNow - 15 * 60 * 1000, endMs: 0 });
+
+    const today = parseTimeModifierSpec('today', fixedNow);
     const midnight = new Date(fixedNow);
     midnight.setHours(0, 0, 0, 0);
-    assert.equal(qToday.timeStartMs, midnight.getTime());
-    assert.equal(qToday.timeEndMs, 0);
+    assert.deepEqual(today, { startMs: midnight.getTime(), endMs: 0 });
 
-    const qYesterday = parseSearchQuery('time:yesterday timeout', fixedNow);
-    assert.equal(qYesterday.timeEndMs, midnight.getTime() - 1);
+    const yesterday = parseTimeModifierSpec('yesterday', fixedNow);
+    assert.ok(yesterday !== null);
+    assert.equal(yesterday.endMs, midnight.getTime() - 1);
 
-    // `time:1` while typing `time:15m` must not become the year 2001; legacy `$t()` still works.
-    assert.equal(parseSearchQuery('time:1 timeout', fixedNow).hasScopedTime, false);
-    assert.equal(parseSearchQuery('$t(15m) timeout', fixedNow).timeStartMs, fixedNow - 15 * 60 * 1000);
+    const day = parseTimeModifierSpec('2026-10-31', fixedNow);
+    assert.ok(day !== null && day.startMs > 0 && day.endMs > day.startMs);
+
+    const thirtyDays = parseTimeModifierSpec('30d', fixedNow);
+    assert.deepEqual(thirtyDays, { startMs: fixedNow - 30 * 86_400_000, endMs: 0 });
+
+    const intraday = parseTimeModifierSpec('2026-11-14 10:15..2026-11-14 10:30', fixedNow);
+    assert.ok(intraday !== null);
+    assert.equal(intraday.startMs, new Date(2026, 10, 14, 10, 15, 0, 0).getTime());
+    assert.equal(intraday.endMs, new Date(2026, 10, 14, 10, 30, 59, 999).getTime());
+
+    const openEnd = parseTimeModifierSpec('2026/11/14 10:00:00..', fixedNow);
+    assert.deepEqual(openEnd, {
+      startMs: new Date(2026, 10, 14, 10, 0, 0, 0).getTime(),
+      endMs: 0,
+    });
+
+    const openStart = parseTimeModifierSpec('..2026-11-14 12:00:00', fixedNow);
+    assert.deepEqual(openStart, {
+      startMs: 0,
+      endMs: new Date(2026, 10, 14, 12, 0, 0, 999).getTime(),
+    });
   });
 
-  it('formatSearchTerm / toggleTermExclusion produce natural tokens', () => {
-    assert.equal(formatSearchTerm('members'), 'members');
-    assert.equal(formatSearchTerm('pub fn'), '"pub fn"');
-    assert.equal(formatSearchTerm('-O3'), '"-O3"');
-    assert.equal(formatSearchTerm('in:x'), '"in:x"');
-    assert.equal(toggleTermExclusion('timeout'), '-timeout');
-    assert.equal(toggleTermExclusion('-timeout'), 'timeout');
-    assert.equal(toggleTermExclusion('"a b"'), '-"a b"');
-    assert.equal(toggleTermExclusion('-"a b"'), '"a b"');
-    assert.equal(toggleTermExclusion('$-(a b)'), '"a b"');
+  it('time-range utilities build, parse, paste-detect, format labels, and build 42-cell calendar grids', () => {
+    const fixedNow = new Date(2026, 10, 14, 9, 30, 0).getTime();
+
+    // buildCustomRangeSpec + reverse swap + today fallback
+    const fullDay = buildCustomRangeSpec(
+      { startDate: '2026-11-14', startTime: '', endDate: '2026-11-12', endTime: '' },
+      fixedNow
+    );
+    assert.deepEqual(fullDay, {
+      spec: '2026-11-12 00:00:00..2026-11-14 23:59:59',
+      error: null,
+    });
+
+    const timeOnlyToday = buildCustomRangeSpec(
+      { startDate: '', startTime: '09:15', endDate: '', endTime: '09:45' },
+      fixedNow
+    );
+    assert.deepEqual(timeOnlyToday, {
+      spec: '2026-11-14 09:15:00..2026-11-14 09:45:59',
+      error: null,
+    });
+
+    const parsedDraft = parseCustomRangeDraft('2026-11-12 08:30:00..2026-11-14 18:00:00', fixedNow);
+    assert.deepEqual(parsedDraft, {
+      startDate: '2026-11-12',
+      startTime: '08:30:00',
+      endDate: '2026-11-14',
+      endTime: '18:00:00',
+    });
+
+    // Paste parsers (Log4j comma ms, ISO UTC, compact 14-digit, dot/single-digit YMD, CJK, CLF, 12h AM/PM, epoch)
+    assert.deepEqual(parsePastedDateTime('2026-11-14 08:12:34,567'), {
+      date: '2026-11-14',
+      time: '08:12:34',
+    });
+    assert.deepEqual(parsePastedDateTime('20261114101502'), {
+      date: '2026-11-14',
+      time: '10:15:02',
+    });
+    assert.deepEqual(parsePastedDateTime('2026.11.14 09:15:02'), {
+      date: '2026-11-14',
+      time: '09:15:02',
+    });
+    assert.deepEqual(parsePastedDateTime('2026-1-5 8:05'), {
+      date: '2026-01-05',
+      time: '08:05:00',
+    });
+    assert.deepEqual(parsePastedDateTime('2026年11月14日 10时15分02秒'), {
+      date: '2026-11-14',
+      time: '10:15:02',
+    });
+    assert.deepEqual(parsePastedDateTime('11/14/2026 2:15:02 PM'), {
+      date: '2026-11-14',
+      time: '14:15:02',
+    });
+    assert.equal(TIME_FORMAT_PRESETS[0]?.id, 'auto');
+    assert.ok(TIME_FORMAT_PRESETS.some((p) => p.value === 'yyyy-hm'));
+    const utcMs = Date.UTC(2026, 10, 14, 1, 2, 3);
+    const localExpected = new Date(utcMs);
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const expDate = `${localExpected.getFullYear()}-${pad2(localExpected.getMonth() + 1)}-${pad2(localExpected.getDate())}`;
+    const expTime = `${pad2(localExpected.getHours())}:${pad2(localExpected.getMinutes())}:${pad2(localExpected.getSeconds())}`;
+    assert.deepEqual(parsePastedDateTime('2026-11-14T01:02:03.456Z'), {
+      date: expDate,
+      time: expTime,
+    });
+    assert.deepEqual(parsePastedDateTime('14/Nov/2026:01:02:03 +0000'), {
+      date: expDate,
+      time: expTime,
+    });
+    assert.deepEqual(parsePastedDateTime(String(utcMs)), {
+      date: expDate,
+      time: expTime,
+    });
+    assert.deepEqual(parsePastedDateTime(`${utcMs}000000`), {
+      date: expDate,
+      time: expTime,
+    });
+
+    // Label formatting
+    const labels = { '': '全部时间', '15m': '最近 15 分钟' };
+    assert.equal(formatTimeScopeLabel('2026-11-14 00:00:00..2026-11-14 23:59:59', labels, fixedNow), '2026-11-14');
+    assert.equal(formatTimeScopeLabel('2026-11-12 00:00:00..2026-11-14 23:59:59', labels, fixedNow), '11-12 ~ 11-14');
+    assert.equal(formatTimeScopeLabel('2026-11-14 10:00:00..2026-11-14 12:30:59', labels, fixedNow), '11-14 10:00 ~ 12:30');
+    assert.equal(formatTimeScopeLabel('2026-11-14 10:00:00..', labels, fixedNow), '≥ 11-14 10:00');
+
+    // Monday-first 42-cell grid for Nov 2026 (2026-11-01 is Sunday -> 6 leading days Oct 26..31)
+    const grid = buildCalendarMonthGrid(2026, 10, '2026-11-14');
+    assert.equal(grid.length, 42);
+    assert.equal(grid[0].ymd, '2026-10-26');
+    assert.equal(grid[0].inMonth, false);
+    assert.equal(grid[6].ymd, '2026-11-01');
+    assert.equal(grid[6].inMonth, true);
+    assert.equal(grid.find((c) => c.ymd === '2026-11-14')?.isToday, true);
+  });
+
+  it('formatHistoryLabel formats step chain and draft cleanly', () => {
+    const label = formatHistoryLabel(
+      [createQueryStep('error'), createQueryStep('healthcheck', { exclude: true })],
+      createQueryStep('timeout')
+    );
+    assert.equal(label, 'error → -healthcheck → timeout');
+  });
+
+  it('buildQueryCacheKeys separates baseKey (for maxResults growth) and exactKey, including tenant & sources', () => {
+    const common = {
+      tenant: 'ws-a',
+      effectiveSources: ['s2', 's1'],
+      excludedSources: ['s3'],
+      types: ['zig', 'log'],
+      timePreset: '1h' as const,
+      steps: [createQueryStep('panic')],
+      hidden: false,
+      respectIgnore: true,
+      nowMs: 1730340900000,
+    };
+    const k1 = buildQueryCacheKeys({ ...common, maxResults: 500 });
+    const k2 = buildQueryCacheKeys({ ...common, maxResults: 2000 });
+    assert.equal(k1.baseKey, k2.baseKey);
+    assert.notEqual(k1.exactKey, k2.exactKey);
+    assert.equal(k1.historyId, k2.historyId);
+
+    // Different tenant invalidates keys
+    const kOther = buildQueryCacheKeys({ ...common, tenant: 'ws-b', maxResults: 500 });
+    assert.notEqual(k1.exactKey, kOther.exactKey);
+    assert.notEqual(k1.historyId, kOther.historyId);
+  });
+
+  it('compiles non-stacked per-source timeMode default and isolates sourceTimeFormatsSig, tzOffsetMin, and timePreset', () => {
+    const fixedNow = new Date(2026, 10, 14, 15, 0, 0).getTime();
+
+    const defaultCompiled = compileSearchQuery([], null, {
+      sources: [],
+      types: [],
+      timePreset: '1h',
+    }, fixedNow);
+    assert.equal(defaultCompiled.timeMode, 'source');
+    assert.equal(defaultCompiled.timeFormat, '');
+    assert.equal(defaultCompiled.hasExecutableQuery, true);
+
+    const overrideCompiled = compileSearchQuery([], null, {
+      sources: [],
+      types: [],
+      timePreset: '24h',
+      timeMode: 'mtime',
+      timeFormat: '  json:ts  ',
+    }, fixedNow);
+    assert.equal(overrideCompiled.timeMode, 'mtime');
+    assert.equal(overrideCompiled.timeFormat, 'json:ts');
+    assert.equal(overrideCompiled.hasExecutableQuery, true);
+
+    const common = {
+      tenant: 'ws-a',
+      effectiveSources: ['s1'],
+      excludedSources: [],
+      types: [],
+      timePreset: '1h' as const,
+      timeMode: 'source' as const,
+      timeFormat: '',
+      tzOffsetMin: 480,
+      sourceTimeFormatsSig: '',
+      steps: [createQueryStep('error')],
+      hidden: false,
+      respectIgnore: false,
+      maxResults: 500,
+      nowMs: fixedNow,
+    };
+    const kMtimeSource = buildQueryCacheKeys(common);
+    const kAutoContentSource = buildQueryCacheKeys({ ...common, sourceTimeFormatsSig: 's1=auto' });
+    const kCustomContentSource = buildQueryCacheKeys({ ...common, sourceTimeFormatsSig: 's1=json:ts' });
+    const kOtherTz = buildQueryCacheKeys({ ...common, tzOffsetMin: 0 });
+    const kOtherPreset = buildQueryCacheKeys({ ...common, timePreset: '24h' });
+
+    assert.notEqual(kMtimeSource.baseKey, kAutoContentSource.baseKey);
+    assert.notEqual(kMtimeSource.exactKey, kAutoContentSource.exactKey);
+    assert.equal(kMtimeSource.historyId, kAutoContentSource.historyId);
+
+    assert.notEqual(kAutoContentSource.baseKey, kCustomContentSource.baseKey);
+    assert.notEqual(kAutoContentSource.exactKey, kCustomContentSource.exactKey);
+    assert.equal(kAutoContentSource.historyId, kCustomContentSource.historyId);
+
+    assert.notEqual(kMtimeSource.baseKey, kOtherTz.baseKey);
+    assert.notEqual(kMtimeSource.baseKey, kOtherPreset.baseKey);
+    assert.notEqual(kMtimeSource.historyId, kOtherPreset.historyId);
+
+    const zhLabels = { '': '不限时间', '1h': '最近 1 小时', '24h': '最近 24 小时' };
+    const enLabels = { '': 'Any time', '15m': 'Last 15 min' };
+    assert.equal(formatTimeScopeLabel('', zhLabels, fixedNow), '不限时间');
+    assert.equal(formatTimeScopeLabel('1h', zhLabels, fixedNow), '最近 1 小时');
+    assert.equal(formatTimeScopeLabel('24h', zhLabels, fixedNow), '最近 24 小时');
+    assert.equal(formatTimeScopeLabel('15m', enLabels, fixedNow), 'Last 15 min');
+    assert.equal(
+      formatTimeScopeLabel('2026-11-13 00:00:00..2026-11-14 23:59:59', enLabels, fixedNow),
+      '11-13 ~ 11-14'
+    );
   });
 });
 
@@ -245,9 +394,25 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     const info = analyzeStructuredLine(dockerLine);
     assert.equal(info.kind, 'json');
     assert.equal(info.formatBadge, 'JSON');
-    // Verify nested JSON string was unpacked into an object and Unicode + URL escapes were decoded to Chinese
     assert.ok(info.bodyFormattedText?.includes('"订单超时"'));
     assert.equal(decodeHumanEscapes('hello\\u4e16\\u754c%21'), 'hello世界!');
+  });
+
+  it('formats Docker RFC3339Nano embedded-JSON and [STDERR] KV log lines cleanly', () => {
+    const rfcJsonLine =
+      '2026-11-14T04:10:01.123456789Z {"level":"error","service":"api-gateway","msg":"upstream_timeout"}';
+    const jsonInfo = analyzeStructuredLine(rfcJsonLine);
+    assert.equal(jsonInfo.kind, 'embedded-json');
+    assert.equal(jsonInfo.formatBadge, 'JSON');
+    assert.equal(jsonInfo.prefix, '2026-11-14T04:10:01.123456789Z');
+    assert.ok(jsonInfo.formattedText.includes('"service": "api-gateway"'));
+
+    const stderrKvLine = '[STDERR] trace_id=tr-1 span_id=sp-2 status=502';
+    const kvInfo = analyzeStructuredLine(stderrKvLine);
+    assert.equal(kvInfo.kind, 'kv');
+    assert.equal(kvInfo.formatBadge, 'KV');
+    assert.equal(kvInfo.prefix, '[STDERR]');
+    assert.equal(kvInfo.kvPairs?.length, 3);
   });
 
   it('indents compressed single-line HTML and arbitrary brace/bracket structures', () => {
@@ -285,24 +450,71 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     assert.ok(codeSegs.some((s) => s.text.includes('// fast path') && s.syntaxKind === 'comment'));
   });
 
-  it('builds 3-line hit snippets with shared outer indentation stripped and relative block indent preserved', () => {
-    const hit = {
-      file: 'zedis-rust/states/server/set.rs',
-      line: 92,
-      col: 13,
-      prevText: '        if let Some(set) = self.sets.get_mut(key) {',
-      text: '            let removed = set.remove(member);',
-      nextText: '        }',
-      spans: [{ start: 26, end: 36 }],
+  it('preserves rich single-record content across 1–6 preview lines without premature ellipses and centers ultra-long records', () => {
+    // 320-char single record within 540-char preview budget: must stay unbroken
+    const mediumBody =
+      '    {"level":"error","service":"checkout-api","trace_id":"tr-90210",' +
+      '"customer_note":"' +
+      'alpha-beta-gamma-'.repeat(12) +
+      '","msg":"upstream gateway timeout after 3000ms"}';
+    const mediumHit = {
+      file: 'logs/checkout.jsonl',
+      line: 184,
+      col: 15,
+      text: mediumBody,
+      spans: [{ start: 14, end: 19 }],
     };
-    const snippet = getCachedHitSnippet(hit, ['Some'], true, 'literal:set.remove\u0001Some', 'set.remove', false);
-    assert.ok(snippet.prev);
-    assert.ok(snippet.next);
-    // 8 shared spaces stripped;prev starts at col 0, match retains 4 spaces of relative block indent
-    assert.equal(snippet.prev.map((s) => s.text).join(''), 'if let Some(set) = self.sets.get_mut(key) {');
-    assert.ok(snippet.prev.some((s) => s.text === 'Some' && s.kind === 'contains-0'));
-    assert.equal(snippet.match.map((s) => s.text).join(''), '    let removed = set.remove(member);');
-    assert.ok(snippet.match.some((s) => s.text === 'set.remove' && s.kind === 'primary'));
-    assert.equal(snippet.next.map((s) => s.text).join(''), '}');
+    const mediumSegs = getCachedHighlightSegments(
+      mediumHit,
+      ['timeout'],
+      true,
+      'literal:error\u0001timeout\u0001540',
+      'error',
+      false,
+      540
+    );
+    const mediumRendered = mediumSegs.map((s) => s.text).join('');
+    assert.equal(mediumRendered.startsWith('{"level":"error"'), true);
+    assert.equal(mediumRendered.includes('…'), false);
+    assert.ok(mediumSegs.some((s) => s.text === 'error' && s.kind === 'primary'));
+    assert.ok(mediumSegs.some((s) => s.text === 'timeout' && s.kind === 'contains-0'));
+
+    // 2000-char ultra-long record: centers match window cleanly and trims leading/trailing filler
+    const prefix = 'x'.repeat(1150);
+    const suffix = 'y'.repeat(800);
+    const longLine = `${prefix} target_token_here ${suffix}`;
+    const longSegs = buildHighlightSegments(
+      longLine,
+      undefined,
+      [],
+      true,
+      true,
+      'target_token_here',
+      false,
+      true,
+      540
+    );
+    const longRendered = longSegs.map((s) => s.text).join('');
+    assert.ok(longRendered.includes('target_token_here'));
+    assert.ok(longRendered.includes(' … '));
+    assert.ok(longRendered.length < 900);
+  });
+
+  it('computeDockerPreviewSinceSec aligns Docker preview since= strictly with auto content-time search pushdown', () => {
+    const sources = [
+      { kind: 'docker', name: 'docker-auto', config: { path: 'auto', timeFormat: 'auto' } },
+      { kind: 'docker', name: 'docker-default', config: { path: 'auto' } },
+      { kind: 'docker', name: 'docker-mtime', config: { path: 'auto', timeFormat: '' } },
+      { kind: 'docker', name: 'docker-custom', config: { path: 'auto', timeFormat: 'json:ts' } },
+      { kind: 'dir', name: 'app-logs', config: { path: '/tmp/logs', timeFormat: 'auto' } },
+    ];
+    const startMs = 1794650640123; // 1794650640s -> since = 1794650638
+    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-auto/gateway', startMs), 1794650638);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'Docker-Default/api', startMs), 1794650638);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-mtime/gateway', startMs), null);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-custom/gateway', startMs), null);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'app-logs/gateway.log', startMs), null);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'gateway', startMs), null);
+    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-auto/gateway', 0), null);
   });
 });

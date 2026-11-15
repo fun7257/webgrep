@@ -90,9 +90,11 @@ export function splitFilePath(filePath: string): {
   if (cached) return cached;
 
   const normalized = filePath.includes('\\') ? filePath.replace(/\\/g, '/') : filePath;
-  const idx = normalized.lastIndexOf('/');
-  const dir = idx >= 0 ? normalized.slice(0, idx + 1) : '';
-  const name = idx >= 0 ? normalized.slice(idx + 1) : normalized;
+  const slashIdx = normalized.lastIndexOf('/');
+  const sepIdx = normalized.indexOf('::');
+  const splitPos = Math.max(slashIdx >= 0 ? slashIdx + 1 : 0, sepIdx >= 0 ? sepIdx + 2 : 0);
+  const dir = splitPos > 0 ? normalized.slice(0, splitPos) : '';
+  const name = splitPos > 0 ? normalized.slice(splitPos) : normalized;
   const dotIdx = name.lastIndexOf('.');
   const ext = dotIdx > 0 ? name.slice(dotIdx + 1).toLowerCase() : '';
   const result = { dir, name, ext };
@@ -103,25 +105,6 @@ export function splitFilePath(filePath: string): {
   filePathCache.set(filePath, result);
   return result;
 }
-
-export const KNOWN_FILE_TYPES: {
-  id: string;
-  label: string;
-  color: string;
-}[] = [
-  { id: 'zig', label: 'zig', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'ts', label: 'ts', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'js', label: 'js', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'json', label: 'json', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'md', label: 'md', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'py', label: 'py', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'rust', label: 'rust', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'go', label: 'go', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'html', label: 'html', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'css', label: 'css', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'toml', label: 'toml', color: 'text-muted-foreground border-border bg-secondary' },
-  { id: 'yaml', label: 'yaml', color: 'text-muted-foreground border-border bg-secondary' },
-];
 
 export interface HighlightSegment {
   text: string;
@@ -230,7 +213,8 @@ export function buildHighlightSegments(
   windowAroundMatch = false,
   primaryPattern = '',
   isRegexMode = false,
-  stripLeadingIndent = true
+  stripLeadingIndent = true,
+  maxPreviewChars = 540
 ): HighlightSegment[] {
   if (!text) return [{ text: '', kind: 'plain' }];
   const len = text.length;
@@ -292,7 +276,16 @@ export function buildHighlightSegments(
   }
 
   if (allSpans.length === 0) {
-    return [{ text, kind: 'plain' }];
+    if (!windowAroundMatch) {
+      return [{ text, kind: 'plain' }];
+    }
+    const budget = Math.max(220, maxPreviewChars);
+    const indent = stripLeadingIndent ? (/^\s*/.exec(text)?.[0].length ?? 0) : 0;
+    const sliced = indent > 0 && indent < len ? text.slice(indent) : text;
+    if (sliced.length > budget) {
+      return [{ text: `${sliced.slice(0, budget)} …`, kind: 'plain' }];
+    }
+    return [{ text: sliced, kind: 'plain' }];
   }
 
   // Track which highlight kinds have at least one standalone match not strictly inside a wider match
@@ -388,24 +381,30 @@ export function buildHighlightSegments(
   }
 
   // Match-centered snippet windowing for virtualized ResultList rows:
-  // Folds long leading/inter-match unmatched regions with ' … ' so primary and secondary
-  // highlights in the middle/end of long lines are always visible inside the row viewport.
-  const LEAD_THRESHOLD = 38;
-  const LEAD_HEAD = 14;
-  const LEAD_TAIL = 18;
-  const GAP_THRESHOLD = 32;
-  const GAP_SIDE = 12;
-  const TAIL_MAX = 180;
-
-  // Leading indentation carries no information in a one-line preview: skip it so the
-  // match lands as far left as possible (unless relative block indent was already normalized).
+  // Keeps rich continuous text up to `maxPreviewChars` (1–6 lines) while folding huge
+  // unmatched regions with ' … ' so matches near the middle/end of ultra-long lines stay visible.
+  const budget = Math.max(220, maxPreviewChars);
   const indent = stripLeadingIndent ? (/^\s*/.exec(text)?.[0].length ?? 0) : 0;
   let pos = resolved.length === 0 || resolved[0].start >= indent ? indent : 0;
+  const shouldFold = len - pos > budget;
+
+  const LEAD_THRESHOLD = Math.max(120, Math.round(budget * 0.42));
+  const LEAD_HEAD = Math.max(36, Math.round(budget * 0.14));
+  const LEAD_TAIL = Math.max(64, Math.round(budget * 0.24));
+  const GAP_THRESHOLD = Math.max(96, Math.round(budget * 0.32));
+  const GAP_SIDE = Math.max(36, Math.round(budget * 0.14));
+  const TAIL_MAX = budget;
+
   for (let i = 0; i < resolved.length; i++) {
     const sp = resolved[i];
     if (sp.start > pos) {
       const gapLen = sp.start - pos;
-      if (i === 0) {
+      if (!shouldFold) {
+        segments.push({
+          text: text.slice(pos, sp.start),
+          kind: 'plain',
+        });
+      } else if (i === 0) {
         if (gapLen > LEAD_THRESHOLD) {
           const head = text.slice(pos, pos + LEAD_HEAD).trimEnd();
           const tail = text.slice(sp.start - LEAD_TAIL, sp.start).trimStart();
@@ -439,7 +438,7 @@ export function buildHighlightSegments(
 
   if (pos < len) {
     const remain = len - pos;
-    if (remain > TAIL_MAX) {
+    if (shouldFold && remain > TAIL_MAX) {
       segments.push({
         text: `${text.slice(pos, pos + TAIL_MAX)} …`,
         kind: 'plain',
@@ -469,7 +468,7 @@ export interface NanoTimestampInfo {
 
 /**
  * Detects a leading 19-digit Unix nanosecond timestamp (`<19-digit-ns> <payload>`)
- * produced by WebGrep's native log ingestor and formats it into human-readable local time.
+ * in external log records and formats it into human-readable local time.
  */
 export function extractLeadingNanoTimestamp(text: string): NanoTimestampInfo | null {
   if (!text || text.length < 20) return null;
@@ -520,7 +519,8 @@ export function getCachedHighlightSegments(
   caseInsensitive: boolean,
   cacheKey: string,
   primaryPattern = '',
-  isRegexMode = false
+  isRegexMode = false,
+  maxPreviewChars = 540
 ): HighlightSegment[] {
   const existing = hitSegmentCache.get(item);
   if (existing && existing.cacheKey === cacheKey) {
@@ -537,11 +537,16 @@ export function getCachedHighlightSegments(
       targetSpans?.length === 1 &&
       targetSpans[0].start === 0 &&
       targetSpans[0].end <= pLen;
+    const nsHay = caseInsensitive ? tsInfo.nsStr.toLowerCase() : tsInfo.nsStr;
+    const pNeedle = caseInsensitive ? primaryPattern.trim().toLowerCase() : primaryPattern.trim();
     const hasMatchInPrefix =
       !isTimeOnlyDefaultSpan &&
       ((targetSpans?.some((s) => s.start < pLen) ?? false) ||
-        (primaryPattern.trim().length > 0 && tsInfo.nsStr.includes(primaryPattern.trim())) ||
-        containsTerms.some((t) => t.length > 0 && tsInfo.nsStr.includes(t)));
+        (pNeedle.length > 0 && nsHay.includes(pNeedle)) ||
+        containsTerms.some((t) => {
+          const tn = caseInsensitive ? t.toLowerCase() : t;
+          return tn.length > 0 && nsHay.includes(tn);
+        }));
 
     if (!hasMatchInPrefix) {
       targetText = tsInfo.restText;
@@ -563,148 +568,12 @@ export function getCachedHighlightSegments(
     caseInsensitive,
     true,
     primaryPattern,
-    isRegexMode
+    isRegexMode,
+    true,
+    maxPreviewChars
   );
   hitSegmentCache.set(item, { cacheKey, segments });
   return segments;
-}
-
-export interface HitSnippetSegments {
-  prev: HighlightSegment[] | null;
-  match: HighlightSegment[];
-  next: HighlightSegment[] | null;
-}
-
-const hitSnippetCache = new WeakMap<
-  HitItem,
-  { cacheKey: string; snippet: HitSnippetSegments }
->();
-
-function leadingIndentCount(s: string): number {
-  let i = 0;
-  while (i < s.length && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) i++;
-  return i;
-}
-
-function stripNanoPrefixIfNeeded(raw: string): string {
-  const ts = extractLeadingNanoTimestamp(raw);
-  return ts && ts.restText.length > 0 ? ts.restText : raw;
-}
-
-/**
- * O(1) WeakMap-memoized 3-line snippet (`prev` + `match` + `next`) for virtualized ResultList cards.
- * Strips shared outer indentation across all three lines while preserving up to 4 chars of relative
- * block indentation so enclosing functions/branches and body lines read naturally at a glance.
- */
-export function getCachedHitSnippet(
-  item: HitItem,
-  containsTerms: string[],
-  caseInsensitive: boolean,
-  cacheKey: string,
-  primaryPattern = '',
-  isRegexMode = false
-): HitSnippetSegments {
-  const existing = hitSnippetCache.get(item);
-  if (existing && existing.cacheKey === cacheKey) {
-    return existing.snippet;
-  }
-
-  let matchText = item.text;
-  let matchSpans: HitSpan[] | undefined = item.spans;
-  const tsInfo = extractLeadingNanoTimestamp(item.text);
-  if (tsInfo && tsInfo.restText.length > 0) {
-    const pLen = tsInfo.prefixLen;
-    const isTimeOnlyDefaultSpan =
-      primaryPattern.trim().length === 0 &&
-      matchSpans?.length === 1 &&
-      matchSpans[0].start === 0 &&
-      matchSpans[0].end <= pLen;
-    const hasMatchInPrefix =
-      !isTimeOnlyDefaultSpan &&
-      ((matchSpans?.some((s) => s.start < pLen) ?? false) ||
-        (primaryPattern.trim().length > 0 && tsInfo.nsStr.includes(primaryPattern.trim())) ||
-        containsTerms.some((t) => t.length > 0 && tsInfo.nsStr.includes(t)));
-
-    if (!hasMatchInPrefix) {
-      matchText = tsInfo.restText;
-      matchSpans = isTimeOnlyDefaultSpan
-        ? undefined
-        : matchSpans
-            ?.filter((s) => s.end > pLen)
-            .map((s) => ({
-              start: Math.max(0, s.start - pLen),
-              end: Math.max(0, s.end - pLen),
-            }));
-    }
-  }
-
-  const prevRaw = item.prevText ? stripNanoPrefixIfNeeded(item.prevText) : '';
-  const nextRaw = item.nextText ? stripNanoPrefixIfNeeded(item.nextText) : '';
-
-  const mIndent = leadingIndentCount(matchText);
-  const pIndent = prevRaw.length > 0 ? leadingIndentCount(prevRaw) : mIndent;
-  const nIndent = nextRaw.length > 0 ? leadingIndentCount(nextRaw) : mIndent;
-  const minIndent = Math.min(mIndent, pIndent, nIndent);
-  const dedent = Math.max(minIndent, mIndent - 4);
-
-  const mCut = Math.min(mIndent, dedent);
-  if (mCut > 0) {
-    matchText = matchText.slice(mCut);
-    if (matchSpans) {
-      matchSpans = matchSpans
-        .filter((s) => s.end > mCut)
-        .map((s) => ({
-          start: Math.max(0, s.start - mCut),
-          end: Math.max(0, s.end - mCut),
-        }));
-    }
-  }
-
-  const prevText = prevRaw.length > 0 ? prevRaw.slice(Math.min(pIndent, dedent)) : '';
-  const nextText = nextRaw.length > 0 ? nextRaw.slice(Math.min(nIndent, dedent)) : '';
-
-  const match = buildHighlightSegments(
-    matchText,
-    matchSpans,
-    containsTerms,
-    caseInsensitive,
-    true,
-    primaryPattern,
-    isRegexMode,
-    false
-  );
-
-  const prev =
-    prevText.length > 0
-      ? buildHighlightSegments(
-          prevText,
-          undefined,
-          containsTerms,
-          caseInsensitive,
-          true,
-          primaryPattern,
-          isRegexMode,
-          false
-        )
-      : null;
-
-  const next =
-    nextText.length > 0
-      ? buildHighlightSegments(
-          nextText,
-          undefined,
-          containsTerms,
-          caseInsensitive,
-          true,
-          primaryPattern,
-          isRegexMode,
-          false
-        )
-      : null;
-
-  const snippet: HitSnippetSegments = { prev, match, next };
-  hitSnippetCache.set(item, { cacheKey, snippet });
-  return snippet;
 }
 
 export interface StructuredAnalysis {
@@ -960,7 +829,7 @@ export function analyzeStructuredLine(text: string): StructuredAnalysis {
   }
 
   // 3. Key=Value pairs detection (preserves any leading timestamp/level/module prefix and trailing suffix)
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+  if (!trimmed.startsWith('{') && !(trimmed.startsWith('[') && trimmed.endsWith(']'))) {
     const kvRegex = /(?:^|[\s,;])([a-zA-Z0-9_.-]+)=("[^"]*"|'[^']*'|[^\s,;<>"']+)/g;
     const pairs: { key: string; value: string }[] = [];
     let firstKeyStart = -1;

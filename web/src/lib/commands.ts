@@ -31,6 +31,12 @@ export function buildCommands(): Command[] {
       run: () => workbench.openSettings('general'),
     },
     {
+      id: 'pick-sources',
+      icon: Database as unknown as Command['icon'],
+      title: p.pickSources,
+      run: () => workbench.openSourcePicker(),
+    },
+    {
       id: 'sources',
       icon: Database as unknown as Command['icon'],
       title: p.sources,

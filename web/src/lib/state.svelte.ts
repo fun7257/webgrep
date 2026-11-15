@@ -6,73 +6,141 @@ import type {
   FileResponse,
   HitItem,
   MetaResponse,
+  QueryStep,
+  ScopeFilter,
   SearchHistoryEntry,
   SearchMode,
   SourceConfig,
   SourceKind,
   SourcesResponse,
+  TimePreset,
+  TimePreviewResponse,
   WsIncomingMessage,
   WsSearchMessage,
 } from './types';
-import { KNOWN_FILE_TYPES } from './utils';
 import { messages, type Locale } from './i18n';
 import {
-  formatSearchTerm,
-  parseDollarFlags,
-  parseSearchQuery,
-  removeInlineModifierFromPattern,
-  toggleTermExclusion,
-  type ParsedDollarFlags,
+  buildQueryCacheKeys,
+  compileSearchQuery,
+  computeDockerPreviewSinceSec,
+  createQueryStep,
+  formatHistoryLabel,
+  normalizeStep,
+  parseTimeModifierSpec,
+  stepsEqual,
 } from './query';
+import {
+  applySingleSourceSelection,
+  toggleExcludeSourceSelection,
+  toggleMultiSourceSelection,
+} from './source-picker';
+import { formatTimeScopeLabel } from './time-range';
 import type { ResultFix } from './suggest';
 
-export { parseDollarFlags, parseSearchQuery, removeInlineModifierFromPattern, type ParsedDollarFlags };
-
-const HISTORY_STORAGE_KEY = 'webgrep.searchHistory.v1';
+const HISTORY_STORAGE_KEY = 'webgrep.searchHistory.v2';
 const THEME_STORAGE_KEY = 'webgrep.theme.v1';
-const SETTINGS_STORAGE_KEY = 'webgrep.settings.v2';
-/** Radius of the nearby-lines fallback (terms spread over ±N lines when no single line has them all). */
-export const NEARBY_LINES = 15;
+const SETTINGS_STORAGE_KEY = 'webgrep.settings.v3';
+const LEGACY_SETTINGS_KEYS = ['webgrep.settings.v2'];
+const SOURCES_CACHE_STORAGE_KEY = 'webgrep.sourcesCache.v1';
+const WS_DEGRADED_GRACE_MS = 650;
+
+const MAX_L0_ENTRIES = 24;
+const MAX_L0_SINGLE_ROWS = 20_000;
+const MAX_L0_TOTAL_ROWS = 50_000;
+const L0_TTL_MS = 30_000;
+const MAX_FILE_CONTEXT_CACHE = 16;
+
+interface L0CacheEntry {
+  exactKey: string;
+  baseKey: string;
+  sourceRevision: number;
+  storedAt: number;
+  timeStartMs: number;
+  fileGroups: FileHitGroup[];
+  flatHits: HitItem[];
+  filesSearched: number;
+  filesMatched: number;
+  totalMatches: number;
+  matchedLines: number;
+  bytesSearched: number;
+  limitHit: boolean;
+}
+
+interface InflightCacheMeta {
+  exactKey: string;
+  baseKey: string;
+  sourceRevision: number;
+  hadDraft: boolean;
+  maxResults: number;
+  timeStartMs: number;
+}
+
+interface FileContextCacheEntry {
+  sourceRevision: number;
+  data: FileResponse;
+}
+
+const utf8Encoder = new TextEncoder();
+
+function isPossiblyTruncatedHitText(text: string): boolean {
+  // Backend stream truncates raw_text at 4096 UTF-8 bytes; only check full byte length on long lines
+  if (text.length < 1364) return false;
+  return utf8Encoder.encode(text).length >= 4092;
+}
+
+export interface ExecuteSearchOptions {
+  forceRefresh?: boolean;
+  recordInHistory?: boolean;
+}
 
 class WorkbenchState {
   // Workspace metadata
   meta = $state<MetaResponse>({
     rootLabel: 'webgrep',
     root: '.',
-    engine: 'libwebgrep 0.4.1 · SIMD',
-    types: KNOWN_FILE_TYPES.map((t) => t.id),
+    engine: 'libwebgrep 0.5.0 · SIMD',
+    types: [],
   });
 
   // WebSocket status
   wsStatus = $state<'connecting' | 'connected' | 'reconnecting' | 'offline'>('connecting');
+  wsDegraded = $state<boolean>(false);
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private wsDegradedTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  private pendingSearchOnOpen = false;
+  private isUnloading = false;
+  private lifecycleBound = false;
 
-  // Search parameters: everything that filters results lives in the query string itself
-  // (no hidden toggles); the only other inputs are the settings below and enabled data sources.
+  // Structured Search State: committed progressive steps + single-text draft + independent ScopeFilter
+  steps = $state<QueryStep[]>([]);
   pattern = $state<string>('');
+  caseSensitive = $state<boolean>(false);
+  wholeWord = $state<boolean>(false);
+  isRegex = $state<boolean>(false);
+  draftExclude = $state<boolean>(false);
+  scope = $state<ScopeFilter>({
+    sources: [],
+    excludedSources: [],
+    types: [],
+    timePreset: '',
+  });
   readonly mode: SearchMode = 'literal';
-  /** User dismissed the nearby-lines chip: keep this query strictly single-line until the input changes. */
-  strictLine = $state<boolean>(false);
-  /** Non-zero when the current results come from the ±N nearby-lines fallback. */
-  nearbyLines = $state<number>(0);
 
-  // Settings
-  contextLines = $state<number>(0);
+  // Engine Settings
   hidden = $state<boolean>(false);
   respectIgnore = $state<boolean>(false);
   maxResults = $state<number>(20000);
 
-  // Execution mode
-  liveSearch = $state<boolean>(true);
-  debounceMs = $state<number>(150);
-  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Execution State
   currentSearchId = $state<number>(0);
   searchCount = $state<number>(0);
   isSearching = $state<boolean>(false);
-  /** Search id the user cancelled; late WS frames for it are dropped. */
   private cancelledSearchId = -1;
+  private lastExecutedKey = '';
+  private lastExecutedHadDraft = false;
+  private displayedTimeStartMs = 0;
   errorMessage = $state<string | null>(null);
 
   // Telemetry & Streaming Results
@@ -93,32 +161,26 @@ class WorkbenchState {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushRaf: number | null = null;
   private awaitingFirstChunk = false;
-  private activeQueryCacheKey = '';
-  private l0Cache = new Map<
-    string,
-    {
-      fileGroups: FileHitGroup[];
-      flatHits: HitItem[];
-      filesSearched: number;
-      filesMatched: number;
-      totalMatches: number;
-      matchedLines: number;
-      bytesSearched: number;
-      limitHit: boolean;
-      nearbyLines: number;
-    }
-  >();
 
-  // Data Sources (Project Source Registry with UUID)
+  // L0 Step LRU Cache + Source Revision
+  private sourceRevision = 1;
+  private lastEnabledSourcesSig = '';
+  private l0Cache = new Map<string, L0CacheEntry>();
+  private l0TotalRows = 0;
+  private inflightCacheKeys = new Map<number, InflightCacheMeta>();
+
+  // Data Sources
   tenant = $state<string>('default');
   sources = $state.raw<DataSourceItem[]>([]);
   sourcesLoading = $state<boolean>(false);
+  sourcesLoaded = $state<boolean>(false);
   addSourceModalOpen = $state<boolean>(false);
   settingsTab = $state<'general' | 'sources' | 'shortcuts'>('general');
-  /** Inline "add data source" form inside the Sources pane. */
   sourceAddOpen = $state<boolean>(false);
 
   openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
+    this.sourcePickerOpen = false;
+    this.paletteOpen = false;
     if (tab === 'add-source') {
       this.settingsTab = 'sources';
       this.sourceAddOpen = true;
@@ -126,6 +188,16 @@ class WorkbenchState {
       this.settingsTab = tab;
     }
     this.settingsOpen = true;
+  }
+
+  openSourcePicker() {
+    this.paletteOpen = false;
+    this.settingsOpen = false;
+    this.sourcePickerOpen = true;
+  }
+
+  closeSourcePicker() {
+    this.sourcePickerOpen = false;
   }
 
   openSourceManager() {
@@ -140,26 +212,28 @@ class WorkbenchState {
     this.sources.reduce((acc, s) => acc + (s.enabled ? 1 : 0), 0)
   );
 
-  sourceByName = $derived.by(() => {
+  sourceById = $derived.by(() => {
     const map = new Map<string, DataSourceItem>();
     for (const s of this.sources) {
-      map.set(s.name.toLowerCase(), s);
+      map.set(s.id, s);
     }
     return map;
   });
 
-  // Active hit & Right Inspector
+  // Active hit & Right Inspector + File Context LRU
   activeHitIndex = $state<number>(-1);
   scrollToActiveTick = $state<number>(0);
   inspectedPath = $state<string | null>(null);
   inspectedLine = $state<number>(1);
-  inspectorContext = $state<number>(20);
   inspectedFile = $state<FileResponse | null>(null);
   inspectorLoading = $state<boolean>(false);
   inspectorError = $state<string | null>(null);
   inspectorTab = $state<'structured' | 'raw'>('structured');
+  private fileContextCache = new Map<string, FileContextCacheEntry>();
+  private inspectSeq = 0;
+  private inspectAbort: AbortController | null = null;
 
-  // UI Layout, Theme & Real-Time Settings
+  // UI Layout, Theme & Client Preferences
   locale = $state<Locale>('zh');
   darkMode = $state<boolean>(true);
   leftSidebarOpen = $state<boolean>(true);
@@ -167,21 +241,19 @@ class WorkbenchState {
   leftSidebarWidth = $state<number>(260);
   rightInspectorWidth = $state<number>(520);
   settingsOpen = $state<boolean>(false);
+  sourcePickerOpen = $state<boolean>(false);
   paletteOpen = $state<boolean>(false);
-  /** Compact (mobile) layout: full-screen detail view is shown only after an explicit open. */
   detailOpen = $state<boolean>(false);
-  /** True when viewport < 768px: stacked list/detail navigation, bottom sheets, symbol bar. */
   isCompact = $state<boolean>(false);
-  /** Last pointer used was a finger (touch laptops / hybrids switch modality at runtime). */
   isTouch = $state<boolean>(false);
-  /** Registered by SearchBar: inserts a token (e.g. `$r()`) at the input cursor. */
   insertToken: ((token: string) => void) | null = null;
   codeFontSize = $state<number>(13.5);
   wordWrap = $state<boolean>(true);
+  previewLines = $state<number>(3);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
   searchHistory = $state<SearchHistoryEntry[]>([]);
 
-  // Derived properties
+  // Derived Query Signals
   t = $derived(messages[this.locale]);
 
   activeHit = $derived<HitItem | null>(
@@ -190,56 +262,152 @@ class WorkbenchState {
       : null
   );
 
-  parsedQuery = $derived.by(() => parseSearchQuery(this.pattern, Date.now(), this.sources));
+  draftStep = $derived<QueryStep | null>(
+    this.pattern.trim().length > 0
+      ? normalizeStep({
+          text: this.pattern,
+          exclude: this.draftExclude,
+          caseSensitive: this.caseSensitive,
+          wholeWord: this.wholeWord,
+          isRegex: this.isRegex,
+        })
+      : null
+  );
 
-  /** Scoped `$r(…)` / `$c(…)` / `$w(…)` / `$t(…)` tokens currently present in the query. */
-  hasRegexActive = $derived<boolean>(this.parsedQuery.hasScopedRegex);
-  hasCaseActive = $derived<boolean>(this.parsedQuery.hasScopedCase);
-  hasWordActive = $derived<boolean>(this.parsedQuery.hasScopedWord);
-  hasTimeActive = $derived<boolean>(this.parsedQuery.hasScopedTime);
-  timeStartMs = $derived<number>(this.parsedQuery.timeStartMs);
-  timeEndMs = $derived<number>(this.parsedQuery.timeEndMs);
+  compiledQuery = $derived.by(() =>
+    compileSearchQuery(this.steps, this.draftStep, this.scope)
+  );
 
-  primaryPattern = $derived<string>(this.parsedQuery.primaryPattern);
-  contains = $derived<string[]>(this.parsedQuery.contains);
-  excludes = $derived<string[]>(this.parsedQuery.excludes);
-  parsedGlobs = $derived<string[]>(this.parsedQuery.globs);
-  fileGlobs = $derived<string[]>(this.parsedQuery.fileGlobs);
-  inlineModifiers = $derived(this.parsedQuery.modifiers);
+  primaryPattern = $derived<string>(this.compiledQuery.primaryPattern);
+  contains = $derived<string[]>(this.compiledQuery.contains);
+  excludes = $derived<string[]>(this.compiledQuery.excludes);
+
+  canExcludeDraft = $derived<boolean>(
+    this.steps.some((s) => !s.exclude) ||
+      this.scope.timePreset !== '' ||
+      this.draftExclude
+  );
+
+  hasAnyQueryInput = $derived<boolean>(
+    this.steps.length > 0 ||
+      this.pattern.trim().length > 0 ||
+      this.scope.timePreset !== ''
+  );
+
+  hasExecutableQuery = $derived<boolean>(this.compiledQuery.hasExecutableQuery);
+
+  hasRegexActive = $derived<boolean>(
+    this.isRegex || this.steps.some((s) => s.isRegex)
+  );
+  hasCaseActive = $derived<boolean>(
+    this.caseSensitive || this.steps.some((s) => s.caseSensitive)
+  );
+  hasWordActive = $derived<boolean>(
+    this.wholeWord || this.steps.some((s) => s.wholeWord)
+  );
+  hasTimeActive = $derived<boolean>(this.scope.timePreset !== '');
 
   activeFilterCount = $derived<number>(
-    this.contains.length +
-      this.excludes.length +
-      this.parsedGlobs.length +
-      this.fileGlobs.length +
+    (this.steps.length > 1 ? this.steps.length - 1 : 0) +
+      this.steps.filter((s) => s.exclude).length +
+      this.scope.sources.length +
+      (this.scope.excludedSources?.length ?? 0) +
+      (this.scope.timePreset ? 1 : 0) +
       (this.hasRegexActive ? 1 : 0) +
       (this.hasCaseActive ? 1 : 0) +
-      (this.hasWordActive ? 1 : 0) +
-      (this.hasTimeActive ? 1 : 0)
+      (this.hasWordActive ? 1 : 0)
   );
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      this.loadTheme();
+      this.loadSettings();
+      this.loadHistory();
+      this.loadCachedSources();
+    }
+  }
 
   init() {
     this.loadTheme();
     this.loadSettings();
     this.loadHistory();
+    this.loadCachedSources();
+    if (typeof window !== 'undefined' && !this.lifecycleBound) {
+      this.lifecycleBound = true;
+      window.addEventListener('beforeunload', () => {
+        this.isUnloading = true;
+        this.clearWsDegradedTimer();
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+      });
+      window.addEventListener('pagehide', (e) => {
+        if (!e.persisted) {
+          this.isUnloading = true;
+          this.clearWsDegradedTimer();
+        }
+      });
+      window.addEventListener('pageshow', (e) => {
+        this.isUnloading = false;
+        if (e.persisted) {
+          this.connectWebSocket();
+          this.fetchSources();
+        }
+      });
+    }
     this.fetchMeta();
     this.fetchSources();
     this.connectWebSocket();
   }
 
+  private invalidateCaches() {
+    this.sourceRevision += 1;
+    this.l0Cache.clear();
+    this.l0TotalRows = 0;
+    this.fileContextCache.clear();
+    this.lastExecutedKey = '';
+  }
+
+  private readStorageWithFallback(
+    primary: Storage | undefined,
+    fallback: Storage | undefined,
+    keys: string[]
+  ): string | null {
+    for (const k of keys) {
+      try {
+        const v = primary?.getItem(k);
+        if (v) return v;
+      } catch {
+        // ignore storage errors
+      }
+    }
+    for (const k of keys) {
+      try {
+        const v = fallback?.getItem(k);
+        if (v) return v;
+      } catch {
+        // ignore storage errors
+      }
+    }
+    return null;
+  }
+
   private loadSettings() {
     try {
-      const raw = sessionStorage.getItem(SETTINGS_STORAGE_KEY);
+      const raw =
+        typeof window !== 'undefined'
+          ? this.readStorageWithFallback(window.localStorage, window.sessionStorage, [
+              SETTINGS_STORAGE_KEY,
+              ...LEGACY_SETTINGS_KEYS,
+            ])
+          : null;
       if (!raw) return;
       const s = JSON.parse(raw);
-      if (typeof s.liveSearch === 'boolean') this.liveSearch = s.liveSearch;
-      if (typeof s.debounceMs === 'number' && Number.isFinite(s.debounceMs)) {
-        this.debounceMs = s.debounceMs <= 100 ? 60 : s.debounceMs <= 230 ? 150 : 320;
-      }
       if (typeof s.respectIgnore === 'boolean') this.respectIgnore = s.respectIgnore;
       if (typeof s.hidden === 'boolean') this.hidden = s.hidden;
-      if (typeof s.contextLines === 'number' && Number.isFinite(s.contextLines)) {
-        this.contextLines = Math.max(0, Math.min(10, Math.round(s.contextLines)));
+      if (typeof s.previewLines === 'number' && Number.isFinite(s.previewLines)) {
+        this.previewLines = Math.max(1, Math.min(6, Math.round(s.previewLines)));
       }
       if (typeof s.maxResults === 'number' && Number.isFinite(s.maxResults)) {
         this.maxResults = Math.max(1, Math.min(500000, Math.round(s.maxResults)));
@@ -263,16 +431,18 @@ class WorkbenchState {
   }
 
   setTenant(nextTenant: string) {
-    const clean = nextTenant
-      .trim()
-      .replace(/[^a-zA-Z0-9._-]/g, '-')
-      .slice(0, 64) || 'default';
+    const clean =
+      nextTenant
+        .trim()
+        .replace(/[^a-zA-Z0-9._-]/g, '-')
+        .slice(0, 64) || 'default';
     if (clean === this.tenant) return;
     this.tenant = clean;
+    this.invalidateCaches();
     this.saveSettings();
     this.fetchSources();
-    if (this.pattern.trim().length > 0) {
-      this.scheduleSearch(true);
+    if (this.hasSearchedOnce && this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: true });
     }
   }
 
@@ -283,21 +453,18 @@ class WorkbenchState {
 
   saveSettings() {
     try {
-      sessionStorage.setItem(
+      localStorage.setItem(
         SETTINGS_STORAGE_KEY,
         JSON.stringify({
           locale: this.locale,
           tenant: this.tenant,
-          liveSearch: this.liveSearch,
-          debounceMs: this.debounceMs,
           respectIgnore: this.respectIgnore,
           hidden: this.hidden,
-          contextLines: this.contextLines,
+          previewLines: this.previewLines,
           maxResults: this.maxResults,
           codeFontSize: this.codeFontSize,
           wordWrap: this.wordWrap,
           resultDensity: this.resultDensity,
-          inspectorContext: this.inspectorContext,
         })
       );
     } catch {
@@ -306,30 +473,28 @@ class WorkbenchState {
   }
 
   resetSettings() {
-    this.liveSearch = true;
-    this.debounceMs = 150;
     this.respectIgnore = false;
     this.hidden = false;
-    this.contextLines = 0;
+    this.previewLines = 3;
     this.maxResults = 20000;
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
-    this.inspectorContext = 20;
     this.saveSettings();
-    if (this.pattern.trim().length > 0) {
-      this.executeSearch();
+    if (this.hasSearchedOnce && this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false });
     }
   }
 
   private loadTheme() {
     try {
-      const saved = sessionStorage.getItem(THEME_STORAGE_KEY);
-      if (saved === 'light') {
-        this.darkMode = false;
-      } else {
-        this.darkMode = true;
-      }
+      const saved =
+        typeof window !== 'undefined'
+          ? this.readStorageWithFallback(window.localStorage, window.sessionStorage, [
+              THEME_STORAGE_KEY,
+            ])
+          : null;
+      this.darkMode = saved === 'light' ? false : true;
     } catch {
       this.darkMode = true;
     }
@@ -340,7 +505,7 @@ class WorkbenchState {
     this.darkMode = !this.darkMode;
     this.applyThemeClass();
     try {
-      sessionStorage.setItem(THEME_STORAGE_KEY, this.darkMode ? 'dark' : 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, this.darkMode ? 'dark' : 'light');
     } catch {
       // ignore storage errors
     }
@@ -355,30 +520,69 @@ class WorkbenchState {
   private loadHistory() {
     try {
       const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.searchHistory = parsed.slice(0, 20);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const valid: SearchHistoryEntry[] = [];
+      for (const item of parsed) {
+        if (
+          item &&
+          typeof item.id === 'string' &&
+          typeof item.label === 'string' &&
+          Array.isArray(item.steps) &&
+          item.scope &&
+          typeof item.scope === 'object'
+        ) {
+          valid.push({
+            id: item.id,
+            steps: item.steps.map((s: QueryStep) => createQueryStep(String(s.text ?? ''), s)),
+            draft: item.draft ? createQueryStep(String(item.draft.text ?? ''), item.draft) : null,
+            scope: {
+              sources: Array.isArray(item.scope.sources) ? item.scope.sources : [],
+              excludedSources: Array.isArray(item.scope.excludedSources)
+                ? item.scope.excludedSources
+                : [],
+              types: [],
+              timePreset: (item.scope.timePreset || '') as TimePreset,
+            },
+            label: item.label,
+            timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
+          });
         }
+        if (valid.length >= 20) break;
       }
+      this.searchHistory = valid;
     } catch {
       this.searchHistory = [];
     }
   }
 
-  private recordHistory() {
-    const pat = this.pattern.trim();
-    if (!pat) return;
+  private recordHistory(historyId: string) {
+    const normSteps = this.steps.map(normalizeStep).filter((s) => s.text.length > 0);
+    const normDraft = this.draftStep;
+    if (normSteps.length === 0 && !normDraft && !this.scope.timePreset) return;
+
+    let label = formatHistoryLabel(normSteps, normDraft);
+    if (!label && this.scope.timePreset) {
+      label = formatTimeScopeLabel(this.scope.timePreset, this.t.scopeBar.timeLabels);
+    }
+    if (!label) return;
+
     const entry: SearchHistoryEntry = {
-      pattern: pat,
-      mode: this.mode,
-      contains: [...this.contains],
-      excludes: [...this.excludes],
+      id: historyId,
+      steps: normSteps,
+      draft: normDraft,
+      scope: {
+        sources: [...this.scope.sources],
+        excludedSources: [...(this.scope.excludedSources ?? [])],
+        types: [],
+        timePreset: this.scope.timePreset,
+      },
+      label,
       timestamp: Date.now(),
     };
-    const filtered = this.searchHistory.filter(
-      (h) => !(h.pattern === entry.pattern && h.mode === entry.mode)
-    );
+
+    const filtered = this.searchHistory.filter((h) => h.id !== historyId);
     this.searchHistory = [entry, ...filtered].slice(0, 20);
     try {
       localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(this.searchHistory));
@@ -387,10 +591,8 @@ class WorkbenchState {
     }
   }
 
-  removeHistoryEntry(pattern: string, mode: SearchMode) {
-    this.searchHistory = this.searchHistory.filter(
-      (h) => !(h.pattern === pattern && h.mode === mode)
-    );
+  removeHistoryEntry(id: string) {
+    this.searchHistory = this.searchHistory.filter((h) => h.id !== id);
     try {
       localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(this.searchHistory));
     } catch {
@@ -415,15 +617,44 @@ class WorkbenchState {
       this.meta = {
         rootLabel: data.rootLabel || 'webgrep',
         root: data.root || '.',
-        engine: data.engine || 'libwebgrep 0.1.0 · SIMD',
-        types:
-          Array.isArray(data.types) && data.types.length > 0
-            ? data.types
-            : KNOWN_FILE_TYPES.map((t) => t.id),
+        engine: data.engine || 'libwebgrep 0.5.0 · SIMD',
+        types: Array.isArray(data.types) ? data.types : [],
         scopes: Array.isArray(data.scopes) ? data.scopes : [],
       };
     } catch {
       // keep default meta
+    }
+  }
+
+  private loadCachedSources() {
+    if (this.sourcesLoaded) return;
+    try {
+      const raw = localStorage.getItem(SOURCES_CACHE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const valid: DataSourceItem[] = [];
+      for (const item of parsed) {
+        if (
+          item &&
+          typeof item.id === 'string' &&
+          typeof item.name === 'string' &&
+          typeof item.enabled === 'boolean' &&
+          typeof item.exists === 'boolean'
+        ) {
+          valid.push(item as DataSourceItem);
+        }
+      }
+      if (valid.length > 0 && this.sources.length === 0) {
+        this.sources = valid;
+        this.lastEnabledSourcesSig = valid
+          .filter((s) => s.enabled)
+          .map((s) => `${s.id}:${s.config?.timeFormat ?? ''}`)
+          .sort()
+          .join(',');
+      }
+    } catch {
+      // ignore invalid cached sources
     }
   }
 
@@ -432,7 +663,22 @@ class WorkbenchState {
       this.searchCount = data.searchCount;
     }
     if (Array.isArray(data.sources)) {
+      const nextSig = data.sources
+        .filter((s) => s.enabled)
+        .map((s) => `${s.id}:${s.config?.timeFormat ?? ''}`)
+        .sort()
+        .join(',');
+      if (this.lastEnabledSourcesSig && nextSig !== this.lastEnabledSourcesSig) {
+        this.invalidateCaches();
+      }
+      this.lastEnabledSourcesSig = nextSig;
       this.sources = data.sources;
+      this.sourcesLoaded = true;
+      try {
+        localStorage.setItem(SOURCES_CACHE_STORAGE_KEY, JSON.stringify(data.sources));
+      } catch {
+        // ignore storage errors
+      }
     }
   }
 
@@ -458,8 +704,16 @@ class WorkbenchState {
     path?: string;
     config?: SourceConfig;
     enabled?: boolean;
+    timeFormat?: string;
   }) {
-    const cleanPath = (payload.config?.path ?? payload.path ?? '').trim();
+    const cleanPath = (
+      payload.config?.path ??
+      payload.config?.endpoint ??
+      payload.path ??
+      ''
+    ).trim();
+    const resolvedTimeFormat =
+      payload.timeFormat !== undefined ? payload.timeFormat.trim() : payload.config?.timeFormat;
     const res = await fetch('/api/sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -471,6 +725,7 @@ class WorkbenchState {
         config: {
           path: cleanPath,
           endpoint: payload.config?.endpoint ?? null,
+          ...(resolvedTimeFormat !== undefined ? { timeFormat: resolvedTimeFormat } : {}),
         },
         enabled: payload.enabled ?? true,
       }),
@@ -480,43 +735,11 @@ class WorkbenchState {
       throw new Error(errData.error || `HTTP ${res.status}`);
     }
     const data = (await res.json()) as SourcesResponse;
+    this.invalidateCaches();
     this.applySourcesResponse(data);
-    if (this.pattern.trim().length > 0) {
-      this.scheduleSearch(true);
+    if (this.hasSearchedOnce && this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: true });
     }
-  }
-
-  async ingestTestLog(serviceName: string, customPayload?: string): Promise<string> {
-    const clean =
-      serviceName
-        .trim()
-        .replace(/^@+/, '')
-        .replace(/[^a-zA-Z0-9._-]/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 64) || 'app-logs';
-    const body =
-      customPayload && customPayload.trim().length > 0
-        ? customPayload.trim()
-        : JSON.stringify({
-            level: 'info',
-            service: clean,
-            msg: 'webgrep stream receiver ready',
-            ts: new Date().toISOString(),
-          });
-    const res = await fetch(`/ingest/${encodeURIComponent(clean)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-ndjson' },
-      body,
-    });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      throw new Error(errData.error || `HTTP ${res.status}`);
-    }
-    await this.fetchSources();
-    if (this.pattern.trim().length > 0) {
-      this.scheduleSearch(true);
-    }
-    return clean;
   }
 
   async toggleSourceEnabled(id: string) {
@@ -527,9 +750,10 @@ class WorkbenchState {
     });
     if (res.ok) {
       const data = (await res.json()) as SourcesResponse;
+      this.invalidateCaches();
       this.applySourcesResponse(data);
-      if (this.pattern.trim().length > 0) {
-        this.scheduleSearch(true);
+      if (this.hasSearchedOnce && this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: true });
       }
     }
   }
@@ -542,9 +766,10 @@ class WorkbenchState {
     });
     if (res.ok) {
       const data = (await res.json()) as SourcesResponse;
+      this.invalidateCaches();
       this.applySourcesResponse(data);
-      if (this.pattern.trim().length > 0) {
-        this.scheduleSearch(true);
+      if (this.hasSearchedOnce && this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: true });
       }
     }
   }
@@ -557,9 +782,18 @@ class WorkbenchState {
     });
     if (res.ok) {
       const data = (await res.json()) as SourcesResponse;
+      this.invalidateCaches();
       this.applySourcesResponse(data);
-      if (this.pattern.trim().length > 0) {
-        this.scheduleSearch(true);
+      const excluded = this.scope.excludedSources ?? [];
+      if (this.scope.sources.includes(id) || excluded.includes(id)) {
+        this.scope = {
+          ...this.scope,
+          sources: this.scope.sources.filter((x) => x !== id),
+          excludedSources: excluded.filter((x) => x !== id),
+        };
+      }
+      if (this.hasSearchedOnce && this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: true });
       }
     }
   }
@@ -576,112 +810,431 @@ class WorkbenchState {
     }
   }
 
-  /** Adds or removes `in:source` (result-row source badge). */
-  toggleScopeToken(scope: string) {
-    const token = /^[^\s,"]+$/.test(scope) ? `in:${scope}` : `$@(${scope})`;
-    const parts = this.pattern.trim().split(/\s+/).filter(Boolean);
-    const existing = this.inlineModifiers.find(
-      (m) => m.kind === 'file' && m.value.toLowerCase() === scope.toLowerCase()
-    );
-    if (existing) {
-      this.pattern = removeInlineModifierFromPattern(this.pattern, existing.raw);
+  // Flag toggles (pure state mutations; executed only on Enter or + Filter)
+  toggleCaseSensitive() {
+    this.caseSensitive = !this.caseSensitive;
+  }
+
+  toggleWholeWord() {
+    this.wholeWord = !this.wholeWord;
+  }
+
+  toggleRegexMode() {
+    this.isRegex = !this.isRegex;
+  }
+
+  toggleDraftExclude() {
+    if (!this.canExcludeDraft) return;
+    this.draftExclude = !this.draftExclude;
+  }
+
+  /**
+   * Google-style explicit Enter submission:
+   * Executes the search for `[...steps, draft]` + `scope` while keeping the draft text in the box.
+   * Pressing Enter again on an unchanged query forces a live backend refresh.
+   */
+  submitSearch() {
+    if (!this.hasExecutableQuery) return;
+    const keys = this.computeCurrentCacheKeys();
+    const isRepeat =
+      this.hasSearchedOnce && !this.isSearching && keys.exactKey === this.lastExecutedKey;
+    this.executeSearch({ forceRefresh: isRepeat, recordInHistory: true });
+  }
+
+  /**
+   * Locks the current single-text box input (plus `Aa`/`ab`/`.*`/`-`) as the next step
+   * in `steps` (`#1 -> #2 -> #3`), clears the search box for the next level, and runs the search.
+   */
+  commitCurrentPattern(): boolean {
+    const step = this.draftStep;
+    if (!step) {
+      if (this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: false, recordInHistory: true });
+      }
+      return false;
+    }
+    const alreadyExists = this.steps.some((s) => stepsEqual(s, step));
+    if (!alreadyExists) {
+      this.steps = [...this.steps, step];
+    }
+    this.pattern = '';
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    this.executeSearch({ forceRefresh: false, recordInHistory: true });
+    return true;
+  }
+
+  canToggleStepExclude(idx: number): boolean {
+    const target = this.steps[idx];
+    if (!target) return false;
+    if (target.exclude) return true; // flipping `-` -> `+` always leaves a positive
+    const otherPositiveStep = this.steps.some((s, i) => i !== idx && !s.exclude);
+    const positiveDraft = Boolean(this.draftStep && !this.draftStep.exclude);
+    return otherPositiveStep || positiveDraft || this.scope.timePreset !== '';
+  }
+
+  /** Flips include (`+`) ⇄ exclude (`-`) on a committed step and refreshes results. */
+  toggleStepExclude(idx: number) {
+    if (!this.canToggleStepExclude(idx)) return;
+    const next = this.steps.slice();
+    next[idx] = { ...next[idx], exclude: !next[idx].exclude };
+    this.steps = next;
+    if (this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: true });
+    }
+  }
+
+  /** Loads committed step `idx` back into the single-text search box for editing. */
+  editStepInSearchBox(idx: number) {
+    if (idx < 0 || idx >= this.steps.length) return;
+    const target = this.steps[idx];
+    const remaining = this.steps.filter((_, i) => i !== idx);
+    const currentDraft = this.draftStep;
+    if (currentDraft && !remaining.some((s) => stepsEqual(s, currentDraft))) {
+      remaining.push(currentDraft);
+    }
+    this.steps = remaining;
+    this.pattern = target.text;
+    this.caseSensitive = target.caseSensitive;
+    this.wholeWord = target.wholeWord;
+    this.isRegex = target.isRegex;
+    this.draftExclude = target.exclude && (this.steps.some((s) => !s.exclude) || this.scope.timePreset !== '');
+  }
+
+  /** Removes committed step `idx` and refreshes (instant L0 hit when stepping back). */
+  removeStep(idx: number) {
+    if (idx < 0 || idx >= this.steps.length) return;
+    this.steps = this.steps.filter((_, i) => i !== idx);
+    if (this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: false });
     } else {
-      this.pattern = [...parts, token].join(' ');
-    }
-    this.scheduleSearch(true);
-  }
-
-  removeInlineModifier(rawToken: string) {
-    this.pattern = removeInlineModifierFromPattern(this.pattern, rawToken);
-    this.scheduleSearch(true);
-  }
-
-  /** Flips a term between "must contain" and "exclude" (`foo` ⇄ `-foo`). */
-  toggleInlineModifierExclude(rawToken: string) {
-    const trimmed = rawToken.trim();
-    if (!trimmed) return;
-    const next = toggleTermExclusion(trimmed);
-    const escaped = rawToken.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
-    const regex = new RegExp(`(^|\\s)${escaped}(?=\\s|$)`);
-    if (regex.test(this.pattern)) {
-      this.pattern = this.pattern.replace(regex, (_m, lead: string) => `${lead}${next}`).trim();
-      this.scheduleSearch(true);
+      this.cancelSearch();
+      this.resetResultBuffer();
+      this.hasSearchedOnce = false;
+      this.lastExecutedKey = '';
     }
   }
 
+  /** Clears only the current search box text & flags without removing locked steps. */
+  clearDraftInput() {
+    this.pattern = '';
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    if (this.hasSearchedOnce && this.lastExecutedHadDraft) {
+      if (this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: false, recordInHistory: false });
+      } else {
+        this.cancelSearch();
+        this.resetResultBuffer();
+        this.hasSearchedOnce = false;
+        this.lastExecutedKey = '';
+      }
+    }
+  }
+
+  /** Locks any current draft into `steps`, appends literal positive term, clears draft, and executes. */
   appendSearchTerm(term: string) {
-    const formatted = formatSearchTerm(term);
-    if (!formatted) return;
-    const cur = this.pattern.trim();
-    this.pattern = cur.length > 0 ? `${cur} ${formatted}` : formatted;
-    this.executeSearch(false);
+    const clean = term.trim();
+    if (!clean) return;
+    const next = this.steps.slice();
+    if (this.draftStep && !next.some((s) => stepsEqual(s, this.draftStep!))) {
+      next.push(this.draftStep);
+    }
+    const added = createQueryStep(clean, { exclude: false });
+    if (!next.some((s) => stepsEqual(s, added))) {
+      next.push(added);
+    }
+    this.steps = next;
+    this.pattern = '';
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    this.executeSearch({ forceRefresh: false, recordInHistory: true });
   }
 
+  /** Locks any current draft into `steps`, appends literal excluded term, clears draft, and executes. */
   excludeSearchTerm(term: string) {
-    const formatted = formatSearchTerm(term);
-    if (!formatted) return;
-    const cur = this.pattern.trim();
-    this.pattern = cur.length > 0 ? `${cur} -${formatted}` : `-${formatted}`;
-    this.executeSearch(false);
+    const clean = term.trim();
+    if (!clean) return;
+    const next = this.steps.slice();
+    if (this.draftStep && !next.some((s) => stepsEqual(s, this.draftStep!))) {
+      next.push(this.draftStep);
+    }
+    const canEx = next.some((s) => !s.exclude) || this.scope.timePreset !== '';
+    const added = createQueryStep(clean, { exclude: canEx });
+    if (!next.some((s) => stepsEqual(s, added))) {
+      next.push(added);
+    }
+    this.steps = next;
+    this.pattern = '';
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    this.executeSearch({ forceRefresh: false, recordInHistory: true });
+  }
+
+  /** Replaces the entire text query with a clean literal search (keeps scope filters). */
+  replaceSearchWithLiteral(term: string) {
+    const clean = term.trim();
+    if (!clean) return;
+    this.steps = [];
+    this.pattern = clean;
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    this.executeSearch({ forceRefresh: false, recordInHistory: true });
   }
 
   applyHistoryEntry(entry: SearchHistoryEntry) {
-    this.pattern = entry.pattern.trim();
-    this.executeSearch(false);
+    this.steps = entry.steps.map((s) => createQueryStep(s.text, s));
+    if (entry.draft) {
+      this.pattern = entry.draft.text;
+      this.caseSensitive = entry.draft.caseSensitive;
+      this.wholeWord = entry.draft.wholeWord;
+      this.isRegex = entry.draft.isRegex;
+      this.draftExclude = entry.draft.exclude;
+    } else {
+      this.pattern = '';
+      this.caseSensitive = false;
+      this.wholeWord = false;
+      this.isRegex = false;
+      this.draftExclude = false;
+    }
+    this.scope = {
+      sources: [...entry.scope.sources],
+      excludedSources: [...(entry.scope.excludedSources ?? [])],
+      types: [],
+      timePreset: entry.scope.timePreset,
+    };
+    this.executeSearch({ forceRefresh: false, recordInHistory: true });
   }
 
-  /** Keeps only the positive search terms (drops exclusions, scopes and time range). */
-  resetAllFilters() {
-    const keep = [
-      this.parsedQuery.primaryRaw,
-      ...this.inlineModifiers.filter((m) => m.kind === 'include').map((m) => m.raw),
-    ].filter(Boolean);
-    this.pattern = keep.join(' ');
-    this.strictLine = false;
-    this.scheduleSearch(true);
+  private resolveSourceIdOrName(nameOrId: string): string {
+    const match = this.sources.find(
+      (s) => s.id === nameOrId || s.name.toLowerCase() === nameOrId.toLowerCase()
+    );
+    return match ? match.id : nameOrId;
   }
 
-  /** Applies a zero-result fix from `zeroResultFixes` (new pattern, or re-enable nearby lines). */
-  applyResultFix(fix: ResultFix) {
-    if (fix.action === 'nearby') {
-      this.strictLine = false;
-      this.executeSearch(false);
+  private sameSourceList(a: readonly string[], b: readonly string[]): boolean {
+    if (a.length !== b.length) return false;
+    const sa = [...a].sort();
+    const sb = [...b].sort();
+    for (let i = 0; i < sa.length; i++) {
+      if (sa[i] !== sb[i]) return false;
+    }
+    return true;
+  }
+
+  // ScopeFilter actions
+  setScopeSources(sources: readonly string[], excludedSources: readonly string[] = []) {
+    const nextExcludedSet = new Set(excludedSources);
+    const nextSources = Array.from(new Set(sources)).filter((id) => !nextExcludedSet.has(id));
+    const nextExcluded = Array.from(nextExcludedSet);
+    const curSources = this.scope.sources;
+    const curExcluded = this.scope.excludedSources ?? [];
+    if (
+      this.sameSourceList(curSources, nextSources) &&
+      this.sameSourceList(curExcluded, nextExcluded)
+    ) {
       return;
     }
-    if (fix.pattern !== undefined) {
-      this.pattern = fix.pattern;
-      this.scheduleSearch(true);
+    this.scope = {
+      ...this.scope,
+      sources: nextSources,
+      excludedSources: nextExcluded,
+      types: [],
+    };
+    if (this.hasSearchedOnce && this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: false });
     }
   }
 
-  /** Dismisses the nearby-lines fallback for the current query (strict single-line matching). */
-  disableNearbyLines() {
-    this.strictLine = true;
-    this.scheduleSearch(true);
+  selectSingleScopeSource(id: string) {
+    const next = applySingleSourceSelection(this.scope, id);
+    this.setScopeSources(next.sources, next.excludedSources);
+  }
+
+  selectSingleScopeSourceByName(name: string) {
+    this.selectSingleScopeSource(this.resolveSourceIdOrName(name));
+  }
+
+  toggleScopeSource(id: string) {
+    const next = toggleMultiSourceSelection(this.scope, id);
+    this.setScopeSources(next.sources, next.excludedSources);
+  }
+
+  toggleScopeSourceByName(name: string) {
+    this.toggleScopeSource(this.resolveSourceIdOrName(name));
+  }
+
+  toggleExcludeScopeSource(id: string) {
+    const next = toggleExcludeSourceSelection(this.scope, id);
+    this.setScopeSources(next.sources, next.excludedSources);
+  }
+
+  toggleExcludeScopeSourceByName(name: string) {
+    this.toggleExcludeScopeSource(this.resolveSourceIdOrName(name));
+  }
+
+  scopeSourceFromMenu(name: string, exclude: boolean) {
+    const idOrName = this.resolveSourceIdOrName(name);
+    if (exclude) {
+      const curEx = this.scope.excludedSources ?? [];
+      const nextEx = curEx.includes(idOrName) ? curEx : [...curEx, idOrName];
+      this.setScopeSources(
+        this.scope.sources.filter((x) => x !== idOrName),
+        nextEx
+      );
+    } else {
+      this.setScopeSources([idOrName], []);
+    }
+  }
+
+  clearScopeSources() {
+    this.setScopeSources([], []);
+  }
+
+  setScopeTime(preset: TimePreset) {
+    this.scope = {
+      ...this.scope,
+      timePreset: preset,
+    };
+    if (this.hasExecutableQuery && (this.hasSearchedOnce || preset !== '')) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: !this.hasSearchedOnce });
+    } else if (this.hasSearchedOnce && !this.hasExecutableQuery) {
+      this.cancelSearch();
+      this.resetResultBuffer();
+      this.hasSearchedOnce = false;
+      this.lastExecutedKey = '';
+    }
+  }
+
+  clearScopeAll() {
+    this.scope = {
+      sources: [],
+      excludedSources: [],
+      types: [],
+      timePreset: '',
+    };
+    if (this.hasSearchedOnce && this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: false });
+    } else if (!this.hasExecutableQuery) {
+      this.cancelSearch();
+      this.resetResultBuffer();
+      this.hasSearchedOnce = false;
+      this.lastExecutedKey = '';
+    }
+  }
+
+  /** Keeps only the first positive step and clears flags + scope filters. */
+  resetAllFilters() {
+    const all = this.compiledQuery.activeSteps;
+    const firstPos = all.find((s) => !s.exclude);
+    this.steps = [];
+    this.pattern = firstPos ? firstPos.text : '';
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = Boolean(firstPos?.isRegex);
+    this.draftExclude = false;
+    this.scope = {
+      sources: [],
+      excludedSources: [],
+      types: [],
+      timePreset: '',
+    };
+    if (this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: false });
+    } else {
+      this.cancelSearch();
+      this.resetResultBuffer();
+      this.hasSearchedOnce = false;
+      this.lastExecutedKey = '';
+    }
+  }
+
+  /** Applies a zero-result recovery action from `zeroResultFixes`. */
+  applyResultFix(fix: ResultFix) {
+    if (fix.steps !== undefined) {
+      this.steps = fix.steps.map((s) => createQueryStep(s.text, s));
+    }
+    if (fix.draft !== undefined) {
+      if (fix.draft) {
+        this.pattern = fix.draft.text;
+        this.caseSensitive = fix.draft.caseSensitive;
+        this.wholeWord = fix.draft.wholeWord;
+        this.isRegex = fix.draft.isRegex;
+        this.draftExclude = fix.draft.exclude;
+      } else {
+        this.pattern = '';
+        this.caseSensitive = false;
+        this.wholeWord = false;
+        this.isRegex = false;
+        this.draftExclude = false;
+      }
+    }
+    if (fix.scopePatch) {
+      this.scope = { ...this.scope, ...fix.scopePatch };
+    }
+    if (this.hasExecutableQuery) {
+      this.executeSearch({ forceRefresh: false, recordInHistory: false });
+    }
   }
 
   // WebSocket management
+  private clearWsDegradedTimer() {
+    if (this.wsDegradedTimer !== null) {
+      clearTimeout(this.wsDegradedTimer);
+      this.wsDegradedTimer = null;
+    }
+  }
+
+  private scheduleWsDegraded() {
+    if (this.isUnloading || this.wsDegraded || this.wsDegradedTimer !== null) return;
+    this.wsDegradedTimer = setTimeout(() => {
+      this.wsDegradedTimer = null;
+      if (!this.isUnloading && this.wsStatus !== 'connected') {
+        this.wsDegraded = true;
+      }
+    }, WS_DEGRADED_GRACE_MS);
+  }
+
   connectWebSocket() {
     if (typeof window === 'undefined') return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
+    this.isUnloading = false;
     const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
     const wsUrl = `${protocol}${window.location.host}/api/ws`;
-    this.wsStatus = this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting';
+    const isReconnect = this.reconnectAttempt > 0;
+    this.wsStatus = isReconnect ? 'reconnecting' : 'connecting';
+    this.scheduleWsDegraded();
 
     try {
       const socket = new WebSocket(wsUrl);
       this.ws = socket;
 
       socket.onopen = () => {
+        this.clearWsDegradedTimer();
+        this.wsDegraded = false;
         this.wsStatus = 'connected';
         this.reconnectAttempt = 0;
-        this.fetchMeta();
-        this.fetchSources();
-        if (this.pattern.trim()) {
-          this.executeSearch();
+        if (isReconnect || !this.sourcesLoaded) {
+          this.fetchMeta();
+          this.fetchSources();
+        }
+        if (this.pendingSearchOnOpen && this.hasExecutableQuery) {
+          this.pendingSearchOnOpen = false;
+          this.executeSearch({ forceRefresh: false, recordInHistory: false });
         }
       };
 
@@ -707,12 +1260,17 @@ class WorkbenchState {
       socket.onclose = () => {
         this.ws = null;
         this.isSearching = false;
+        if (this.isUnloading) return;
         this.wsStatus = 'reconnecting';
+        this.scheduleWsDegraded();
         this.scheduleReconnect();
       };
     } catch {
-      this.wsStatus = 'offline';
-      this.scheduleReconnect();
+      if (!this.isUnloading) {
+        this.wsStatus = 'offline';
+        this.wsDegraded = true;
+        this.scheduleReconnect();
+      }
     }
   }
 
@@ -725,48 +1283,12 @@ class WorkbenchState {
     }, delay);
   }
 
-  scheduleSearch(immediate = false) {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
-    if (immediate) {
-      this.debounceTimer = setTimeout(() => {
-        this.executeSearch(false);
-      }, 16);
-      return;
-    }
-    // Editing the query starts over with the default (single-line first, then nearby lines).
-    this.strictLine = false;
-    if (!this.liveSearch) return;
-
-    const trimmedLen = this.pattern.trim().length;
-    if (trimmedLen > 0) {
-      this.hasSearchedOnce = true;
-    }
-    const delay =
-      trimmedLen <= 1
-        ? Math.max(240, this.debounceMs)
-        : trimmedLen === 2
-          ? Math.max(150, this.debounceMs)
-          : this.debounceMs;
-
-    this.debounceTimer = setTimeout(() => {
-      this.executeSearch(true);
-    }, delay);
-  }
-
   cancelSearch() {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
     if (this.isSearching) {
-      // Freeze the view at what has already arrived, then ignore everything still in flight
-      // for this search id (queued WS frames would otherwise keep growing the result list).
       this.flushPendingHitsSync();
       this.awaitingFirstChunk = false;
       this.cancelledSearchId = this.currentSearchId;
+      this.inflightCacheKeys.delete(this.currentSearchId);
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(
           JSON.stringify({
@@ -781,9 +1303,16 @@ class WorkbenchState {
 
   clearSearch() {
     this.cancelSearch();
+    this.steps = [];
     this.pattern = '';
-    this.strictLine = false;
+    this.caseSensitive = false;
+    this.wholeWord = false;
+    this.isRegex = false;
+    this.draftExclude = false;
+    this.lastExecutedKey = '';
+    this.lastExecutedHadDraft = false;
     this.errorMessage = null;
+    this.hasSearchedOnce = false;
     this.resetResultBuffer();
   }
 
@@ -813,33 +1342,254 @@ class WorkbenchState {
     this.bytesSearched = 0;
     this.elapsedMs = 0;
     this.limitHit = false;
-    this.nearbyLines = 0;
+    this.cacheHit = 'none';
+    this.displayedTimeStartMs = 0;
   }
 
-  executeSearch(isLiveTyping = false) {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
+  private getEffectiveSourceIds(): string[] {
+    if (this.scope.sources.length > 0) {
+      return [...this.scope.sources];
+    }
+    return this.sources.filter((s) => s.enabled).map((s) => s.id);
+  }
+
+  private isContentTimeSource(s: DataSourceItem): boolean {
+    if (s.config?.timeFormat !== undefined && s.config?.timeFormat !== null) {
+      return Boolean(s.config.timeFormat.trim());
+    }
+    return s.kind === 'docker';
+  }
+
+  private hasActiveDockerSource(): boolean {
+    return this.getActiveSources().some((s) => s.kind === 'docker');
+  }
+
+  private getActiveSources(): DataSourceItem[] {
+    const excluded = new Set(this.scope.excludedSources ?? []);
+    if (this.scope.sources.length > 0) {
+      const selected = new Set(this.scope.sources);
+      return this.sources.filter(
+        (s) =>
+          (selected.has(s.id) || selected.has(s.name)) &&
+          !excluded.has(s.id) &&
+          !excluded.has(s.name)
+      );
+    }
+    return this.sources.filter(
+      (s) => s.enabled && !excluded.has(s.id) && !excluded.has(s.name)
+    );
+  }
+
+  getEffectiveTimeBasisSummary(): { contentCount: number; mtimeCount: number } {
+    let contentCount = 0;
+    let mtimeCount = 0;
+    for (const s of this.getActiveSources()) {
+      if (this.isContentTimeSource(s)) {
+        contentCount += 1;
+      } else {
+        mtimeCount += 1;
+      }
+    }
+    return { contentCount, mtimeCount };
+  }
+
+  private getSourceTimeFormatsSig(): string {
+    return this.getActiveSources()
+      .filter((s) => this.isContentTimeSource(s))
+      .map((s) => `${s.id}=${s.config?.timeFormat?.trim() || 'auto'}`)
+      .sort()
+      .join('|');
+  }
+
+  private computeCurrentCacheKeys(nowMs = Date.now()) {
+    return buildQueryCacheKeys({
+      tenant: this.tenant,
+      effectiveSources: this.getEffectiveSourceIds(),
+      excludedSources: this.scope.excludedSources ?? [],
+      types: this.scope.types,
+      timePreset: this.scope.timePreset,
+      timeMode: 'source',
+      tzOffsetMin: -new Date().getTimezoneOffset(),
+      sourceTimeFormatsSig: this.getSourceTimeFormatsSig(),
+      steps: this.compiledQuery.activeSteps,
+      contextLines: 0,
+      hidden: this.hidden,
+      respectIgnore: this.respectIgnore,
+      maxResults: this.maxResults,
+      nowMs,
+    });
+  }
+
+  private findValidL0Entry(exactKey: string, baseKey: string, nowMs: number): L0CacheEntry | null {
+    const exact = this.l0Cache.get(exactKey);
+    if (exact) {
+      if (exact.sourceRevision === this.sourceRevision && nowMs - exact.storedAt <= L0_TTL_MS) {
+        this.l0Cache.delete(exactKey);
+        this.l0Cache.set(exactKey, exact);
+        return exact;
+      }
+      this.deleteL0Entry(exactKey, exact);
     }
 
-    const pat = this.primaryPattern;
-    if ((!pat || pat.length === 0) && !this.hasTimeActive) {
+    for (const [k, entry] of this.l0Cache) {
+      if (
+        entry.baseKey === baseKey &&
+        !entry.limitHit &&
+        this.maxResults >= entry.flatHits.length &&
+        entry.sourceRevision === this.sourceRevision &&
+        nowMs - entry.storedAt <= L0_TTL_MS
+      ) {
+        this.l0Cache.delete(k);
+        this.l0Cache.set(k, entry);
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  private deleteL0Entry(key: string, entry: L0CacheEntry) {
+    this.l0Cache.delete(key);
+    this.l0TotalRows = Math.max(0, this.l0TotalRows - entry.flatHits.length);
+  }
+
+  private putL0Entry(meta: InflightCacheMeta) {
+    if (this.hasActiveDockerSource()) return;
+    const rowCount = this.flatHits.length;
+    if (rowCount > MAX_L0_SINGLE_ROWS) return;
+
+    const existing = this.l0Cache.get(meta.exactKey);
+    if (existing) {
+      this.deleteL0Entry(meta.exactKey, existing);
+    }
+
+    while (
+      this.l0Cache.size > 0 &&
+      (this.l0Cache.size >= MAX_L0_ENTRIES || this.l0TotalRows + rowCount > MAX_L0_TOTAL_ROWS)
+    ) {
+      const oldest = this.l0Cache.entries().next().value;
+      if (!oldest) break;
+      this.deleteL0Entry(oldest[0], oldest[1]);
+    }
+
+    if (this.l0TotalRows + rowCount > MAX_L0_TOTAL_ROWS) return;
+
+    const entry: L0CacheEntry = {
+      exactKey: meta.exactKey,
+      baseKey: meta.baseKey,
+      sourceRevision: meta.sourceRevision,
+      storedAt: Date.now(),
+      timeStartMs: meta.timeStartMs,
+      fileGroups: this.fileGroups,
+      flatHits: this.flatHits,
+      filesSearched: this.filesSearched,
+      filesMatched: this.filesMatched,
+      totalMatches: this.totalMatches,
+      matchedLines: this.matchedLines,
+      bytesSearched: this.bytesSearched,
+      limitHit: this.limitHit,
+    };
+    this.l0Cache.set(meta.exactKey, entry);
+    this.l0TotalRows += rowCount;
+  }
+
+  private restoreFromL0Entry(entry: L0CacheEntry, hadDraft: boolean) {
+    this.clearFlushSchedule();
+    this.awaitingFirstChunk = false;
+    this.pendingChunks = [];
+    this.isSearching = false;
+    this.errorMessage = null;
+    this.hasSearchedOnce = true;
+
+    this.groupIndexByFile.clear();
+    for (let i = 0; i < entry.fileGroups.length; i++) {
+      this.groupIndexByFile.set(entry.fileGroups[i].file, i);
+    }
+    this.fileGroups = entry.fileGroups;
+    this.flatHits = entry.flatHits;
+    this.activeHitIndex = -1;
+    this.filesSearched = entry.filesSearched;
+    this.filesMatched = entry.filesMatched;
+    this.totalMatches = entry.totalMatches;
+    this.matchedLines = entry.matchedLines;
+    this.bytesSearched = entry.bytesSearched;
+    this.elapsedMs = 0.05;
+    this.limitHit = entry.limitHit;
+    this.cacheHit = 'l0-instant';
+    this.lastExecutedKey = entry.exactKey;
+    this.lastExecutedHadDraft = hadDraft;
+    this.displayedTimeStartMs = entry.timeStartMs;
+  }
+
+  executeSearch(opts: ExecuteSearchOptions = {}) {
+    const nowMs = Date.now();
+    const freshCompiled = compileSearchQuery(this.steps, this.draftStep, this.scope, nowMs);
+    if (!freshCompiled.hasExecutableQuery) {
       this.cancelSearch();
       this.resetResultBuffer();
+      this.hasSearchedOnce = false;
       this.errorMessage = null;
       return;
     }
 
+    const keys = buildQueryCacheKeys({
+      tenant: this.tenant,
+      effectiveSources: this.getEffectiveSourceIds(),
+      excludedSources: this.scope.excludedSources ?? [],
+      types: this.scope.types,
+      timePreset: this.scope.timePreset,
+      timeMode: 'source',
+      tzOffsetMin: -new Date().getTimezoneOffset(),
+      sourceTimeFormatsSig: this.getSourceTimeFormatsSig(),
+      steps: freshCompiled.activeSteps,
+      contextLines: 0,
+      hidden: this.hidden,
+      respectIgnore: this.respectIgnore,
+      maxResults: this.maxResults,
+      nowMs,
+    });
+
+    if (opts.recordInHistory) {
+      this.recordHistory(keys.historyId);
+    }
+
+    // Tier L0: True Short-Circuit Instant Cache (< 0.05ms, preserves HitItem references for WeakMap highlight cache)
+    if (!opts.forceRefresh && !this.hasActiveDockerSource()) {
+      const l0Hit = this.findValidL0Entry(keys.exactKey, keys.baseKey, nowMs);
+      if (l0Hit) {
+        this.cancelSearch();
+        this.currentSearchId += 1;
+        this.restoreFromL0Entry(l0Hit, this.draftStep !== null);
+        return;
+      }
+    }
+
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingSearchOnOpen = true;
       this.connectWebSocket();
       return;
     }
 
+    const reqTimeRange = this.scope.timePreset
+      ? parseTimeModifierSpec(this.scope.timePreset, nowMs)
+      : null;
+    const reqTimeStartMs = reqTimeRange && reqTimeRange.startMs > 0 ? reqTimeRange.startMs : 0;
+
     this.currentSearchId += 1;
     const searchId = this.currentSearchId;
+    this.inflightCacheKeys.set(searchId, {
+      exactKey: keys.exactKey,
+      baseKey: keys.baseKey,
+      sourceRevision: this.sourceRevision,
+      hadDraft: this.draftStep !== null,
+      maxResults: this.maxResults,
+      timeStartMs: reqTimeStartMs,
+    });
+    if (this.inflightCacheKeys.size > 32) {
+      const oldestKey = this.inflightCacheKeys.keys().next().value;
+      if (oldestKey !== undefined) this.inflightCacheKeys.delete(oldestKey);
+    }
 
     // Stale-While-Revalidate: keep existing results on screen until the first batch or done arrives
-    // so the UI never flashes to a blank spinner between keystrokes
     this.clearFlushSchedule();
     this.pendingChunks = [];
     this.awaitingFirstChunk = true;
@@ -847,94 +1597,80 @@ class WorkbenchState {
     this.isSearching = true;
     this.hasSearchedOnce = true;
 
-    if (!isLiveTyping && this.pattern.trim().length >= 1) {
-      this.recordHistory();
-    }
-
-    const trimmedLen = pat.trim().length;
-    const effectiveMaxResults =
-      isLiveTyping && trimmedLen === 1
-        ? Math.min(this.maxResults, 1000)
-        : isLiveTyping && trimmedLen === 2
-          ? Math.min(this.maxResults, 3000)
-          : this.maxResults;
-
-    // Re-evaluate time range at search execution time so relative `$t(15m)` uses fresh `Date.now()`
-    const freshPq = this.hasTimeActive
-      ? parseSearchQuery(this.pattern, Date.now(), this.sources)
-      : this.parsedQuery;
-    const reqTimeStartMs = freshPq.timeStartMs || 0;
-    const reqTimeEndMs = freshPq.timeEndMs || 0;
-
-    const nearbyLines = this.strictLine ? 0 : NEARBY_LINES;
     const payload: WsSearchMessage = {
       type: 'search',
       id: searchId,
       tenant: this.tenant,
-      pattern: pat,
+      pattern: freshCompiled.primaryPattern,
       mode: this.mode,
       case: 'insensitive',
-      contains: this.contains,
-      excludes: this.excludes,
-      context: this.contextLines,
-      globs: this.parsedGlobs,
-      fileGlobs: this.fileGlobs,
+      contains: freshCompiled.contains,
+      excludes: freshCompiled.excludes,
+      context: 0,
+      sources: freshCompiled.sources,
+      types: freshCompiled.types,
+      globs: freshCompiled.globs,
+      fileGlobs: [],
       hidden: this.hidden,
       respectIgnore: this.respectIgnore,
-      maxResults: effectiveMaxResults,
-      nearbyLines,
+      maxResults: this.maxResults,
+      nearbyLines: 0,
       timeStartMs: reqTimeStartMs > 0 ? reqTimeStartMs : undefined,
-      timeEndMs: reqTimeEndMs > 0 ? reqTimeEndMs : undefined,
+      timeEndMs: reqTimeRange && reqTimeRange.endMs > 0 ? reqTimeRange.endMs : undefined,
+      timeMode: 'source',
+      tzOffsetMin: -new Date().getTimezoneOffset(),
     };
-
-    const enabledSourcesSig = this.sources
-      .filter((s) => s.enabled)
-      .map((s) => s.id)
-      .join(',');
-    const cacheKey = JSON.stringify({
-      p: pat,
-      inc: this.contains,
-      exc: this.excludes,
-      ctx: this.contextLines,
-      en: enabledSourcesSig,
-      globs: this.parsedGlobs,
-      files: this.fileGlobs,
-      hid: this.hidden,
-      ign: this.respectIgnore,
-      max: effectiveMaxResults,
-      near: nearbyLines,
-      ts: reqTimeStartMs > 0 ? Math.floor(reqTimeStartMs / 1000) : 0,
-      te: reqTimeEndMs > 0 ? Math.floor(reqTimeEndMs / 1000) : 0,
-    });
-    this.activeQueryCacheKey = cacheKey;
-
-    // Tier L0: Frontend Instant Ring Cache (< 0.05ms zero-copy $state.raw swap)
-    const l0Hit = this.l0Cache.get(cacheKey);
-    if (l0Hit) {
-      this.fileGroups = l0Hit.fileGroups;
-      this.flatHits = l0Hit.flatHits;
-      this.filesSearched = l0Hit.filesSearched;
-      this.filesMatched = l0Hit.filesMatched;
-      this.totalMatches = l0Hit.totalMatches;
-      this.matchedLines = l0Hit.matchedLines;
-      this.bytesSearched = l0Hit.bytesSearched;
-      this.limitHit = l0Hit.limitHit;
-      this.nearbyLines = l0Hit.nearbyLines;
-      this.cacheHit = 'l0-instant';
-    }
 
     this.ws.send(JSON.stringify(payload));
   }
 
+  async previewTimeFormat(format: string, sample: string): Promise<TimePreviewResponse> {
+    try {
+      const res = await fetch('/api/time/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          format: format.trim(),
+          sample,
+          tzOffsetMin: -new Date().getTimezoneOffset(),
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        const msg =
+          typeof errData.errorMessage === 'string'
+            ? errData.errorMessage
+            : typeof errData.error === 'string'
+              ? errData.error
+              : `HTTP ${res.status}`;
+        return {
+          validFormat: false,
+          matched: false,
+          errorMessage: msg,
+        };
+      }
+      return (await res.json()) as TimePreviewResponse;
+    } catch (err) {
+      return {
+        validFormat: false,
+        matched: false,
+        errorMessage: err instanceof Error ? err.message : 'Preview request failed',
+      };
+    }
+  }
+
   private handleWsMessage(msg: WsIncomingMessage) {
-    if (msg.id !== this.currentSearchId || msg.id === this.cancelledSearchId) return;
+    if (msg.id !== this.currentSearchId || msg.id === this.cancelledSearchId) {
+      if (msg.type === 'done' || msg.type === 'error') {
+        this.inflightCacheKeys.delete(msg.id);
+      }
+      return;
+    }
 
     switch (msg.type) {
       case 'hits': {
         if (Array.isArray(msg.items) && msg.items.length > 0) {
           this.pendingChunks.push(msg.items);
-          // Coalesce the initial 60ms of streaming packets into a single full-viewport swap,
-          // then stream subsequent batches at a calm 80ms rhythm (~12.5fps)
           this.scheduleFlushHits(this.awaitingFirstChunk ? 60 : 80);
         }
         break;
@@ -949,6 +1685,9 @@ class WorkbenchState {
         break;
       }
       case 'done': {
+        const meta = this.inflightCacheKeys.get(msg.id);
+        this.inflightCacheKeys.delete(msg.id);
+
         if (this.awaitingFirstChunk && this.pendingChunks.length === 0) {
           this.resetResultBuffer();
         } else {
@@ -963,40 +1702,32 @@ class WorkbenchState {
         this.bytesSearched = msg.bytesSearched ?? this.bytesSearched;
         this.limitHit = Boolean(msg.limitHit) && String(msg.limitHit) !== 'none';
         this.cacheHit = msg.cacheHit ?? 'none';
-        this.nearbyLines = msg.nearbyLines ?? 0;
         if (typeof msg.searchCount === 'number' && msg.searchCount > 0) {
           this.searchCount = msg.searchCount;
         }
 
-        if (this.activeQueryCacheKey && this.flatHits.length <= 20000) {
-          if (this.l0Cache.size >= 24 && !this.l0Cache.has(this.activeQueryCacheKey)) {
-            const oldestKey = this.l0Cache.keys().next().value;
-            if (oldestKey !== undefined) this.l0Cache.delete(oldestKey);
+        if (meta) {
+          this.lastExecutedKey = meta.exactKey;
+          this.lastExecutedHadDraft = meta.hadDraft;
+          this.displayedTimeStartMs = meta.timeStartMs;
+          if (meta.sourceRevision === this.sourceRevision) {
+            this.putL0Entry(meta);
           }
-          this.l0Cache.set(this.activeQueryCacheKey, {
-            fileGroups: this.fileGroups,
-            flatHits: this.flatHits,
-            filesSearched: this.filesSearched,
-            filesMatched: this.filesMatched,
-            totalMatches: this.totalMatches,
-            matchedLines: this.matchedLines,
-            bytesSearched: this.bytesSearched,
-            limitHit: this.limitHit,
-            nearbyLines: this.nearbyLines,
-          });
         }
 
-        if (this.totalMatches > 0 && this.pattern.trim().length >= 2) {
-          this.recordHistory();
-        }
-
-        if (this.activeHitIndex === -1 && this.flatHits.length > 0 && this.rightInspectorOpen && this.inspectedPath) {
+        if (
+          this.activeHitIndex === -1 &&
+          this.flatHits.length > 0 &&
+          this.rightInspectorOpen &&
+          this.inspectedPath
+        ) {
           const firstMatchIdx = this.flatHits.findIndex((h) => !h.isContext);
           this.selectHitByIndex(firstMatchIdx >= 0 ? firstMatchIdx : 0, false);
         }
         break;
       }
       case 'error': {
+        this.inflightCacheKeys.delete(msg.id);
         if (this.awaitingFirstChunk && this.pendingChunks.length === 0) {
           this.resetResultBuffer();
         } else {
@@ -1032,6 +1763,7 @@ class WorkbenchState {
 
     if (this.awaitingFirstChunk) {
       this.awaitingFirstChunk = false;
+      this.displayedTimeStartMs = this.inflightCacheKeys.get(this.currentSearchId)?.timeStartMs ?? 0;
       this.groupIndexByFile.clear();
       this.fileGroups = [];
       this.flatHits = [];
@@ -1110,7 +1842,7 @@ class WorkbenchState {
     if (idx >= 0) {
       this.selectHitByIndex(idx, true);
     } else {
-      this.inspectFileAtLine(item.file, item.line, this.inspectorContext, true);
+      void this.inspectFileAtLine(item.file, item.line, true);
     }
   }
 
@@ -1119,7 +1851,6 @@ class WorkbenchState {
     this.activeHitIndex = index;
     const hit = this.flatHits[index];
     if (hit) {
-      // If the file group was collapsed, auto-expand it when navigating to it
       const gIdx = this.groupIndexByFile.get(hit.file);
       if (gIdx !== undefined && this.fileGroups[gIdx]?.collapsed) {
         const next = this.fileGroups.slice();
@@ -1131,29 +1862,21 @@ class WorkbenchState {
         if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
       }
 
-      const targetCtx = Math.max(20, this.inspectorContext || 20);
-      const existing = this.inspectedFile;
-      if (
-        existing &&
-        existing.path === hit.file &&
-        existing.lines.length > 0 &&
-        existing.lines[0].n <= Math.max(1, hit.line - 6) &&
-        (existing.eof || existing.lines[existing.lines.length - 1].n >= hit.line + 6)
-      ) {
-        this.inspectedPath = hit.file;
-        this.inspectedLine = hit.line;
-        this.inspectorLoading = false;
-        this.inspectorError = null;
-      } else {
-        void this.inspectFileAtLine(hit.file, hit.line, targetCtx, forceOpenInspector);
-      }
-    }
-  }
+      this.inspectedPath = hit.file;
+      this.inspectedLine = hit.line;
+      this.inspectorError = null;
 
-  expandInspectorContext(step = 30) {
-    if (!this.inspectedPath) return;
-    const nextCtx = Math.min(300, Math.max(20, this.inspectorContext) + step);
-    void this.inspectFileAtLine(this.inspectedPath, this.inspectedLine, nextCtx, false);
+      if (!isPossiblyTruncatedHitText(hit.text)) {
+        this.inspectAbort?.abort();
+        this.inspectAbort = null;
+        this.inspectSeq += 1;
+        this.inspectedFile = null;
+        this.inspectorLoading = false;
+        return;
+      }
+
+      void this.inspectFileAtLine(hit.file, hit.line, forceOpenInspector);
+    }
   }
 
   navigateHits(delta: 1 | -1) {
@@ -1177,42 +1900,114 @@ class WorkbenchState {
     }
   }
 
-  async inspectFileAtLine(
-    filePath: string,
-    line = 1,
-    contextRadius = this.inspectorContext,
-    forceOpen = true
-  ) {
-    if (this.inspectedPath !== filePath) {
-      this.inspectedFile = null;
+  private getCachedFileContext(cacheKey: string, line: number): FileResponse | null {
+    const cached = this.fileContextCache.get(cacheKey);
+    if (!cached) return null;
+    if (cached.sourceRevision !== this.sourceRevision) {
+      this.fileContextCache.delete(cacheKey);
+      return null;
     }
-    this.inspectedPath = filePath;
-    this.inspectedLine = Math.max(1, line);
-    this.inspectorContext = Math.max(1, contextRadius || 20);
-    this.inspectorLoading = true;
-    this.inspectorError = null;
+    if (cached.data.lines.some((l) => l.n === line)) {
+      this.fileContextCache.delete(cacheKey);
+      this.fileContextCache.set(cacheKey, cached);
+      return cached.data;
+    }
+    return null;
+  }
+
+  private putCachedFileContext(cacheKey: string, data: FileResponse) {
+    if (this.fileContextCache.has(cacheKey)) {
+      this.fileContextCache.delete(cacheKey);
+    } else if (this.fileContextCache.size >= MAX_FILE_CONTEXT_CACHE) {
+      const oldestKey = this.fileContextCache.keys().next().value;
+      if (oldestKey !== undefined) this.fileContextCache.delete(oldestKey);
+    }
+    this.fileContextCache.set(cacheKey, {
+      sourceRevision: this.sourceRevision,
+      data,
+    });
+  }
+
+  private isDockerVirtualPath(filePath: string): boolean {
+    const slash = filePath.indexOf('/');
+    if (slash <= 0) return false;
+    const prefix = filePath.slice(0, slash).toLowerCase();
+    return this.sources.some((s) => s.kind === 'docker' && s.name.toLowerCase() === prefix);
+  }
+
+  async inspectFileAtLine(filePath: string, line = 1, forceOpen = true) {
+    const targetLine = Math.max(1, line);
+    const dockerEpoch = this.isDockerVirtualPath(filePath) ? `\u0000${this.searchCount}` : '';
+    const dockerSinceSec = computeDockerPreviewSinceSec(
+      this.sources,
+      filePath,
+      this.displayedTimeStartMs
+    );
+    const dockerSincePart = dockerSinceSec !== null ? `\u0000s=${dockerSinceSec}` : '';
+    const cacheKey = `${this.tenant}\u0000${filePath}\u0000${targetLine}${dockerEpoch}${dockerSincePart}`;
+
     if (forceOpen) {
       this.detailOpen = true;
       if (!this.rightInspectorOpen) this.rightInspectorOpen = true;
     }
 
+    const cached = this.getCachedFileContext(cacheKey, targetLine);
+    if (cached) {
+      this.inspectAbort?.abort();
+      this.inspectAbort = null;
+      this.inspectSeq += 1;
+      this.inspectedPath = filePath;
+      this.inspectedLine = targetLine;
+      this.inspectedFile = cached;
+      this.inspectorLoading = false;
+      this.inspectorError = null;
+      return;
+    }
+
+    this.inspectAbort?.abort();
+    const controller = new AbortController();
+    this.inspectAbort = controller;
+    const seq = ++this.inspectSeq;
+    const reqRevision = this.sourceRevision;
+
+    if (this.inspectedPath !== filePath || this.inspectedLine !== targetLine) {
+      this.inspectedFile = null;
+    }
+    this.inspectedPath = filePath;
+    this.inspectedLine = targetLine;
+    this.inspectorLoading = true;
+    this.inspectorError = null;
+
     try {
       const params = new URLSearchParams({
         tenant: this.tenant,
         path: filePath,
-        line: String(Math.max(1, line)),
-        context: String(this.inspectorContext),
+        line: String(targetLine),
+        context: '0',
       });
-      const res = await fetch(`/api/file?${params.toString()}`);
+      if (dockerSinceSec !== null) {
+        params.set('since', String(dockerSinceSec));
+      }
+      const res = await fetch(`/api/file?${params.toString()}`, {
+        signal: controller.signal,
+      });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = (await res.json()) as FileResponse;
+      if (seq !== this.inspectSeq) return;
+      if (reqRevision === this.sourceRevision) {
+        this.putCachedFileContext(cacheKey, data);
+      }
       this.inspectedFile = data;
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (seq !== this.inspectSeq) return;
       this.inspectorError = err instanceof Error ? err.message : 'Failed to load file context';
     } finally {
-      this.inspectorLoading = false;
+      if (seq === this.inspectSeq) {
+        this.inspectorLoading = false;
+      }
     }
   }
 }

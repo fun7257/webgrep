@@ -14,9 +14,7 @@
     Rows4,
     Sun,
     SunMoon,
-    Timer,
     UnfoldVertical,
-    Zap,
   } from 'lucide-svelte';
 
   const s = $derived(workbench.t.settings);
@@ -27,11 +25,13 @@
     workbench.saveSettings();
   }
 
-  /** Search-affecting settings: persisted and re-run the current query. */
+  /** Search-affecting settings: persisted and re-run if there is an active search. */
   function search(fn: () => void) {
     fn();
     workbench.saveSettings();
-    if (workbench.pattern.trim().length > 0) workbench.scheduleSearch(true);
+    if (workbench.hasSearchedOnce && workbench.hasExecutableQuery) {
+      workbench.executeSearch({ forceRefresh: false });
+    }
   }
 </script>
 
@@ -89,6 +89,17 @@
     />
   </SettingRow>
 
+  <SettingRow icon={UnfoldVertical} label={s.previewLinesLabel} hint={s.previewLinesDesc}>
+    <NumberStepper
+      value={workbench.previewLines}
+      min={1}
+      max={6}
+      step={1}
+      widthClass="w-10"
+      onchange={(v) => display(() => (workbench.previewLines = v))}
+    />
+  </SettingRow>
+
   <div class="my-2 border-t border-border/60"></div>
 
   <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
@@ -102,35 +113,4 @@
     />
   </SettingRow>
 
-  <SettingRow icon={UnfoldVertical} label={s.contextLinesLabel} hint={s.contextLinesDesc}>
-    <NumberStepper
-      value={workbench.contextLines}
-      min={0}
-      max={10}
-      step={1}
-      prefix="±"
-      widthClass="w-8"
-      onchange={(v) => search(() => (workbench.contextLines = v))}
-    />
-  </SettingRow>
-
-  <SettingRow icon={Timer} label={s.debounceLabel} hint={s.debounceDesc}>
-    <Segmented
-      value={workbench.debounceMs}
-      options={[
-        { value: 60, label: s.debounceFast, title: s.debounceFastTitle },
-        { value: 150, label: s.debounceNormal, title: s.debounceNormalTitle },
-        { value: 320, label: s.debounceSlow, title: s.debounceSlowTitle },
-      ]}
-      onchange={(v) => display(() => (workbench.debounceMs = v))}
-    />
-  </SettingRow>
-
-  <SettingRow icon={Zap} label={s.liveSearchLabel} hint={s.liveSearchDesc}>
-    <Switch
-      checked={workbench.liveSearch}
-      title={s.liveSearchLabel}
-      onchange={(v) => display(() => (workbench.liveSearch = v))}
-    />
-  </SettingRow>
 </div>

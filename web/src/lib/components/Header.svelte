@@ -3,8 +3,9 @@
   import { Database, SlidersHorizontal, Wifi, WifiOff } from 'lucide-svelte';
 
   const hasMissingSource = $derived(
-    workbench.sources.length === 0 ||
-      workbench.sources.some((s) => s.enabled && !s.exists)
+    workbench.sourcesLoaded &&
+      (workbench.sources.length === 0 ||
+        workbench.sources.some((s) => s.enabled && !s.exists))
   );
 
   const iconBtn =
@@ -16,7 +17,7 @@
 >
   <div class="flex h-11 items-center w-full justify-between">
     <!-- Left: connection status -->
-    {#if workbench.wsStatus === 'connected'}
+    {#if !workbench.wsDegraded}
       <span
         class="flex h-8 w-8 items-center justify-center text-muted-foreground/70"
         title={workbench.t.header.connected}

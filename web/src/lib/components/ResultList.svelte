@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { NEARBY_LINES, workbench } from '$lib/state.svelte';
+  import { workbench } from '$lib/state.svelte';
   import { zeroResultFixes } from '$lib/suggest';
   import type { HitItem } from '$lib/types';
   import {
     copyTextToClipboard,
     extractLeadingNanoTimestamp,
-    getCachedHitSnippet,
+    getCachedHighlightSegments,
     type HighlightSegment,
   } from '$lib/utils';
   import { FolderSearch, Ban, Check, Copy, Loader2, RefreshCw } from 'lucide-svelte';
@@ -24,6 +24,10 @@
     fileName: string;
     timeLabel: string;
     timeNs: string;
+    /** Deterministic preview line count for this row (1–6). */
+    lines: number;
+    /** Deterministic pixel height for this row. */
+    height: number;
   }
 
   let copiedIdx = $state<number>(-1);
@@ -34,98 +38,107 @@
 
   const OVERSCAN_PX = 420;
   const BREADCRUMB_H = 22;
-  let lockedSearchId = -1;
-  let lockedMaxLines = 1;
-  let lockedSnippetLines = 1;
 
-  // Reset scroll position and monotonic line-height lock when a new search starts
+  const targetLines = $derived(
+    workbench.wordWrap ? Math.max(1, Math.min(6, workbench.previewLines)) : 1
+  );
+  const previewCharBudget = $derived(Math.max(240, targetLines * 180));
+
+  // Reset scroll position when a new search starts
   $effect(() => {
-    const id = workbench.currentSearchId;
-    if (id !== lockedSearchId) {
-      lockedSearchId = id;
-      lockedMaxLines = 1;
-      lockedSnippetLines = 1;
-    }
+    void workbench.currentSearchId;
     scrollTop = 0;
     if (scrollerEl) {
       scrollerEl.scrollTop = 0;
     }
   });
 
-  // O(1) Plan B Compact Snippet Stream Layout (Google / Linear 3-Line Reading Experience)
+  // Per-hit preview line estimate, computed once per (hit, layout signature) and cached by object identity.
+  // Deterministic (text length + column budget, never DOM measurement) so a row's height never changes once shown.
+  const lineEstimateCache = new WeakMap<HitItem, { sig: string; lines: number }>();
+
+  function estimateColumns(raw: string, budget: number): number {
+    let start = 0;
+    const ts = extractLeadingNanoTimestamp(raw);
+    const text = ts && ts.restText.length > 0 ? ts.restText : raw;
+    while (start < text.length && (text.charCodeAt(start) === 32 || text.charCodeAt(start) === 9)) start++;
+    const end = Math.min(text.length, start + budget);
+    let cols = 0;
+    for (let i = start; i < end; i++) {
+      // CJK / full-width glyphs render ~1em wide ≈ 1.67 monospace columns (0.6em each)
+      cols += text.charCodeAt(i) >= 0x2e80 ? 1.67 : 1;
+    }
+    return cols;
+  }
+
+  // Variable-height virtual layout: O(n) prefix sum of cached per-row heights, O(log n) viewport lookup.
   const streamLayout = $derived.by(() => {
     const hits = workbench.flatHits;
     const hLen = hits.length;
     const fontPx = workbench.codeFontSize;
     const lineHeight = Math.round(fontPx * 1.56);
     const baseHitPad = workbench.resultDensity === 'compact' ? 12 : 18;
-    const wrapEnabled = workbench.wordWrap;
+    const maxPreview = targetLines;
+    const budget = previewCharBudget;
+    const availTextWidth = Math.max(240, scrollerWidth - (workbench.isCompact ? 48 : 72));
+    const charsPerLine = Math.max(24, Math.floor(availTextWidth / (fontPx * 0.6)));
+    const sig = `${maxPreview}:${fontPx}:${charsPerLine}:${budget}`;
 
-    if (hLen === 0) {
-      return {
-        hits,
-        rowHeight: baseHitPad + BREADCRUMB_H + lineHeight,
-        maxLines: 1,
-        totalHeight: 0,
-      };
-    }
-
-    const sampleCount = Math.min(hLen, 24);
-    let hasNeighbors = false;
-    for (let i = 0; i < sampleCount; i++) {
-      if (hits[i].prevText || hits[i].nextText) {
-        hasNeighbors = true;
-        break;
+    const lines = new Uint8Array(hLen);
+    const offsets = new Float64Array(hLen + 1);
+    let acc = 0;
+    for (let i = 0; i < hLen; i++) {
+      const it = hits[i];
+      let n = 1;
+      if (maxPreview > 1) {
+        const cached = lineEstimateCache.get(it);
+        if (cached && cached.sig === sig) {
+          n = cached.lines;
+        } else {
+          // small slack so a barely-overflowing estimate doesn't reserve a mostly-empty extra line
+          n = Math.min(maxPreview, Math.max(1, Math.ceil(estimateColumns(it.text, budget) / charsPerLine - 0.12)));
+          lineEstimateCache.set(it, { sig, lines: n });
+        }
       }
+      lines[i] = n;
+      offsets[i] = acc;
+      acc += baseHitPad + BREADCRUMB_H + n * lineHeight;
     }
-    if (hasNeighbors && lockedSnippetLines < 3) {
-      lockedSnippetLines = 3;
-    }
+    offsets[hLen] = acc;
 
-    let maxLines = lockedSnippetLines;
-    if (!hasNeighbors && lockedSnippetLines === 1 && wrapEnabled) {
-      const availTextWidth = Math.max(300, scrollerWidth - 64);
-      const charsPerLine = Math.max(40, Math.floor(availTextWidth / (fontPx * 0.6)));
-      let maxSampleLen = 0;
-      for (let i = 0; i < sampleCount; i++) {
-        const len = hits[i].text.length;
-        if (len > maxSampleLen) maxSampleLen = len;
-      }
-      const rawLines = Math.min(2, Math.max(1, Math.ceil((maxSampleLen || 60) / charsPerLine)));
-      if (rawLines > lockedMaxLines) {
-        lockedMaxLines = rawLines;
-      }
-      maxLines = lockedMaxLines;
-    }
-
-    const rowHeight = baseHitPad + BREADCRUMB_H + maxLines * lineHeight;
-    return {
-      hits,
-      rowHeight,
-      maxLines,
-      totalHeight: hLen * rowHeight,
-    };
+    return { hits, lines, offsets, lineHeight, baseHitPad, totalHeight: acc };
   });
 
-  // O(1) viewport slice: allocates ONLY the ~20 visible snippet rows on screen
+  /** Largest index i such that offsets[i] <= y. */
+  function indexAtY(offsets: Float64Array, count: number, y: number): number {
+    let lo = 0;
+    let hi = count - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (offsets[mid] <= y) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  // O(log n) viewport slice: allocates ONLY the ~20 visible snippet rows on screen
   const visibleSlice = $derived.by(() => {
-    const { hits, rowHeight, maxLines, totalHeight } = streamLayout;
+    const { hits, lines, offsets, lineHeight, baseHitPad, totalHeight } = streamLayout;
     const hLen = hits.length;
     if (hLen === 0) {
       return {
         items: [] as VirtualHitRow[],
         offsetY: 0,
         totalHeight: 0,
-        rowHeight,
-        maxLines,
+        lineHeight,
       };
     }
 
     const minY = Math.max(0, scrollTop - OVERSCAN_PX);
     const maxY = scrollTop + Math.max(400, viewportHeight) + OVERSCAN_PX;
 
-    const firstIdx = Math.max(0, Math.floor(minY / rowHeight));
-    const lastIdx = Math.min(hLen - 1, Math.floor(maxY / rowHeight));
+    const firstIdx = indexAtY(offsets, hLen, minY);
+    const lastIdx = indexAtY(offsets, hLen, maxY);
 
     const items: VirtualHitRow[] = [];
     for (let i = firstIdx; i <= lastIdx; i++) {
@@ -138,6 +151,7 @@
       const lastSlash = it.file.lastIndexOf('/');
       const tsInfo = extractLeadingNanoTimestamp(it.text);
       const dirParts = it.file.slice(slash > 0 ? slash + 1 : 0, Math.max(0, lastSlash)).split('/').filter(Boolean);
+      const n = lines[i];
       items.push({
         showSrc: i === 0 || srcName !== prevSrc,
         fileChanged: i === 0 || it.file !== prevFile,
@@ -149,15 +163,16 @@
         srcName,
         timeLabel: tsInfo ? tsInfo.formattedTime : '',
         timeNs: tsInfo ? tsInfo.nsStr : '',
+        lines: n,
+        height: baseHitPad + BREADCRUMB_H + n * lineHeight,
       });
     }
 
     return {
       items,
-      offsetY: firstIdx * rowHeight,
+      offsetY: offsets[firstIdx],
       totalHeight,
-      rowHeight,
-      maxLines,
+      lineHeight,
     };
   });
 
@@ -166,16 +181,17 @@
     const tick = workbench.scrollToActiveTick;
     if (tick === 0 || !scrollerEl) return;
     const activeIdx = workbench.activeHitIndex;
-    if (activeIdx < 0) return;
+    const { offsets, hits } = streamLayout;
+    if (activeIdx < 0 || activeIdx >= hits.length) return;
 
-    const { rowHeight } = streamLayout;
-    const targetY = activeIdx * rowHeight;
+    const targetY = offsets[activeIdx];
+    const targetBottom = offsets[activeIdx + 1];
     const viewTop = scrollerEl.scrollTop;
     const viewBottom = viewTop + scrollerEl.clientHeight;
     if (targetY < viewTop + 36) {
       scrollerEl.scrollTop = Math.max(0, targetY - 36);
-    } else if (targetY + rowHeight > viewBottom - 36) {
-      scrollerEl.scrollTop = targetY + rowHeight - scrollerEl.clientHeight + 36;
+    } else if (targetBottom > viewBottom - 36) {
+      scrollerEl.scrollTop = targetBottom - scrollerEl.clientHeight + 36;
     }
   });
 
@@ -219,8 +235,8 @@
     const fire = pullDist >= PULL_THRESHOLD / 2;
     pullStartY = null;
     pullDist = 0;
-    if (fire && workbench.pattern.trim().length > 0 && !workbench.isSearching) {
-      workbench.executeSearch(false);
+    if (fire && workbench.hasExecutableQuery && !workbench.isSearching) {
+      workbench.executeSearch({ forceRefresh: true });
     }
   }
 
@@ -262,13 +278,7 @@
 
   function scopeFromMenu(exclude: boolean) {
     if (!menuRow || !menuRow.srcName) return;
-    const name = menuRow.srcName;
-    const token = /^[^\s,"]+$/.test(name)
-      ? `${exclude ? '-' : ''}in:${name}`
-      : `${exclude ? '$-@' : '$@'}(${name})`;
-    const cur = workbench.pattern.trim();
-    workbench.pattern = cur ? `${cur} ${token}` : token;
-    workbench.scheduleSearch(true);
+    workbench.scopeSourceFromMenu(menuRow.srcName, exclude);
     menuRow = null;
   }
 
@@ -284,15 +294,15 @@
   const isCaseInsensitive = true;
   const isRegexMode = $derived(workbench.mode === 'regex');
   const segmentCacheKey = $derived(
-    `${workbench.mode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}`
+    `${workbench.mode}:${workbench.primaryPattern}\u0001${workbench.contains.join('\u0001')}\u0001${previewCharBudget}`
   );
 
   const zeroFixes = $derived(
     !workbench.isSearching && workbench.totalMatches === 0
       ? zeroResultFixes(
-          workbench.pattern,
-          workbench.parsedQuery,
-          { strictLine: workbench.strictLine, nearbyLines: NEARBY_LINES },
+          workbench.steps,
+          workbench.draftStep,
+          workbench.scope,
           workbench.t.suggest
         )
       : []
@@ -309,22 +319,6 @@
       <mark class="match-span-contains-1">{seg.text}</mark>
     {:else if seg.kind === 'contains-2'}
       <mark class="match-span-contains-2">{seg.text}</mark>
-    {:else}
-      <span>{seg.text}</span>
-    {/if}
-  {/each}
-{/snippet}
-
-{#snippet renderContextSegments(segments: HighlightSegment[])}
-  {#each segments as seg}
-    {#if seg.kind === 'primary'}
-      <mark class="match-span-primary opacity-80">{seg.text}</mark>
-    {:else if seg.kind === 'contains-0'}
-      <mark class="match-span-contains-0 opacity-80">{seg.text}</mark>
-    {:else if seg.kind === 'contains-1'}
-      <mark class="match-span-contains-1 opacity-80">{seg.text}</mark>
-    {:else if seg.kind === 'contains-2'}
-      <mark class="match-span-contains-2 opacity-80">{seg.text}</mark>
     {:else}
       <span>{seg.text}</span>
     {/if}
@@ -364,16 +358,17 @@
           {#each visibleSlice.items as row (row.key)}
             {@const item = row.item}
             {@const active = row.idx === workbench.activeHitIndex}
-            {@const snippet = getCachedHitSnippet(
+            {@const segments = getCachedHighlightSegments(
               item,
               workbench.contains,
               isCaseInsensitive,
               segmentCacheKey,
               workbench.primaryPattern,
-              isRegexMode
+              isRegexMode,
+              previewCharBudget
             )}
             <div
-              style={`height: ${visibleSlice.rowHeight}px`}
+              style={`height: ${row.height}px`}
               class="virtual-row-strict box-border overflow-hidden font-mono"
             >
               <div
@@ -405,11 +400,7 @@
                   }
                 }}
                 class={`group ${workbench.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none transition-colors overflow-hidden rounded-lg ${
-                  active
-                    ? 'bg-secondary/75'
-                    : item.isContext
-                      ? 'opacity-70 hover:bg-secondary/25'
-                      : 'hover:bg-secondary/35'
+                  active ? 'bg-secondary/75' : 'hover:bg-secondary/35'
                 }`}
               >
                 <!-- Layer 1: Subtle Project Attribution (@project) + File:Line + Copy Button -->
@@ -423,9 +414,15 @@
                           type="button"
                           onclick={(e) => {
                             e.stopPropagation();
-                            workbench.toggleScopeToken(row.srcName);
+                            if (e.altKey) {
+                              workbench.toggleExcludeScopeSourceByName(row.srcName);
+                            } else if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                              workbench.toggleScopeSourceByName(row.srcName);
+                            } else {
+                              workbench.selectSingleScopeSourceByName(row.srcName);
+                            }
                           }}
-                          title={`只在 ${row.srcName} 中搜 (in:${row.srcName})`}
+                          title={workbench.t.ui.onlyInSourceTitle(row.srcName)}
                           class="shrink-0 text-muted-foreground/45 hover:text-foreground transition-colors cursor-pointer"
                         >
                           {row.srcName}
@@ -465,29 +462,21 @@
                   </button>
                 </div>
 
-                <!-- Layer 2: 3-Line Inline Snippet ("上一行 + 高亮命中行 + 下一行") -->
+                <!-- Layer 2: Multi-line single-record content preview (1–6 lines) -->
                 <div class="w-full min-w-0 overflow-hidden">
-                  {#if snippet.prev}
-                    <div class="truncate whitespace-pre pl-2.5 text-muted-foreground/60 leading-[1.5]">
-                      {@render renderContextSegments(snippet.prev)}
+                  {#if workbench.wordWrap && row.lines > 1}
+                    <div
+                      style={`line-height: ${visibleSlice.lineHeight}px; max-height: ${row.lines * visibleSlice.lineHeight}px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: ${row.lines}; overflow: hidden;`}
+                      class="whitespace-pre-wrap break-all text-foreground"
+                    >
+                      {@render renderSegments(segments)}
                     </div>
-                  {/if}
-                  <div
-                    class={`${
-                      snippet.prev || snippet.next
-                        ? 'truncate whitespace-pre border-l-2 border-primary bg-primary/[0.06] pl-2 pr-1 rounded-r leading-[1.55]'
-                        : workbench.wordWrap
-                          ? visibleSlice.maxLines === 2
-                            ? 'line-clamp-2 break-all leading-[1.6]'
-                            : 'line-clamp-1 break-all leading-[1.6]'
-                          : 'truncate whitespace-pre leading-[1.6]'
-                    } text-foreground`}
-                  >
-                    {@render renderSegments(snippet.match)}
-                  </div>
-                  {#if snippet.next}
-                    <div class="truncate whitespace-pre pl-2.5 text-muted-foreground/60 leading-[1.5]">
-                      {@render renderContextSegments(snippet.next)}
+                  {:else}
+                    <div
+                      style={`line-height: ${visibleSlice.lineHeight}px;`}
+                      class="truncate whitespace-pre text-foreground"
+                    >
+                      {@render renderSegments(segments)}
                     </div>
                   {/if}
                 </div>
@@ -505,7 +494,7 @@
         {workbench.t.results.searchingTitle}
       </p>
     </div>
-  {:else if workbench.hasSearchedOnce && workbench.primaryPattern.trim().length > 0}
+  {:else if workbench.hasSearchedOnce && workbench.hasExecutableQuery}
     <!-- Zero-Match State -->
     <div class="flex h-full flex-col items-center justify-center p-8 text-center select-none">
       <p class="text-base font-medium text-foreground">{workbench.t.results.noMatchesTitle}</p>
@@ -570,8 +559,8 @@
           <button
             type="button"
             onclick={() => scopeFromMenu(false)}
-            aria-label={`in:${menuRow.srcName}`}
-            title={`in:${menuRow.srcName}`}
+            aria-label={workbench.t.scopeBar.soloTitle(menuRow.srcName)}
+            title={workbench.t.scopeBar.soloTitle(menuRow.srcName)}
             class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
           >
             <FolderSearch class="h-5 w-5" />
@@ -579,8 +568,8 @@
           <button
             type="button"
             onclick={() => scopeFromMenu(true)}
-            aria-label={`-in:${menuRow.srcName}`}
-            title={`-in:${menuRow.srcName}`}
+            aria-label={workbench.t.scopeBar.excludeTitle(menuRow.srcName)}
+            title={workbench.t.scopeBar.excludeTitle(menuRow.srcName)}
             class="flex h-14 w-14 items-center justify-center rounded-xl bg-secondary text-foreground active:bg-secondary/60"
           >
             <Ban class="h-5 w-5" />

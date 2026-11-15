@@ -1,25 +1,28 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import type { SearchHistoryEntry } from '$lib/types';
+  import type { QueryStep, SearchHistoryEntry } from '$lib/types';
   import {
+    buildVocabulary,
+    computeWordCompletion,
+    detectRegexLookTip,
+    ghostSuffix,
+    historyGhost,
+    type Suggestion,
+    type Vocabulary,
+  } from '$lib/suggest';
+  import ScopeBar from './ScopeBar.svelte';
+  import SymbolBar from './SymbolBar.svelte';
+  import {
+    ChevronRight,
     Clock,
-    Lightbulb,
     FolderGit2,
+    Lightbulb,
     Loader2,
+    Plus,
     Search,
     X,
   } from 'lucide-svelte';
-  import SymbolBar from './SymbolBar.svelte';
-  import {
-    buildVocabulary,
-    collectPlaces,
-    computeCompletion,
-    describeQuery,
-    ghostSuffix,
-    historyGhost,
-    queryTips,
-    type Suggestion,
-  } from '$lib/suggest';
 
   interface Props {
     inputEl?: HTMLInputElement | null;
@@ -27,371 +30,291 @@
   }
 
   let { inputEl = $bindable(null), hero = false }: Props = $props();
-  let selectedSuggestIdx = $state(-1);
-  let selectedHistoryIdx = $state(-1);
-  let suggestDismissed = $state(true);
-  let isInputFocused = $state(false);
-  let cursorPos = $state(-1);
-  /** Input text wider than the box (ghost text would be misaligned, so it is hidden). */
-  let inputOverflowing = $state(false);
+
+  let focused = $state(false);
+  let dropdownOpen = $state(false);
+  let activeIdx = $state(-1);
+  let cursorPos = $state(0);
+
+  // Lazy vocabulary built from loaded lines only when focused
+  let cachedVocab = $state<Vocabulary | null>(null);
+  let vocabSourceHits: unknown = null;
+
+  function ensureVocabulary() {
+    const hits = workbench.flatHits;
+    if (vocabSourceHits === hits && cachedVocab) return;
+    vocabSourceHits = hits;
+    const lines = hits.map((h) => h.text);
+    cachedVocab = lines.length > 0 ? buildVocabulary(lines, 1200) : null;
+  }
+
+  $effect(() => {
+    const _hits = workbench.flatHits;
+    if (!focused) return;
+    untrack(() => ensureVocabulary());
+  });
 
   function syncCursorPos() {
-    if (inputEl && typeof inputEl.selectionStart === 'number') {
-      cursorPos = inputEl.selectionStart;
-      inputOverflowing = inputEl.scrollWidth > inputEl.clientWidth + 1;
+    if (!inputEl) return;
+    cursorPos = inputEl.selectionStart ?? workbench.pattern.length;
+  }
+
+  const wordCompletion = $derived.by(() => {
+    if (!focused || !dropdownOpen || !cachedVocab) {
+      return { token: null, items: [] as Suggestion[], autoSelect: false };
+    }
+    return computeWordCompletion(
+      workbench.pattern,
+      cursorPos,
+      cachedVocab,
+      workbench.t.suggest.wordCount,
+      workbench.t.suggest.kindWord
+    );
+  });
+
+  const historySuggestions = $derived.by(() => {
+    if (!focused || !dropdownOpen) return [] as SearchHistoryEntry[];
+    const typed = workbench.pattern.trim().toLowerCase();
+    const out: SearchHistoryEntry[] = [];
+    for (const entry of workbench.searchHistory) {
+      if (out.length >= 6) break;
+      if (!typed || entry.label.toLowerCase().includes(typed)) {
+        out.push(entry);
+      }
+    }
+    return out;
+  });
+
+  const regexTip = $derived(
+    detectRegexLookTip(workbench.pattern, workbench.isRegex, workbench.t.suggest.tipLooksRegex)
+  );
+
+  // Inline ghost completion (only when caret is at the end of the text)
+  const caretAtEnd = $derived(cursorPos >= workbench.pattern.length);
+
+  const inlineGhost = $derived.by(() => {
+    if (!focused || !caretAtEnd) return '';
+    const firstWord = wordCompletion.items[0];
+    if (firstWord && wordCompletion.token?.text) {
+      const s = ghostSuffix(firstWord.insert, wordCompletion.token.text);
+      if (s) return s;
+    }
+    if (workbench.steps.length === 0 && !workbench.draftExclude && !workbench.isRegex) {
+      return historyGhost(workbench.pattern, workbench.searchHistory);
+    }
+    return '';
+  });
+
+  type DropdownEntry =
+    | { kind: 'history'; entry: SearchHistoryEntry }
+    | { kind: 'word'; suggestion: Suggestion };
+
+  const dropdownItems = $derived.by(() => {
+    const list: DropdownEntry[] = [];
+    for (const h of historySuggestions) list.push({ kind: 'history', entry: h });
+    for (const s of wordCompletion.items) list.push({ kind: 'word', suggestion: s });
+    return list;
+  });
+
+  const showSymbolBar = $derived(workbench.isCompact && focused);
+  const hasOpenDropdown = $derived(
+    focused && dropdownOpen && (dropdownItems.length > 0 || regexTip !== null)
+  );
+  const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
+
+  const placeholderText = $derived.by(() => {
+    if (workbench.isRegex) return workbench.t.searchBar.placeholderRegex;
+    if (workbench.steps.length > 0) {
+      return workbench.t.searchBar.nextLevelPlaceholder(workbench.steps.length);
+    }
+    return workbench.t.searchBar.placeholder;
+  });
+
+  function stepFlagTag(step: QueryStep): string {
+    let tags = '';
+    if (step.caseSensitive) tags += 'Aa ';
+    if (step.wholeWord) tags += 'ab ';
+    if (step.isRegex) tags += '.*';
+    return tags.trim();
+  }
+
+  function applyWordSuggestion(s: Suggestion) {
+    const tok = wordCompletion.token;
+    if (tok) {
+      const before = workbench.pattern.slice(0, tok.start);
+      const after = workbench.pattern.slice(tok.end);
+      workbench.pattern = `${before}${s.insert}${after}`;
+      const nextPos = before.length + s.insert.length;
+      requestAnimationFrame(() => {
+        inputEl?.focus();
+        inputEl?.setSelectionRange(nextPos, nextPos);
+        syncCursorPos();
+      });
     } else {
-      cursorPos = workbench.pattern.length;
+      workbench.pattern = s.insert;
+    }
+    activeIdx = -1;
+    dropdownOpen = false;
+  }
+
+  function applyDropdownItem(index: number) {
+    const item = dropdownItems[index];
+    if (!item) return;
+    if (item.kind === 'word') {
+      applyWordSuggestion(item.suggestion);
+    } else {
+      dropdownOpen = false;
+      activeIdx = -1;
+      workbench.applyHistoryEntry(item.entry);
+      inputEl?.focus();
     }
   }
 
-  // Smart completion & hints (pure logic in `$lib/suggest`).
-  let places = $derived(collectPlaces(workbench.fileGroups.map((g) => g.file)));
-  let vocabulary = $derived(
-    workbench.flatHits.length > 0 ? buildVocabulary(workbench.flatHits.map((h) => h.text)) : null
-  );
-  let historyPatterns = $derived(workbench.searchHistory.map((h) => h.pattern));
-
-  let completion = $derived.by(() => {
-    const empty = { token: null, items: [] as Suggestion[], autoSelect: false };
-    if (suggestDismissed || !isInputFocused) return empty;
-    return computeCompletion({
-      pattern: workbench.pattern,
-      cursor: cursorPos,
-      sources: workbench.sources,
-      places,
-      vocabulary,
-      starters: workbench.searchHistory.length === 0,
-      t: workbench.t.suggest,
-    });
-  });
-  let activeToken = $derived(completion.token);
-
-  let effectiveSuggestIdx = $derived(
-    completion.items.length === 0
-      ? -1
-      : selectedSuggestIdx >= 0
-        ? Math.min(selectedSuggestIdx, completion.items.length - 1)
-        : completion.autoSelect
-          ? 0
-          : -1
-  );
-
-  /** Item that Tab / → would take: the highlighted one, else the first. */
-  let tabItem = $derived(completion.items[Math.max(0, effectiveSuggestIdx)] ?? null);
-
-  /** Fish-style ghost text after the cursor (only when the cursor is at the end and the text fits). */
-  let ghost = $derived.by((): { text: string; item: Suggestion | null } => {
-    const pat = workbench.pattern;
-    if (!isInputFocused || inputOverflowing || (cursorPos >= 0 && cursorPos < pat.length)) {
-      return { text: '', item: null };
-    }
-    if (tabItem && activeToken) {
-      const text = ghostSuffix(tabItem.insert, activeToken.text);
-      if (text) return { text, item: tabItem };
-    }
-    if (completion.items.length === 0 && !suggestDismissed) {
-      const text = historyGhost(pat, historyPatterns);
-      if (text) return { text, item: null };
-    }
-    return { text: '', item: null };
-  });
-
-  let parsedForTips = $derived(workbench.parsedQuery);
-  let tips = $derived(
-    isInputFocused && !suggestDismissed && workbench.pattern.trim()
-      ? queryTips(workbench.pattern, parsedForTips, workbench.sources, workbench.t.suggest)
-      : []
-  );
-  let explanation = $derived(
-    isInputFocused && !suggestDismissed ? describeQuery(parsedForTips, workbench.t.suggest) : ''
-  );
-
-  // Google-style search history suggestions (only when no completion is showing).
-  let historySuggestions = $derived.by((): SearchHistoryEntry[] => {
-    if (!isInputFocused || suggestDismissed || completion.items.length > 0) {
-      return [];
-    }
-    const all = workbench.searchHistory;
-    if (all.length === 0) return [];
-    const q = workbench.pattern.trim().toLowerCase();
-    if (!q) {
-      return all.slice(0, 8);
-    }
-    return all
-      .filter(
-        (h) =>
-          h.pattern.toLowerCase().includes(q) &&
-          h.pattern.trim().toLowerCase() !== q
-      )
-      .slice(0, 6);
-  });
-
-  const hasOpenDropdown = $derived(
-    completion.items.length > 0 || historySuggestions.length > 0 || tips.length > 0 || explanation !== ''
-  );
-
-  const showSymbolBar = $derived(workbench.isCompact && isInputFocused);
-  const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
-
-  function setPatternAndCursor(next: string, cursor: number, search: boolean) {
-    workbench.pattern = next;
-    cursorPos = cursor;
-    suggestDismissed = false;
-    selectedSuggestIdx = -1;
-    if (search) workbench.scheduleSearch(true);
+  function acceptGhost(): boolean {
+    if (!inlineGhost) return false;
+    workbench.pattern = `${workbench.pattern}${inlineGhost}`;
+    const pos = workbench.pattern.length;
     requestAnimationFrame(() => {
       inputEl?.focus();
-      inputEl?.setSelectionRange(cursor, cursor);
+      inputEl?.setSelectionRange(pos, pos);
+      syncCursorPos();
+    });
+    return true;
+  }
+
+  function insertSymbolAtCursor(sym: string) {
+    if (!inputEl) {
+      workbench.pattern += sym;
+      return;
+    }
+    const start = inputEl.selectionStart ?? workbench.pattern.length;
+    const end = inputEl.selectionEnd ?? start;
+    const next = workbench.pattern.slice(0, start) + sym + workbench.pattern.slice(end);
+    workbench.pattern = next;
+    const caret = sym === '()' ? start + 1 : start + sym.length;
+    requestAnimationFrame(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(caret, caret);
       syncCursorPos();
     });
   }
 
-  function applySuggestion(item: Suggestion) {
-    if (!activeToken) return;
-    const before = workbench.pattern.slice(0, activeToken.start);
-    const after = workbench.pattern.slice(activeToken.end);
-    const inserted = item.complete ? `${item.insert} ` : item.insert;
-    setPatternAndCursor(
-      `${before}${inserted}${item.complete ? after.replace(/^\s+/, '') : after}`,
-      before.length + inserted.length,
-      item.complete
-    );
-  }
-
-  /** Accepts the ghost text: the suggestion it came from, or the rest of a history query. */
-  function acceptGhost(): boolean {
-    if (!ghost.text) return false;
-    if (ghost.item) {
-      applySuggestion(ghost.item);
-    } else {
-      const next = `${workbench.pattern}${ghost.text}`;
-      setPatternAndCursor(next, next.length, true);
-    }
-    return true;
-  }
-
-  function applyTipFix(next: string) {
-    setPatternAndCursor(next, next.length, true);
-  }
-
-  function insertSymbol(sym: string) {
-    if (!inputEl) return;
-    const raw = workbench.pattern;
-    const selStart = Math.min(inputEl.selectionStart ?? raw.length, raw.length);
-    const selEnd = Math.min(inputEl.selectionEnd ?? selStart, raw.length);
-
-    // Smart in-place wrapping for paired tokens (`//` regex via Alt+R, `""` phrase):
-    // 1. If text is selected in `<input>`, wrap the selection in-place: `/selected/ `
-    // 2. If cursor is on/at the end of a plain word `foo|`, wrap `foo` in-place: `/foo/ `
-    const pair: [string, string] | null = sym.endsWith('()')
-      ? [sym.slice(0, -1), ')']
-      : sym === '//'
-        ? ['/', '/']
-        : sym === '""' || sym === '"'
-          ? ['"', '"']
-          : null;
-    if (pair) {
-      const [open, close] = pair;
-      if (selStart < selEnd) {
-        const selected = raw.slice(selStart, selEnd);
-        const before = raw.slice(0, selStart);
-        const after = raw.slice(selEnd);
-        const wrapped = `${open}${selected}${close} `;
-        workbench.pattern = `${before}${wrapped}${after.replace(/^\s+/, '')}`;
-        const nextCursor = before.length + wrapped.length;
-        cursorPos = nextCursor;
-        suggestDismissed = true;
-        workbench.scheduleSearch(true);
-        requestAnimationFrame(() => {
-          inputEl?.focus();
-          inputEl?.setSelectionRange(nextCursor, nextCursor);
-        });
-        return;
-      }
-
-      // Check if cursor is touching/inside an existing plain word (not starting with `$`)
-      let wStart = selStart;
-      let wEnd = selStart;
-      while (wStart > 0 && !/\s/.test(raw[wStart - 1])) wStart--;
-      while (wEnd < raw.length && !/\s/.test(raw[wEnd])) wEnd++;
-      const word = raw.slice(wStart, wEnd);
-      if (word.length > 0 && !/^-?[$"/@]/.test(word)) {
-        const before = raw.slice(0, wStart);
-        const after = raw.slice(wEnd);
-        const wrapped = `${open}${word}${close} `;
-        workbench.pattern = `${before}${wrapped}${after.replace(/^\s+/, '')}`;
-        const nextCursor = before.length + wrapped.length;
-        cursorPos = nextCursor;
-        suggestDismissed = true;
-        workbench.scheduleSearch(true);
-        requestAnimationFrame(() => {
-          inputEl?.focus();
-          inputEl?.setSelectionRange(nextCursor, nextCursor);
-        });
-        return;
-      }
-    }
-
-    const pos = selStart;
-    const before = raw.slice(0, pos);
-    const after = raw.slice(pos);
-    const needSpace = before.length > 0 && !/\s$/.test(before);
-    // Tokens that come in pairs ( `"` → `""`, `//` ) put the cursor between the pair.
-    const paired = pair !== null;
-    const inserted = `${needSpace ? ' ' : ''}${sym === '"' ? '""' : sym}`;
-    workbench.pattern = `${before}${inserted}${after}`;
-    const nextCursor = before.length + inserted.length - (paired ? 1 : 0);
-    cursorPos = nextCursor;
-    suggestDismissed = false;
-    selectedSuggestIdx = -1;
-    workbench.scheduleSearch();
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.setSelectionRange(nextCursor, nextCursor);
-    });
-  }
-
-  $effect(() => {
-    workbench.insertToken = insertSymbol;
-    return () => {
-      workbench.insertToken = null;
-    };
-  });
-
-  function backspaceToken() {
-    const raw = workbench.pattern.replace(/\s+$/, '');
-    const idx = raw.lastIndexOf(' ');
-    workbench.pattern = idx >= 0 ? raw.slice(0, idx + 1) : '';
-    cursorPos = workbench.pattern.length;
-    workbench.scheduleSearch();
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.setSelectionRange(cursorPos, cursorPos);
-    });
-  }
-
-  function selectHistoryItem(entry: SearchHistoryEntry) {
-    selectedHistoryIdx = -1;
-    suggestDismissed = true;
-    workbench.applyHistoryEntry(entry);
-  }
-
-  function handleMainKeydown(e: KeyboardEvent) {
-    // → at the end of the input accepts the ghost text (fish-style)
-    if (e.key === 'ArrowRight' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && ghost.text) {
-      const pos = inputEl?.selectionStart ?? workbench.pattern.length;
-      if (pos === workbench.pattern.length && acceptGhost()) {
-        e.preventDefault();
-        return;
-      }
-    }
-    // Tab with only a history ghost (no dropdown items)
-    if (e.key === 'Tab' && !e.shiftKey && completion.items.length === 0 && ghost.text && acceptGhost()) {
-      e.preventDefault();
+  function backspaceAtCursor() {
+    if (!inputEl) {
+      workbench.pattern = workbench.pattern.slice(0, -1);
       return;
     }
-    const items = completion.items;
-    if (items.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        selectedSuggestIdx = (effectiveSuggestIdx + 1) % items.length;
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        selectedSuggestIdx =
-          effectiveSuggestIdx <= 0 ? items.length - 1 : effectiveSuggestIdx - 1;
-        return;
-      }
-      // Tab always takes a suggestion; Enter only when one is selected (plain words keep Enter = search).
-      if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && effectiveSuggestIdx >= 0)) {
-        const chosen = items[Math.max(0, effectiveSuggestIdx)];
-        if (chosen) {
-          e.preventDefault();
-          applySuggestion(chosen);
-          return;
-        }
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        suggestDismissed = true;
-        return;
-      }
+    const start = inputEl.selectionStart ?? workbench.pattern.length;
+    const end = inputEl.selectionEnd ?? start;
+    if (end > start) {
+      workbench.pattern = workbench.pattern.slice(0, start) + workbench.pattern.slice(end);
+      requestAnimationFrame(() => {
+        inputEl?.focus();
+        inputEl?.setSelectionRange(start, start);
+        syncCursorPos();
+      });
+    } else if (start > 0) {
+      workbench.pattern = workbench.pattern.slice(0, start - 1) + workbench.pattern.slice(start);
+      requestAnimationFrame(() => {
+        inputEl?.focus();
+        inputEl?.setSelectionRange(start - 1, start - 1);
+        syncCursorPos();
+      });
     }
+  }
 
-    // Google-style History Dropdown keyboard navigation
-    if (
-      e.key === 'ArrowDown' &&
-      suggestDismissed &&
-      workbench.searchHistory.length > 0 &&
-      workbench.flatHits.length === 0
-    ) {
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
       e.preventDefault();
-      suggestDismissed = false;
-      selectedHistoryIdx = 0;
-      return;
-    }
-
-    if (historySuggestions.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        selectedHistoryIdx =
-          selectedHistoryIdx + 1 >= historySuggestions.length
-            ? 0
-            : selectedHistoryIdx + 1;
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        selectedHistoryIdx =
-          selectedHistoryIdx <= 0
-            ? historySuggestions.length - 1
-            : selectedHistoryIdx - 1;
-        return;
-      }
-      if (e.key === 'Enter' && selectedHistoryIdx >= 0) {
-        const chosen = historySuggestions[selectedHistoryIdx];
-        if (chosen) {
-          e.preventDefault();
-          selectHistoryItem(chosen);
-          return;
-        }
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        suggestDismissed = true;
-        selectedHistoryIdx = -1;
-        return;
-      }
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      suggestDismissed = true;
-      selectedHistoryIdx = -1;
-      workbench.executeSearch(false);
-    } else if (e.key === 'Escape') {
       if (workbench.isSearching) {
         workbench.cancelSearch();
-      } else if (workbench.pattern) {
+      } else if (dropdownOpen && (dropdownItems.length > 0 || regexTip)) {
+        dropdownOpen = false;
+        activeIdx = -1;
+      } else if (workbench.pattern.length > 0) {
+        workbench.clearDraftInput();
+        cursorPos = 0;
+      } else if (workbench.hasAnyQueryInput) {
         workbench.clearSearch();
       } else {
         inputEl?.blur();
       }
-    } else if (e.key === 'Tab' && !e.shiftKey && workbench.flatHits.length > 0) {
-      // Move focus from the search box to the result list (j/k, Enter, [ ] take over).
+      return;
+    }
+
+    if ((e.key === 'Tab' || e.key === 'ArrowRight') && !e.shiftKey && inlineGhost && caretAtEnd) {
+      if (e.key === 'Tab' || (inputEl && inputEl.selectionStart === inputEl.selectionEnd)) {
+        e.preventDefault();
+        acceptGhost();
+        return;
+      }
+    }
+
+    if (hasOpenDropdown && dropdownItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIdx = activeIdx < dropdownItems.length - 1 ? activeIdx + 1 : 0;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIdx = activeIdx > 0 ? activeIdx - 1 : dropdownItems.length - 1;
+        return;
+      }
+    }
+
+    if (e.key === 'Tab' && !e.shiftKey && workbench.flatHits.length > 0) {
       e.preventDefault();
       if (workbench.activeHitIndex < 0) workbench.selectHitByIndex(0, false);
       inputEl?.blur();
-    } else if (e.key === 'ArrowDown' && workbench.flatHits.length > 0) {
-      if (e.altKey) return;
-      e.preventDefault();
-      workbench.navigateHits(1);
-    } else if (e.key === 'ArrowUp' && workbench.flatHits.length > 0) {
-      if (e.altKey) return;
-      e.preventDefault();
-      workbench.navigateHits(-1);
+      return;
     }
+
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.altKey && workbench.flatHits.length > 0) {
+      e.preventDefault();
+      workbench.navigateHits(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+
+    if (e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault();
+      workbench.commitCurrentPattern();
+      dropdownOpen = false;
+      activeIdx = -1;
+      cursorPos = 0;
+      return;
+    }
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (hasOpenDropdown && activeIdx >= 0 && dropdownItems[activeIdx]) {
+        applyDropdownItem(activeIdx);
+      } else {
+        dropdownOpen = false;
+        activeIdx = -1;
+        workbench.submitSearch();
+      }
+    }
+  }
+
+  function handleInput() {
+    syncCursorPos();
+    dropdownOpen = true;
+    activeIdx = -1;
+    if (focused) ensureVocabulary();
+  }
+
+  function handleFocus() {
+    focused = true;
+    dropdownOpen = true;
+    syncCursorPos();
+    ensureVocabulary();
+  }
+
+  function handleBlur() {
+    focused = false;
+    dropdownOpen = false;
+    activeIdx = -1;
   }
 </script>
 
@@ -412,223 +335,416 @@
       <h1 class="font-mono text-4xl font-semibold tracking-tight text-foreground">
         webgrep
       </h1>
-      {#if workbench.sources.length === 0}
+      {#if workbench.sourcesLoaded && workbench.sources.length === 0}
         <button
           type="button"
           onclick={() => workbench.openSettings('add-source')}
-          class="inline-flex items-center gap-1.5 text-xs text-status hover:underline"
+          class="inline-flex items-center gap-1.5 text-xs text-status hover:underline cursor-pointer"
         >
           <FolderGit2 class="h-3.5 w-3.5" />
-          <span>尚未配置项目 · 点击添加本地项目目录</span>
+          <span>{workbench.t.results.emptyNoSourceTitle} · {workbench.t.results.openSourceManagerBtn}</span>
         </button>
       {/if}
     </div>
   {/if}
 
-  <!-- Unified Google-Style Search Box Wrapper -->
-  <div class={`relative ${hero ? 'w-full max-w-[640px]' : 'w-full'}`}>
-    <div
-      class={`relative flex items-center gap-2.5 border transition-colors min-w-0 ${
-        hero ? 'h-12 px-4' : 'h-11 px-3.5'
-      } ${
-        hasAttachedPanel
-          ? 'rounded-t-[22px] rounded-b-none border-b-transparent border-border bg-card shadow-xl'
-          : 'rounded-full border-border/80 bg-card/85 shadow-sm hover:border-border focus-within:border-border focus-within:bg-card focus-within:shadow-md'
-      }`}
-    >
-      {#if workbench.isSearching}
-        <div class="pointer-events-none absolute inset-x-4 bottom-0 h-[1.5px] overflow-hidden bg-primary/10">
-          <div class="search-progress-shimmer h-full w-2/5 bg-gradient-to-r from-transparent via-primary to-transparent"></div>
-        </div>
-      {/if}
-
-      <!-- Left Search Icon -->
-      <div class="text-muted-foreground shrink-0">
+  <!-- Unified Google-Style Single-Text Search Box Wrapper -->
+  <div class={`relative ${hero ? 'w-full max-w-[680px]' : 'w-full'}`}>
+    <div class="relative">
+      <div
+        class={`relative flex items-center gap-2 border transition-colors min-w-0 ${
+          hero ? 'min-h-12 px-4 py-1' : 'min-h-11 px-3.5 py-1'
+        } ${
+          hasAttachedPanel
+            ? 'rounded-t-[22px] rounded-b-none border-b-transparent border-border bg-card shadow-xl'
+            : 'rounded-full border-border/80 bg-card/85 shadow-sm hover:border-border focus-within:border-border focus-within:bg-card focus-within:shadow-md'
+        }`}
+      >
         {#if workbench.isSearching}
-          <Loader2 class="h-4 w-4 animate-spin text-primary" />
-        {:else}
-          <Search class="h-4 w-4" />
+          <div class="pointer-events-none absolute inset-x-4 bottom-0 h-[1.5px] overflow-hidden bg-primary/10">
+            <div class="search-progress-shimmer h-full w-2/5 bg-gradient-to-r from-transparent via-primary to-transparent"></div>
+          </div>
         {/if}
+
+        <!-- Left Search Icon & Optional Include/Exclude Mode Badge -->
+        <div class="flex items-center gap-1.5 text-muted-foreground shrink-0">
+          {#if workbench.isSearching}
+            <Loader2 class="h-4 w-4 animate-spin text-primary" />
+          {:else}
+            <button
+              type="button"
+              disabled={!workbench.hasExecutableQuery}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                dropdownOpen = false;
+                workbench.submitSearch();
+              }}
+              title={workbench.t.searchBar.searchNowTitle}
+              aria-label={workbench.t.searchBar.searchNowTitle}
+              class={`touch-target flex h-5 w-5 items-center justify-center rounded transition-colors ${
+                workbench.hasExecutableQuery
+                  ? 'text-muted-foreground hover:text-foreground cursor-pointer'
+                  : 'text-muted-foreground/60 cursor-default'
+              }`}
+            >
+              <Search class="h-4 w-4" />
+            </button>
+          {/if}
+
+          {#if workbench.canExcludeDraft}
+            <button
+              type="button"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => workbench.toggleDraftExclude()}
+              title={workbench.t.searchBar.draftExcludeTitle(workbench.draftExclude)}
+              aria-label={workbench.t.searchBar.draftExcludeTitle(workbench.draftExclude)}
+              class={`touch-target inline-flex h-5 items-center rounded px-1.5 font-mono text-[11px] font-semibold ring-1 ring-inset transition-colors cursor-pointer ${
+                workbench.draftExclude
+                  ? 'bg-status/15 text-status ring-status/35 hover:bg-status/25'
+                  : 'bg-primary/12 text-primary ring-primary/25 hover:bg-primary/20'
+              }`}
+            >
+              {workbench.draftExclude ? '-' : '+'}
+            </button>
+          {/if}
+        </div>
+
+        <!-- Pure Single-Text Search Input + Fish-Style Ghost Completion Overlay -->
+        <div class="relative h-9 min-w-[96px] flex-1">
+          {#if inlineGhost}
+            <div
+              aria-hidden="true"
+              title={workbench.t.searchBar.acceptGhost}
+              class="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-1 font-mono text-[14.5px] [@media(any-pointer:coarse)]:text-[16px]"
+            >
+              <span class="invisible">{workbench.pattern}</span><span class="text-muted-foreground/45">{inlineGhost}</span>
+            </div>
+          {/if}
+          <input
+            bind:this={inputEl}
+            bind:value={workbench.pattern}
+            type="text"
+            enterkeyhint="search"
+            autocapitalize="off"
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck={false}
+            placeholder={placeholderText}
+            onmousedown={() => {
+              dropdownOpen = true;
+              requestAnimationFrame(syncCursorPos);
+            }}
+            onfocus={handleFocus}
+            onblur={handleBlur}
+            oninput={handleInput}
+            onkeydown={handleKeydown}
+            onclick={syncCursorPos}
+            onkeyup={syncCursorPos}
+            onselect={syncCursorPos}
+            class="relative h-full w-full min-w-0 bg-transparent px-1 font-mono text-[14.5px] [@media(any-pointer:coarse)]:text-[16px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
+          />
+        </div>
+
+        <!-- Right Side Controls: Explicit Toggles (Aa, ab, .*), Progressive Filter (+ 继续筛选), and Clear (×) -->
+        <div class="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            aria-pressed={workbench.caseSensitive}
+            title={workbench.t.searchBar.matchCaseTitle}
+            aria-label={workbench.t.searchBar.matchCaseTitle}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => workbench.toggleCaseSensitive()}
+            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+              workbench.caseSensitive
+                ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+            }`}
+          >
+            Aa
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={workbench.wholeWord}
+            title={workbench.t.searchBar.wholeWordTitle}
+            aria-label={workbench.t.searchBar.wholeWordTitle}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => workbench.toggleWholeWord()}
+            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+              workbench.wholeWord
+                ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+            }`}
+          >
+            ab
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={workbench.isRegex}
+            title={workbench.t.searchBar.useRegexTitle}
+            aria-label={workbench.t.searchBar.useRegexTitle}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => workbench.toggleRegexMode()}
+            class={`touch-target inline-flex h-7 min-w-[28px] items-center justify-center rounded-md px-1.5 font-mono text-[12px] leading-none transition-colors cursor-pointer select-none ${
+              workbench.isRegex
+                ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
+                : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground'
+            }`}
+          >
+            .*
+          </button>
+
+          {#if workbench.pattern.trim().length > 0}
+            <button
+              type="button"
+              title={workbench.t.searchBar.addNextFilterTitle}
+              aria-label={workbench.t.searchBar.addNextFilterTitle}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                dropdownOpen = false;
+                workbench.commitCurrentPattern();
+                cursorPos = 0;
+                inputEl?.focus();
+              }}
+              class="touch-target ml-0.5 inline-flex h-7 shrink-0 items-center gap-0.5 rounded-full bg-secondary/70 px-2.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border/70 hover:bg-secondary hover:text-foreground transition-colors cursor-pointer select-none"
+            >
+              <Plus class="h-3.5 w-3.5 shrink-0" />
+              <span class="hidden sm:inline">{workbench.t.searchBar.addNextFilter.replace(/^\+\s*/, '')}</span>
+              <span class="sm:hidden">{workbench.t.searchBar.addNextFilterShort.replace(/^\+\s*/, '')}</span>
+            </button>
+          {/if}
+
+          {#if workbench.pattern.length > 0}
+            <button
+              type="button"
+              title={workbench.t.searchBar.clearDraftTitle}
+              aria-label={workbench.t.searchBar.clearDraftTitle}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                workbench.clearDraftInput();
+                cursorPos = 0;
+                inputEl?.focus();
+              }}
+              class="touch-target shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+            >
+              <X class="h-4 w-4" />
+            </button>
+          {/if}
+        </div>
       </div>
 
-      <!-- Main Search Input -->
-      <!-- Input + fish-style ghost completion overlay (same font metrics, never intercepts pointer events) -->
-      <div class="relative h-full min-w-0 flex-1">
-      {#if ghost.text}
+      <!-- Seamlessly Attached Dropdown Panel -->
+      {#if hasAttachedPanel}
         <div
-          aria-hidden="true"
-          title={workbench.t.searchBar.acceptGhost}
-          class="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-1 font-mono text-[14.5px]"
+          role="listbox"
+          tabindex="-1"
+          onmousedown={(e) => e.preventDefault()}
+          class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card shadow-2xl"
         >
-          <span class="invisible">{workbench.pattern}</span><span class="text-muted-foreground/45">{ghost.text}</span>
+          {#if showSymbolBar}
+            <div class="mx-3 border-t border-border/60"></div>
+            <SymbolBar onInsert={insertSymbolAtCursor} onBackspace={backspaceAtCursor} />
+          {/if}
+
+          {#if historySuggestions.length > 0}
+            <div class="mx-3 border-t border-border/60"></div>
+            <div class="max-h-52 md:max-h-64 overflow-y-auto py-1 pb-2">
+              {#each historySuggestions as entry, hi (entry.id)}
+                {@const isSelected = hi === activeIdx}
+                <div
+                  role="button"
+                  tabindex="-1"
+                  onmouseenter={() => (activeIdx = hi)}
+                  onclick={() => applyDropdownItem(hi)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') applyDropdownItem(hi);
+                  }}
+                  class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
+                    isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
+                  }`}
+                >
+                  <div class="flex items-center gap-3 min-w-0">
+                    <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
+                    <span class="font-mono text-[13.5px] text-foreground truncate">
+                      {entry.label}
+                    </span>
+                    {#if entry.draft && stepFlagTag(entry.draft)}
+                      <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
+                        {stepFlagTag(entry.draft)}
+                      </span>
+                    {/if}
+                  </div>
+
+                  <button
+                    type="button"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      workbench.removeHistoryEntry(entry.id);
+                    }}
+                    class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground cursor-pointer"
+                    title={workbench.t.ui.removeHistory}
+                    aria-label={workbench.t.ui.removeHistory}
+                  >
+                    <X class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if wordCompletion.items.length > 0}
+            <div class="mx-3 border-t border-border/60"></div>
+            <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
+              {#each wordCompletion.items as item, wi (item.key)}
+                {@const idx = historySuggestions.length + wi}
+                {@const isSelected = idx === activeIdx}
+                <button
+                  type="button"
+                  onmouseenter={() => (activeIdx = idx)}
+                  onclick={() => applyWordSuggestion(item)}
+                  class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors cursor-pointer ${
+                    isSelected ? 'bg-secondary text-foreground' : 'text-foreground hover:bg-secondary/60'
+                  }`}
+                >
+                  <span class="flex items-center gap-2.5 min-w-0">
+                    <span class="truncate font-mono text-xs font-medium">{item.label}</span>
+                    {#if item.hint}
+                      <span class="truncate text-[11px] text-muted-foreground/70">{item.hint}</span>
+                    {/if}
+                  </span>
+                  <span class="shrink-0 text-[10px] text-muted-foreground/60">{item.kind}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          {#if regexTip}
+            <div class="mx-3 border-t border-border/60"></div>
+            <div class="space-y-0.5 px-4 py-2 text-[11.5px] text-muted-foreground">
+              <div class="flex items-center gap-2 min-w-0">
+                <Lightbulb class="h-3 w-3 shrink-0 text-status/80" />
+                <span class="truncate">{regexTip.text}</span>
+                <button
+                  type="button"
+                  onclick={() => {
+                    workbench.isRegex = true;
+                    inputEl?.focus();
+                  }}
+                  class="touch-target shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+                >
+                  {workbench.t.searchBar.enableRegexAction}
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
-      <input
-        bind:this={inputEl}
-        type="text"
-        bind:value={workbench.pattern}
-        onmousedown={() => {
-          suggestDismissed = false;
-          requestAnimationFrame(syncCursorPos);
-        }}
-        onclick={syncCursorPos}
-        onkeyup={syncCursorPos}
-        onfocus={() => {
-          isInputFocused = true;
-          syncCursorPos();
-        }}
-        onblur={() => {
-          isInputFocused = false;
-          suggestDismissed = true;
-          selectedHistoryIdx = -1;
-        }}
-        oninput={() => {
-          syncCursorPos();
-          suggestDismissed = false;
-          selectedSuggestIdx = -1;
-          selectedHistoryIdx = -1;
-          workbench.scheduleSearch();
-        }}
-        onkeydown={handleMainKeydown}
-        placeholder={workbench.hasRegexActive
-          ? workbench.t.searchBar.placeholderRegex
-          : workbench.t.searchBar.placeholderLiteral}
-        spellcheck="false"
-        autocomplete="off"
-        class="relative h-full w-full min-w-0 bg-transparent px-1 font-mono text-[14.5px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
-      />
-      </div>
+    </div>
 
-      <!-- Clear Button -->
-      {#if workbench.pattern}
+    <!-- Decoupled ScopeBar (Data Sources + Time Window) -->
+    <ScopeBar {hero} />
+
+    <!-- Infinite-Level Progressive Condition Chain Bar (#1 -> #2 -> #3 -> ...) -->
+    {#if workbench.steps.length > 0}
+      <div class="mt-2 flex flex-wrap items-center gap-1.5 px-1">
+        {#each workbench.steps as step, idx (`${idx}:${step.text}`)}
+          {@const canToggle = workbench.canToggleStepExclude(idx)}
+          {#if idx > 0}
+            <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground/45" />
+          {/if}
+          <div
+            class={`inline-flex max-w-full items-center gap-1 rounded-lg border px-1.5 py-0.5 font-mono text-xs transition-colors ${
+              step.exclude
+                ? 'border-status/35 bg-status/10 text-status'
+                : 'border-border/75 bg-secondary/45 text-foreground'
+            }`}
+          >
+            <span class="text-[10px] text-muted-foreground/65 select-none">#{idx + 1}</span>
+            <button
+              type="button"
+              disabled={!canToggle}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                workbench.toggleStepExclude(idx);
+                inputEl?.focus();
+              }}
+              title={canToggle
+                ? workbench.t.searchBar.toggleExcludeTitle(step.exclude)
+                : `#${idx + 1}`}
+              aria-label={canToggle
+                ? workbench.t.searchBar.toggleExcludeTitle(step.exclude)
+                : `#${idx + 1}`}
+              class={`touch-target inline-flex h-4 min-w-[16px] items-center justify-center rounded px-1 font-mono text-[11px] font-semibold transition-colors ${
+                step.exclude
+                  ? 'bg-status/15 text-status'
+                  : 'bg-primary/12 text-primary'
+              } ${canToggle ? 'hover:opacity-80 cursor-pointer' : 'cursor-default'}`}
+            >
+              {step.exclude ? '-' : '+'}
+            </button>
+
+            <button
+              type="button"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                workbench.editStepInSearchBox(idx);
+                requestAnimationFrame(() => {
+                  inputEl?.focus();
+                  syncCursorPos();
+                });
+              }}
+              title={workbench.t.searchBar.editStepTitle}
+              class={`touch-target inline-flex min-w-0 items-center gap-1 truncate px-0.5 text-left hover:underline cursor-pointer ${
+                step.exclude ? 'line-through decoration-status/60' : ''
+              }`}
+            >
+              <span class="truncate">{step.text}</span>
+              {#if step.caseSensitive}
+                <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+                  Aa
+                </span>
+              {/if}
+              {#if step.wholeWord}
+                <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+                  ab
+                </span>
+              {/if}
+              {#if step.isRegex}
+                <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+                  .*
+                </span>
+              {/if}
+            </button>
+
+            <button
+              type="button"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => {
+                workbench.removeStep(idx);
+                inputEl?.focus();
+              }}
+              title={workbench.t.searchBar.removeStepTitle(step.text)}
+              aria-label={workbench.t.searchBar.removeStepTitle(step.text)}
+              class="touch-target inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </div>
+        {/each}
+
         <button
           type="button"
-          title={workbench.t.searchBar.clearTitle}
           onmousedown={(e) => e.preventDefault()}
           onclick={() => {
             workbench.clearSearch();
             inputEl?.focus();
           }}
-          aria-label={workbench.t.searchBar.clearTitle}
-          class="touch-target shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+          title={workbench.t.searchBar.clearTitle}
+          class="touch-target ml-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
         >
-          <X class="h-4 w-4" />
+          {workbench.t.searchBar.clearAllSteps}
         </button>
-      {/if}
-    </div>
-
-    {#if hasAttachedPanel}
-      <div
-        role="listbox"
-        tabindex="-1"
-        onmousedown={(e) => e.preventDefault()}
-        class="absolute left-0 right-0 top-full z-40 overflow-hidden rounded-b-[22px] border border-t-0 border-border bg-card shadow-2xl"
-      >
-        {#if showSymbolBar}
-          <div class="mx-3 border-t border-border/60"></div>
-          <SymbolBar onInsert={insertSymbol} onBackspace={backspaceToken} />
-        {/if}
-
-        <!-- 1. Google-Style Seamlessly Attached Search History Dropdown -->
-        {#if historySuggestions.length > 0}
-          <div class="mx-3 border-t border-border/60"></div>
-          <div class="max-h-52 md:max-h-64 overflow-y-auto py-1 pb-2">
-            {#each historySuggestions as entry, idx (`${entry.mode}:${entry.pattern}`)}
-              {@const isSelected = idx === selectedHistoryIdx}
-              <div
-                role="button"
-                tabindex="-1"
-                onmouseenter={() => (selectedHistoryIdx = idx)}
-                onclick={() => selectHistoryItem(entry)}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter') selectHistoryItem(entry);
-                }}
-                class={`group flex items-center justify-between gap-3 px-4 py-2.5 md:py-2 cursor-pointer transition-colors ${
-                  isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
-                }`}
-              >
-                <div class="flex items-center gap-3 min-w-0">
-                  <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
-                  <span class="font-mono text-[13.5px] text-foreground truncate">
-                    {entry.pattern}
-                  </span>
-                  {#if entry.mode === 'regex'}
-                    <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
-                      .*
-                    </span>
-                  {/if}
-                </div>
-
-                <button
-                  type="button"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    workbench.removeHistoryEntry(entry.pattern, entry.mode);
-                  }}
-                  class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground"
-                  title={workbench.t.ui.removeHistory}
-                  aria-label={workbench.t.ui.removeHistory}
-                >
-                  <X class="h-3.5 w-3.5" />
-                </button>
-              </div>
-            {/each}
-          </div>
-        {/if}
-
-        <!-- 2. Unified completion: in: (data sources / file types / directories), time:, and word → qualifier -->
-        {#if completion.items.length > 0}
-          <div class="mx-3 border-t border-border/60"></div>
-          <div class="max-h-52 md:max-h-64 overflow-y-auto space-y-0.5 p-1.5 pb-2">
-            {#each completion.items as item, idx (item.key)}
-              {@const isSelected = idx === effectiveSuggestIdx}
-              <button
-                type="button"
-                onmouseenter={() => (selectedSuggestIdx = idx)}
-                onclick={() => applySuggestion(item)}
-                class={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 md:py-1.5 text-left transition-colors ${
-                  isSelected ? 'bg-secondary text-foreground' : 'text-foreground hover:bg-secondary/60'
-                }`}
-              >
-                <span class="flex items-center gap-2.5 min-w-0">
-                  <span class="truncate font-mono text-xs font-medium">{item.label}</span>
-                  {#if item.hint}
-                    <span class="truncate text-[11px] text-muted-foreground/70">{item.hint}</span>
-                  {/if}
-                </span>
-                <span class="shrink-0 text-[10px] text-muted-foreground/60">{item.kind}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-        <!-- 3. Tips (one-click fixes) and a plain-language reading of the query -->
-        {#if tips.length > 0 || explanation}
-          <div class="mx-3 border-t border-border/60"></div>
-          <div class="space-y-0.5 px-4 py-2 text-[11.5px] text-muted-foreground">
-            {#each tips as tip (tip.key)}
-              <div class="flex items-center gap-2 min-w-0">
-                <Lightbulb class="h-3 w-3 shrink-0 text-status/80" />
-                <span class="truncate">{tip.text}</span>
-                {#if tip.fix}
-                  {@const fix = tip.fix}
-                  <button
-                    type="button"
-                    onclick={() => applyTipFix(fix.pattern)}
-                    class="touch-target shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:bg-primary/20 transition-colors"
-                  >
-                    {fix.label}
-                  </button>
-                {/if}
-              </div>
-            {/each}
-            {#if explanation}
-              <div class="truncate font-mono text-[11px] text-muted-foreground/60" title={explanation}>
-                {explanation}
-              </div>
-            {/if}
-          </div>
-        {/if}
       </div>
     {/if}
   </div>

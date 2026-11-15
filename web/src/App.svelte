@@ -7,6 +7,7 @@
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
   import ResultList from '$lib/components/ResultList.svelte';
   import InspectorPane from '$lib/components/InspectorPane.svelte';
+  import SourcePickerModal from '$lib/components/SourcePickerModal.svelte';
   import SettingsPopover from '$lib/components/SettingsPopover.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
 
@@ -43,6 +44,9 @@
     if (open && !detailPushed) {
       history.pushState({ detail: true }, '');
       detailPushed = true;
+      // Drop focus from the search box so its attached dropdown / symbol bar and the soft keyboard close.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && isTypingInInput(active)) active.blur();
     } else if (!open && detailPushed) {
       detailPushed = false;
       if (history.state?.detail) history.back();
@@ -82,9 +86,22 @@
   function handleGlobalKeydown(e: KeyboardEvent) {
     // Alt + letter toggles (use e.code: on macOS Alt+letter yields special chars in e.key)
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (e.code === 'KeyC') {
+        e.preventDefault();
+        workbench.toggleCaseSensitive();
+        searchInputEl?.focus();
+        return;
+      }
+      if (e.code === 'KeyW') {
+        e.preventDefault();
+        workbench.toggleWholeWord();
+        searchInputEl?.focus();
+        return;
+      }
       if (e.code === 'KeyR') {
         e.preventDefault();
-        workbench.insertToken?.('//');
+        workbench.toggleRegexMode();
+        searchInputEl?.focus();
         return;
       }
     }
@@ -92,6 +109,7 @@
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyK') {
       e.preventDefault();
       workbench.settingsOpen = false;
+      workbench.sourcePickerOpen = false;
       workbench.paletteOpen = !workbench.paletteOpen;
       return;
     }
@@ -99,6 +117,7 @@
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       workbench.paletteOpen = false;
+      workbench.sourcePickerOpen = false;
       if (workbench.settingsOpen) {
         workbench.settingsOpen = false;
       } else {
@@ -108,9 +127,13 @@
     }
 
     if (e.key === 'Escape') {
-      // Step back one layer at a time: palette → settings → detail → cancel search
+      // Step back one layer at a time: palette → source picker → settings → detail → cancel search
       if (workbench.paletteOpen) {
         workbench.paletteOpen = false;
+        return;
+      }
+      if (workbench.sourcePickerOpen) {
+        workbench.sourcePickerOpen = false;
         return;
       }
       if (workbench.settingsOpen) {
@@ -128,7 +151,7 @@
     }
 
     if (isTypingInInput(e.target)) return;
-    if (workbench.paletteOpen || workbench.settingsOpen) return;
+    if (workbench.paletteOpen || workbench.sourcePickerOpen || workbench.settingsOpen) return;
 
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
       const sel = window.getSelection()?.toString() ?? '';
@@ -233,7 +256,7 @@
     {#if !isHomeView && workbench.inspectedPath}
       {#if workbench.isCompact}
         {#if workbench.detailOpen}
-          <div class="detail-enter fixed inset-0 z-30 bg-background">
+          <div class="detail-enter fixed inset-0 z-[45] bg-background">
             <InspectorPane />
           </div>
         {/if}
@@ -250,6 +273,7 @@
     {/if}
   </div>
 
+  <SourcePickerModal />
   <SettingsPopover />
   <CommandPalette />
 </div>

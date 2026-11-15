@@ -49,6 +49,9 @@ pub const CachedQueryEntry = struct {
     max_results: u64,
     time_start_ns: u64 = 0,
     time_end_ns: u64 = 0,
+    time_mode: []const u8 = "auto",
+    time_format_sig: []const u8 = "",
+    tz_offset_min: i16 = 0,
     contains: []const []const u8,
     excludes: []const []const u8,
     file_mtimes: []const FileMtimeRecord,
@@ -61,6 +64,8 @@ pub const CachedQueryEntry = struct {
     bytes_searched: u64,
     limit_hit: bool,
     all_lines_exact: bool = true,
+    archive_unrestricted: bool = true,
+    archive_filter_hash: u64 = 0,
     approx_bytes: usize,
     access_tick: u64,
 

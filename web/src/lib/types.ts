@@ -1,6 +1,51 @@
 export type SearchMode = 'literal' | 'multi' | 'regex';
 export type CaseMode = 'smart' | 'sensitive' | 'insensitive';
 
+export type BuiltinTimePreset =
+  | ''
+  | '15m'
+  | '1h'
+  | '6h'
+  | '24h'
+  | 'today'
+  | 'yesterday'
+  | '7d'
+  | '30d';
+/** Built-in preset or custom range spec (e.g. `2026-11-13 10:00:00..2026-11-14 12:30:00`). */
+export type TimePreset = BuiltinTimePreset | (string & {});
+
+export interface SearchInputFlags {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  isRegex: boolean;
+  isExclude?: boolean;
+}
+
+export interface QueryStep {
+  text: string;
+  exclude: boolean;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  isRegex: boolean;
+}
+
+export type TimeFilterMode = 'source' | 'content' | 'mtime';
+
+export interface ScopeFilter {
+  /** Data source IDs or names; empty = all enabled sources. */
+  sources: string[];
+  /** Excluded source IDs or names (`!id` in wire `globs`). */
+  excludedSources?: string[];
+  /** File type IDs (e.g. `zig`, `log`, `json`); empty = all types. */
+  types: string[];
+  /** Quick time window; `''` = any time. */
+  timePreset: TimePreset;
+  /** Which timestamp dimension `timePreset` filters against: `'content'` (line timestamps) or `'mtime'` (file mtime). */
+  timeMode?: TimeFilterMode;
+  /** Optional custom line-timestamp format (`""` = auto, strftime mask, `json:<field>`, or `regex:<pat>`). */
+  timeFormat?: string;
+}
+
 export interface MetaResponse {
   rootLabel: string;
   root: string;
@@ -40,7 +85,7 @@ export interface HitItem {
   spans: HitSpan[];
 }
 
-export type SourceKind = 'dir' | 'file' | string;
+export type SourceKind = 'dir' | 'file' | 'docker' | (string & {});
 
 export interface SourceKindMeta {
   kind: SourceKind;
@@ -50,6 +95,7 @@ export interface SourceKindMeta {
 export interface SourceConfig {
   path: string;
   endpoint?: string | null;
+  timeFormat?: string | null;
 }
 
 export interface DataSourceItem {
@@ -63,6 +109,8 @@ export interface DataSourceItem {
   path: string;
   exists: boolean;
 }
+
+export type DataSourceEntry = DataSourceItem;
 
 export interface SourcesResponse {
   kinds?: SourceKindMeta[];
@@ -85,24 +133,38 @@ export interface WsSearchMessage {
   type: 'search';
   id: number;
   tenant: string;
-  /** Wire terms produced by `parseSearchQuery` (`$c(…)` / `$r(…)` encode case & regex per term). */
+  /** Wire terms produced by `compileSearchQuery` (`$c(…)` / `$r(…)` / `$w(…)`). */
   pattern: string;
   mode: SearchMode;
   case: CaseMode;
   contains: string[];
   excludes: string[];
   context: number;
-  /** Data source names from `@src` / `-@src` (`!` = exclude). */
+  sources?: string[];
+  types?: string[];
+  /** Data source exclusions (`!id`). */
   globs: string[];
-  /** File / path patterns from `@*.rs` / `@src/` (`!` = exclude). */
+  /** File / path patterns (`!` = exclude). */
   fileGlobs: string[];
   hidden: boolean;
   respectIgnore: boolean;
   maxResults: number;
-  /** Nearby-lines fallback radius when no single line contains every term (0 = strict single line). */
   nearbyLines: number;
   timeStartMs?: number;
   timeEndMs?: number;
+  timeMode?: TimeFilterMode;
+  timeFormat?: string;
+  tzOffsetMin?: number;
+}
+
+export interface TimePreviewResponse {
+  validFormat: boolean;
+  matched: boolean;
+  epochMs?: number | null;
+  isoUtc?: string | null;
+  localDisplay?: string | null;
+  errorMessage?: string | null;
+  error?: string | null;
 }
 
 export interface WsCancelMessage {
@@ -152,11 +214,11 @@ export interface FileHitGroup {
 }
 
 export interface SearchHistoryEntry {
-  pattern: string;
-  mode: SearchMode;
-  contains: string[];
-  excludes: string[];
-  replacement?: string;
+  id: string;
+  steps: QueryStep[];
+  draft: QueryStep | null;
+  scope: ScopeFilter;
+  label: string;
   timestamp: number;
 }
 

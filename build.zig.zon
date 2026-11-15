@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .libwebgrep = .{
-            .url = "https://github.com/fun7257/libwebgrep/archive/refs/tags/v0.4.1.tar.gz",
-            .hash = "libwebgrep-0.4.1-pjEXKhY5IQCW3jtR5B5AYy6vIMPyxkBe0CTVUHYxzEmi",
+            .url = "https://github.com/fun7257/libwebgrep/archive/refs/tags/v0.5.0.tar.gz",
+            .hash = "libwebgrep-0.5.0-pjEXKraoIQBvFepy4RRet09I9oGa5X6xJDhUMFhJ7y53",
         },
     },
     .paths = .{

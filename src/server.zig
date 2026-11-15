@@ -2,14 +2,13 @@ const std = @import("std");
 const file_api = @import("file_api.zig");
 const search_job = @import("search_job.zig");
 const source_registry = @import("source_registry.zig");
-const ingestor = @import("ingestor.zig");
+const time_parser = @import("time_parser.zig");
 
 pub const ServerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     web_dir_path: []const u8,
     registry: *source_registry.SourceRegistry,
-    ingestor: ?*ingestor.Ingestor = null,
 };
 
 pub const cors_headers = [_]std.http.Header{
@@ -159,6 +158,30 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                 };
                 defer parsed.deinit();
 
+                const maybe_tf: ?[]const u8 = if (parsed.value.config) |cfg|
+                    cfg.timeFormat
+                else
+                    parsed.value.timeFormat;
+                if (maybe_tf) |raw_tf| {
+                    const trimmed_tf = std.mem.trim(u8, raw_tf[0..@min(raw_tf.len, 256)], " \t\r\n");
+                    if (trimmed_tf.len > 0 and !std.ascii.eqlIgnoreCase(trimmed_tf, "auto")) {
+                        var tp_err: ?[]const u8 = null;
+                        const tp = ctx.gpa.create(time_parser.CompiledTimeParser) catch {
+                            respondErrorJson(&request, .internal_server_error, "OOM validating time format");
+                            continue;
+                        };
+                        tp.* = .{};
+                        defer {
+                            tp.deinit(ctx.gpa);
+                            ctx.gpa.destroy(tp);
+                        }
+                        tp.initInPlace(ctx.gpa, req_arena, trimmed_tf, &tp_err) catch {
+                            respondErrorJson(&request, .bad_request, tp_err orelse "无效的行时间解析格式");
+                            continue;
+                        };
+                    }
+                }
+
                 ctx.registry.upsertSource(req_arena, ctx.io, parsed.value) catch |err| {
                     switch (err) {
                         error.UnsupportedSourceKind => respondErrorJson(&request, .bad_request, "不支持的数据源类型 (kind)"),
@@ -167,6 +190,8 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                         error.FileNotFound => respondErrorJson(&request, .bad_request, "服务端单文件不存在或无访问权限"),
                         error.ExpectedDirFoundFile => respondErrorJson(&request, .bad_request, "当前选择的是「目录」类型，但输入路径是一个文件"),
                         error.ExpectedFileFoundDir => respondErrorJson(&request, .bad_request, "当前选择的是「单文件」类型，但输入路径是一个目录"),
+                        error.DockerUnavailable => respondErrorJson(&request, .bad_request, "未检测到可用的 Docker 守护进程或目标容器（请确认 Docker / OrbStack / Colima 已启动且 Socket 可访问）"),
+                        error.InvalidDockerEndpoint => respondErrorJson(&request, .bad_request, "无效的 Docker 连接地址（支持留空自动识别、unix://、tcp:// 或容器目录路径）"),
                         else => respondErrorJson(&request, .internal_server_error, @errorName(err)),
                     }
                     continue;
@@ -245,20 +270,76 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
             continue;
         }
 
-        if (std.mem.eql(u8, path_part, "/api/file")) {
+        if (std.mem.eql(u8, path_part, "/api/time/preview")) {
+            const TimePreviewRequest = struct {
+                format: []const u8 = "",
+                sample: []const u8 = "",
+                tzOffsetMin: i16 = 0,
+            };
+            var format_val: []const u8 = (file_api.getQueryParamAlloc(req_arena, query_part, "format") catch null) orelse "";
+            var sample_val: []const u8 = (file_api.getQueryParamAlloc(req_arena, query_part, "sample") catch null) orelse "";
+            var tz_val: i16 = 0;
+            if (file_api.getQueryParamAlloc(req_arena, query_part, "tzOffsetMin") catch null) |tz_str| {
+                tz_val = std.fmt.parseInt(i16, tz_str, 10) catch 0;
+            }
+            if (method == .POST) {
+                var body_buf: [4096]u8 = undefined;
+                if (request.readerExpectContinue(&body_buf)) |br| {
+                    if (br.allocRemaining(req_arena, .limited(64 * 1024))) |raw_json| {
+                        if (raw_json.len > 0) {
+                            if (std.json.parseFromSlice(TimePreviewRequest, req_arena, raw_json, .{
+                                .ignore_unknown_fields = true,
+                            })) |parsed| {
+                                format_val = parsed.value.format;
+                                sample_val = parsed.value.sample;
+                                tz_val = parsed.value.tzOffsetMin;
+                            } else |_| {}
+                        }
+                    } else |_| {}
+                } else |_| {}
+            }
+
+            const now_ns = time_parser.currentUnixNano(ctx.io);
+            const body = time_parser.buildTimePreviewJson(
+                ctx.gpa,
+                req_arena,
+                format_val,
+                sample_val,
+                tz_val,
+                now_ns,
+            ) catch |err| {
+                respondErrorJson(&request, .internal_server_error, @errorName(err));
+                continue;
+            };
+            request.respond(body, .{
+                .status = .ok,
+                .extra_headers = &json_headers,
+            }) catch break;
+            continue;
+        }
+
+        if (std.mem.eql(u8, path_part, "/api/file") or std.mem.eql(u8, path_part, "/api/context")) {
             const rel_path = (file_api.getQueryParamAlloc(req_arena, query_part, "path") catch null) orelse "";
             const line_str = (file_api.getQueryParamAlloc(req_arena, query_part, "line") catch null) orelse "1";
             const ctx_str = (file_api.getQueryParamAlloc(req_arena, query_part, "context") catch null) orelse "60";
+            const since_str_opt = file_api.getQueryParamAlloc(req_arena, query_part, "since") catch null;
 
             const line_num = std.fmt.parseInt(u64, line_str, 10) catch 1;
             const ctx_num = std.fmt.parseInt(u64, ctx_str, 10) catch 60;
+            const since_sec: ?u64 = if (since_str_opt) |ss| blk_since: {
+                const trimmed_ss = std.mem.trim(u8, ss, " \t\r\n");
+                if (trimmed_ss.len == 0) break :blk_since null;
+                const parsed_s = std.fmt.parseInt(u64, trimmed_ss, 10) catch break :blk_since null;
+                break :blk_since if (parsed_s > 0) parsed_s else null;
+            } else null;
 
-            const body = ctx.registry.buildLinePreviewJson(
+            const body = ctx.registry.buildLinePreviewJsonWithSince(
                 req_arena,
                 ctx.io,
                 rel_path,
                 line_num,
                 ctx_num,
+                since_sec,
             ) catch |err| {
                 switch (err) {
                     error.InvalidPath => respondErrorJson(&request, .bad_request, "invalid path"),
@@ -272,79 +353,6 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                 .extra_headers = &json_headers,
             }) catch break;
             continue;
-        }
-
-        // Log Ingestion HTTP Endpoints (Raw / Vector / FluentBit / Elastic _bulk / Loki / OTLP)
-        if ((method == .POST or method == .PUT) and ctx.ingestor != null) {
-            const ing = ctx.ingestor.?;
-            const is_raw_ingest = std.mem.eql(u8, path_part, "/ingest") or
-                std.mem.startsWith(u8, path_part, "/ingest/") or
-                std.mem.eql(u8, path_part, "/insert/jsonline");
-            const is_bulk = std.mem.eql(u8, path_part, "/_bulk") or
-                std.mem.endsWith(u8, path_part, "/_bulk");
-            const is_loki = std.mem.eql(u8, path_part, "/loki/api/v1/push");
-            const is_otlp = std.mem.eql(u8, path_part, "/v1/logs");
-
-            if (is_raw_ingest or is_bulk or is_loki or is_otlp) {
-                var body_buf: [16384]u8 = undefined;
-                const body_reader = request.readerExpectContinue(&body_buf) catch {
-                    respondErrorJson(&request, .bad_request, "failed to read ingest body");
-                    break;
-                };
-                const raw_body = body_reader.allocRemaining(req_arena, .limited(32 * 1024 * 1024)) catch {
-                    respondErrorJson(&request, .bad_request, "ingest payload too large or invalid");
-                    continue;
-                };
-
-                const service_param = (file_api.getQueryParamAlloc(req_arena, query_part, "service") catch null) orelse
-                    ((file_api.getQueryParamAlloc(req_arena, query_part, "source") catch null) orelse "");
-
-                if (is_loki) {
-                    const stats = ing.ingestLokiPush(ctx.io, service_param, raw_body) catch |err| {
-                        respondErrorJson(&request, .bad_request, @errorName(err));
-                        continue;
-                    };
-                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
-                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
-                    continue;
-                } else if (is_otlp) {
-                    const stats = ing.ingestOtlpLogs(ctx.io, service_param, raw_body) catch |err| {
-                        respondErrorJson(&request, .bad_request, @errorName(err));
-                        continue;
-                    };
-                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
-                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
-                    continue;
-                } else if (is_bulk) {
-                    var default_idx: []const u8 = service_param;
-                    if (default_idx.len == 0 and std.mem.endsWith(u8, path_part, "/_bulk") and path_part.len > 6) {
-                        default_idx = std.mem.trim(u8, path_part[0 .. path_part.len - 6], "/");
-                    }
-                    const stats = ing.ingestElasticBulk(ctx.io, default_idx, raw_body) catch |err| {
-                        respondErrorJson(&request, .bad_request, @errorName(err));
-                        continue;
-                    };
-                    const resp = std.fmt.allocPrint(
-                        req_arena,
-                        "{{\"took\":1,\"errors\":false,\"accepted\":{d},\"bytesWritten\":{d}}}",
-                        .{ stats.accepted, stats.bytesWritten },
-                    ) catch "{\"took\":1,\"errors\":false}";
-                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
-                    continue;
-                } else {
-                    var svc = service_param;
-                    if (svc.len == 0 and std.mem.startsWith(u8, path_part, "/ingest/")) {
-                        svc = std.mem.trim(u8, path_part["/ingest/".len..], "/");
-                    }
-                    const stats = ing.ingestRaw(ctx.io, if (svc.len > 0) svc else "ingest", raw_body) catch |err| {
-                        respondErrorJson(&request, .bad_request, @errorName(err));
-                        continue;
-                    };
-                    const resp = file_api.stringifyAlloc(req_arena, stats) catch "{}";
-                    request.respond(resp, .{ .status = .ok, .extra_headers = &json_headers }) catch break;
-                    continue;
-                }
-            }
         }
 
         if (std.mem.startsWith(u8, path_part, "/api/")) {

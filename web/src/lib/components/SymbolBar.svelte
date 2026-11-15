@@ -9,15 +9,8 @@
 
   let { onInsert, onBackspace }: Props = $props();
 
-  // Everything beyond plain words: exclude, phrase, where (`in:`), when (`time:`), regex.
-  const symbols = ['-', '"', 'in:', 'time:', '//'];
-  const active = $derived({
-    'in:': workbench.parsedGlobs.length + workbench.fileGlobs.length > 0,
-    'time:': workbench.hasTimeActive,
-    '//': workbench.hasRegexActive,
-  } as Record<string, boolean>);
+  const regexSymbols = ['\\d+', '|', '.*', '()'];
 
-  // Keep input focus (and the soft keyboard) while tapping toolbar buttons.
   function keepFocus(e: Event) {
     e.preventDefault();
   }
@@ -33,17 +26,35 @@
   onpointerdown={keepFocus}
   class="flex items-center gap-1 px-2.5 py-1.5"
 >
-  {#each symbols as sym (sym)}
+  {#if workbench.canExcludeDraft}
+    <button
+      type="button"
+      onclick={() => workbench.toggleDraftExclude()}
+      class={`${btn} ${
+        workbench.draftExclude
+          ? 'bg-status/15 text-status font-semibold'
+          : 'bg-primary/10 text-primary font-semibold'
+      }`}
+    >
+      {workbench.draftExclude ? '-' : '+'}
+    </button>
+  {/if}
+  <button
+    type="button"
+    onclick={() => workbench.toggleRegexMode()}
+    class={`${btn} ${
+      workbench.isRegex ? 'bg-primary/15 text-primary font-semibold' : 'text-foreground'
+    }`}
+  >
+    .*
+  </button>
+  {#each regexSymbols as sym (sym)}
     <button
       type="button"
       onclick={() => onInsert(sym)}
-      class={`${btn} ${
-        active[sym]
-          ? 'bg-primary/15 text-primary font-medium'
-          : 'text-foreground'
-      }`}
+      class={`${btn} text-foreground`}
     >
-      {sym === '//' ? '/…/' : sym}
+      {sym}
     </button>
   {/each}
   <button
