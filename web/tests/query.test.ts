@@ -7,6 +7,7 @@ import {
   createQueryStep,
   encodeStepToWire,
   formatHistoryLabel,
+  getHistoryScopeFlags,
   parseTimeModifierSpec,
 } from '../src/lib/query.ts';
 import {
@@ -35,9 +36,11 @@ import {
   buildHighlightSegments,
   decodeHumanEscapes,
   extractLeadingNanoTimestamp,
+  formatContextRecordPretty,
   getCachedHighlightSegments,
   highlightCodeWithMatches,
   skipLeadingNanoTimestampOffset,
+  syntaxKindToClass,
   universalPrettyStructure,
 } from '../src/lib/utils.ts';
 import {
@@ -426,6 +429,36 @@ describe('Structured Query Model & Compiler', () => {
     assert.equal(label, 'error → -healthcheck → timeout');
   });
 
+  it('getHistoryScopeFlags detects scoped sources and time ranges without exposing values', () => {
+    assert.deepEqual(getHistoryScopeFlags(null), { hasSources: false, hasTime: false });
+    assert.deepEqual(getHistoryScopeFlags(undefined), { hasSources: false, hasTime: false });
+    assert.deepEqual(getHistoryScopeFlags(EMPTY_SCOPE), { hasSources: false, hasTime: false });
+    assert.deepEqual(
+      getHistoryScopeFlags({ sources: ['src-1'], excludedSources: [], timePreset: '   ' }),
+      { hasSources: true, hasTime: false }
+    );
+    assert.deepEqual(
+      getHistoryScopeFlags({ sources: [], excludedSources: ['src-2'], timePreset: '' }),
+      { hasSources: true, hasTime: false }
+    );
+    assert.deepEqual(
+      getHistoryScopeFlags({ sources: [], excludedSources: [], timePreset: '45m' }),
+      { hasSources: false, hasTime: true }
+    );
+    assert.deepEqual(
+      getHistoryScopeFlags({ sources: [], timePreset: '2026-11-15 09:30:00..' }),
+      { hasSources: false, hasTime: true }
+    );
+    assert.deepEqual(
+      getHistoryScopeFlags({
+        sources: ['src-1'],
+        excludedSources: ['src-2'],
+        timePreset: '1h',
+      }),
+      { hasSources: true, hasTime: true }
+    );
+  });
+
   it('buildQueryCacheKeys separates baseKey (for maxResults growth) and exactKey, including tenant & sources', () => {
     const common = {
       tenant: 'ws-a',
@@ -635,6 +668,48 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     assert.ok(codeSegs.some((s) => s.text === '@Vector' && s.syntaxKind === 'builtin'));
     assert.ok(codeSegs.some((s) => s.text === '64' && s.syntaxKind === 'number'));
     assert.ok(codeSegs.some((s) => s.text.includes('// fast path') && s.syntaxKind === 'comment'));
+  });
+
+  it('highlights common formats (JSONL, logfmt/plain logs with URLs and contractions, YAML/TOML/SQL) while preserving matches', () => {
+    const jsonLog =
+      '{"t":"2026-10-08T12:00:00.000+08:00","l":"error","status":500,"url":"https://api.example.com/v1"}';
+    const jsonMatchSegs = buildHighlightSegments(jsonLog, undefined, [], true, false, 'api.example.com', false);
+    const jsonSegs = highlightCodeWithMatches(jsonLog, jsonMatchSegs);
+    assert.equal(jsonSegs.map((s) => s.text).join(''), jsonLog);
+    assert.ok(jsonSegs.some((s) => s.text === '"t"' && s.syntaxKind === 'property'));
+    assert.ok(jsonSegs.some((s) => s.text.includes('2026-10-08T12:00:00') && s.syntaxKind === 'timestamp'));
+    assert.ok(jsonSegs.some((s) => s.text === '"error"' && s.syntaxKind === 'log-error'));
+    assert.ok(jsonSegs.some((s) => s.text === '500' && s.syntaxKind === 'number'));
+    assert.ok(jsonSegs.some((s) => s.text === 'api.example.com' && s.matchKind === 'primary'));
+
+    const plainLog =
+      "2026-11-16 10:00:00.123 [WARN] upstream retry ip=10.0.0.8:8080 endpoint=https://example.com/health Couldn't connect";
+    const plainSegs = highlightCodeWithMatches(plainLog, [{ text: plainLog, kind: 'plain' }]);
+    assert.equal(plainSegs.map((s) => s.text).join(''), plainLog);
+    assert.ok(plainSegs.some((s) => s.text === '2026-11-16 10:00:00.123' && s.syntaxKind === 'timestamp'));
+    assert.ok(plainSegs.some((s) => s.text === 'WARN' && s.syntaxKind === 'log-warn'));
+    assert.ok(plainSegs.some((s) => s.text === 'ip' && s.syntaxKind === 'property'));
+    assert.ok(plainSegs.some((s) => s.text === '10.0.0.8:8080' && s.syntaxKind === 'number'));
+    assert.ok(plainSegs.some((s) => s.text === 'https://example.com/health' && s.syntaxKind === 'url'));
+    assert.ok(!plainSegs.some((s) => s.syntaxKind === 'comment'), 'https:// must not start a // comment');
+    assert.ok(!plainSegs.some((s) => s.syntaxKind === 'string'), "Couldn't apostrophe must not open a string");
+
+    const yamlTomlSql = [
+      'content-type: application/json',
+      '[dependencies]',
+      'SELECT id FROM users WHERE active = true -- query',
+    ].join('\n');
+    const multiSegs = highlightCodeWithMatches(yamlTomlSql, [{ text: yamlTomlSql, kind: 'plain' }]);
+    assert.equal(multiSegs.map((s) => s.text).join(''), yamlTomlSql);
+    assert.ok(multiSegs.some((s) => s.text === 'content-type' && s.syntaxKind === 'property'));
+    assert.ok(multiSegs.some((s) => s.text === '[dependencies]' && s.syntaxKind === 'builtin'));
+    assert.ok(multiSegs.some((s) => s.text === 'SELECT' && s.syntaxKind === 'keyword'));
+    assert.ok(multiSegs.some((s) => s.text === '-- query' && s.syntaxKind === 'comment'));
+
+    assert.equal(syntaxKindToClass('log-error'), 'syn-log-error');
+    assert.equal(syntaxKindToClass('url'), 'syn-url');
+    assert.equal(syntaxKindToClass('plain'), '');
+    assert.ok(formatContextRecordPretty('{"a":1}').includes('\n'));
   });
 
   it('preserves rich single-record content across 1–6 preview lines without premature ellipses and centers ultra-long records', () => {

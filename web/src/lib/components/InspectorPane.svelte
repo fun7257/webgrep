@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { flushSync, onDestroy } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import {
     analyzeStructuredLine,
@@ -6,6 +7,9 @@
     copyTextToClipboard,
     detectInlineEpochHint,
     extractLeadingNanoTimestamp,
+    highlightCodeWithMatches,
+    syntaxKindToClass,
+    type CodeHighlightSegment,
     type HighlightSegment,
   } from '$lib/utils';
   import {
@@ -18,6 +22,8 @@
     FileText,
     Loader2,
     Search,
+    Share2,
+    UnfoldVertical,
     X,
   } from 'lucide-svelte';
 
@@ -25,10 +31,18 @@
   let scrollContainerEl = $state<HTMLDivElement | null>(null);
   let selectedText = $state<string>('');
   let copiedLine = $state<boolean>(false);
+  let copiedShare = $state<boolean>(false);
+  let copiedLineTimer: ReturnType<typeof setTimeout> | null = null;
+  let copiedShareTimer: ReturnType<typeof setTimeout> | null = null;
   let collapsedJsonPaths = $state<Record<string, boolean>>({});
   let copiedFieldPath = $state<string>('');
   let hoveredFieldPath = $state<string>('');
   let tabToggledOnDown = false;
+
+  onDestroy(() => {
+    if (copiedLineTimer !== null) clearTimeout(copiedLineTimer);
+    if (copiedShareTimer !== null) clearTimeout(copiedShareTimer);
+  });
 
   let activeHit = $derived(workbench.inspectedHit ?? workbench.activeHit);
   let targetLine = $derived(activeHit?.line ?? workbench.inspectedLine);
@@ -267,9 +281,31 @@
       workbench.inspectorTab === 'structured'
         ? structuredInfo.formattedText || activeLineText
         : activeLineText;
-    copyTextToClipboard(textToCopy);
+    void copyTextToClipboard(textToCopy);
     copiedLine = true;
-    setTimeout(() => (copiedLine = false), 1500);
+    if (copiedLineTimer !== null) clearTimeout(copiedLineTimer);
+    copiedLineTimer = setTimeout(() => {
+      copiedLine = false;
+      copiedLineTimer = null;
+    }, 1500);
+  }
+
+  async function sharePreviewLink() {
+    if (typeof window === 'undefined' || !workbench.inspectedPath) return;
+    const url = workbench.buildPreviewShareUrl(window.location.href);
+    const ok = await copyTextToClipboard(url);
+    try {
+      window.history.replaceState(window.history.state, '', url);
+    } catch {
+      // ignore history errors
+    }
+    if (!ok) return;
+    copiedShare = true;
+    if (copiedShareTimer !== null) clearTimeout(copiedShareTimer);
+    copiedShareTimer = setTimeout(() => {
+      copiedShare = false;
+      copiedShareTimer = null;
+    }, 1500);
   }
 
   function toggleJsonPath(path: string, e: MouseEvent) {
@@ -344,6 +380,28 @@
 
 {#snippet renderHighlighted(text: string)}
   {@render renderSegments(highlightFormattedText(text))}
+{/snippet}
+
+{#snippet renderCodeSegments(segments: CodeHighlightSegment[])}
+  {#if segments.length === 1 && segments[0].matchKind === 'plain' && segments[0].syntaxKind === 'plain'}
+    {segments[0].text || ' '}
+  {:else}
+    {#each segments as seg}
+      {#if seg.matchKind === 'primary'}
+        <mark class="match-span-primary">{seg.text}</mark>
+      {:else if seg.matchKind === 'contains-0'}
+        <mark class="match-span-contains-0">{seg.text}</mark>
+      {:else if seg.matchKind === 'contains-1'}
+        <mark class="match-span-contains-1">{seg.text}</mark>
+      {:else if seg.matchKind === 'contains-2'}
+        <mark class="match-span-contains-2">{seg.text}</mark>
+      {:else if seg.syntaxKind !== 'plain'}
+        <span class={syntaxKindToClass(seg.syntaxKind)}>{seg.text}</span>
+      {:else}
+        {seg.text}
+      {/if}
+    {/each}
+  {/if}
 {/snippet}
 
 {#snippet renderFieldActions(path: string, rawVal: string)}
@@ -596,6 +654,29 @@
         </button>
       {/if}
 
+      {#if workbench.inspectedPath && targetLine > 0}
+        <button
+          type="button"
+          data-inspector-context-btn
+          aria-pressed={workbench.contextDrawerOpen}
+          title={workbench.t.inspector.openContextTitle}
+          aria-label={workbench.t.inspector.openContextTitle}
+          onmousedown={(e) => e.preventDefault()}
+          onclick={() => {
+            flushSync(() => {
+              void workbench.openContextDrawer(workbench.inspectedPath!, targetLine);
+            });
+          }}
+          class={`touch-target rounded-md p-1.5 cursor-pointer ${
+            workbench.contextDrawerOpen
+              ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35'
+              : 'text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground active:bg-secondary'
+          }`}
+        >
+          <UnfoldVertical class="h-3.5 w-3.5" />
+        </button>
+      {/if}
+
       <!-- Formatted / Raw toggle (single icon button) -->
       <button
         type="button"
@@ -639,6 +720,25 @@
             <Check class="h-3.5 w-3.5 text-primary" />
           {:else}
             <Copy class="h-3.5 w-3.5" />
+          {/if}
+        </button>
+      {/if}
+
+      {#if workbench.inspectedPath}
+        <button
+          type="button"
+          title={copiedShare
+            ? workbench.t.inspector.shareReplayCopied
+            : workbench.t.inspector.shareReplayTitle}
+          aria-label={workbench.t.inspector.shareReplayTitle}
+          onmousedown={(e) => e.preventDefault()}
+          onclick={() => void sharePreviewLink()}
+          class="touch-target rounded-md p-1.5 text-muted-foreground/70 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
+        >
+          {#if copiedShare}
+            <Check class="h-3.5 w-3.5 text-primary" />
+          {:else}
+            <Share2 class="h-3.5 w-3.5" />
           {/if}
         </button>
       {/if}
@@ -745,6 +845,7 @@
                 {/each}
               </div>
             {:else}
+              {@const bodyText = structuredInfo.bodyFormattedText ?? structuredInfo.formattedText}
               <div
                 class={`${
                   workbench.wordWrap
@@ -752,8 +853,8 @@
                     : 'whitespace-pre overflow-x-auto'
                 } leading-[1.68] text-foreground`}
               >
-                {@render renderHighlighted(
-                  structuredInfo.bodyFormattedText ?? structuredInfo.formattedText
+                {@render renderCodeSegments(
+                  highlightCodeWithMatches(bodyText, highlightFormattedText(bodyText))
                 )}
               </div>
             {/if}
@@ -774,9 +875,16 @@
               </div>
             {/if}
             {#if workbench.inspectorTab === 'raw'}
-              <div class={wrapCls}>{@render renderSegments(rawLineSegments)}</div>
+              <div class={wrapCls}>
+                {@render renderCodeSegments(highlightCodeWithMatches(activeLineText, rawLineSegments))}
+              </div>
             {:else}
-              <div class={wrapCls}>{@render renderHighlighted(cleanPlainText || ' ')}</div>
+              {@const plainDisplay = cleanPlainText || ' '}
+              <div class={wrapCls}>
+                {@render renderCodeSegments(
+                  highlightCodeWithMatches(plainDisplay, highlightFormattedText(plainDisplay))
+                )}
+              </div>
             {/if}
           </div>
         {/if}

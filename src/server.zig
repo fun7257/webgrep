@@ -1,5 +1,7 @@
 const std = @import("std");
+const auth_mod = @import("auth.zig");
 const file_api = @import("file_api.zig");
+const mcp_mod = @import("mcp.zig");
 const search_job = @import("search_job.zig");
 const source_registry = @import("source_registry.zig");
 const time_parser = @import("time_parser.zig");
@@ -9,12 +11,15 @@ pub const ServerContext = struct {
     io: std.Io,
     web_dir_path: []const u8,
     registry: *source_registry.SourceRegistry,
+    mcp: ?*mcp_mod.McpService = null,
+    auth: auth_mod.AuthGuard = .{},
 };
 
 pub const cors_headers = [_]std.http.Header{
     .{ .name = "access-control-allow-origin", .value = "*" },
     .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, DELETE, OPTIONS" },
-    .{ .name = "access-control-allow-headers", .value = "Content-Type" },
+    .{ .name = "access-control-allow-headers", .value = "Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Authorization, X-MCP-Token" },
+    .{ .name = "access-control-expose-headers", .value = "Mcp-Session-Id, MCP-Protocol-Version" },
 };
 
 pub const json_headers = [_]std.http.Header{
@@ -22,7 +27,8 @@ pub const json_headers = [_]std.http.Header{
     .{ .name = "cache-control", .value = "no-store" },
     .{ .name = "access-control-allow-origin", .value = "*" },
     .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, DELETE, OPTIONS" },
-    .{ .name = "access-control-allow-headers", .value = "Content-Type" },
+    .{ .name = "access-control-allow-headers", .value = "Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Authorization, X-MCP-Token" },
+    .{ .name = "access-control-expose-headers", .value = "Mcp-Session-Id, MCP-Protocol-Version" },
 };
 
 pub fn handleConnectionThread(ctx: *const ServerContext, stream: std.Io.net.Stream) void {
@@ -62,6 +68,165 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
         const path_part = if (q_idx) |i| target_copy[0..i] else target_copy;
         const query_part = if (q_idx) |i| target_copy[i + 1 ..] else "";
 
+        // Must inspect headers BEFORE readerExpectContinue or respondWebSocket.
+        var cookie_hdr: []const u8 = "";
+        var auth_hdr: []const u8 = "";
+        var x_mcp_token_hdr: []const u8 = "";
+        var x_forwarded_proto_hdr: []const u8 = "";
+        var user_agent_hdr: []const u8 = "";
+        {
+            var hdr_it = request.iterateHeaders();
+            while (hdr_it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "cookie")) {
+                    cookie_hdr = try req_arena.dupe(u8, h.value);
+                } else if (std.ascii.eqlIgnoreCase(h.name, "authorization")) {
+                    auth_hdr = try req_arena.dupe(u8, h.value);
+                } else if (std.ascii.eqlIgnoreCase(h.name, "x-mcp-token")) {
+                    x_mcp_token_hdr = try req_arena.dupe(u8, h.value);
+                } else if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-proto")) {
+                    x_forwarded_proto_hdr = try req_arena.dupe(u8, h.value);
+                } else if (std.ascii.eqlIgnoreCase(h.name, "user-agent")) {
+                    user_agent_hdr = try req_arena.dupe(u8, h.value);
+                }
+            }
+        }
+        const now_sec: u64 = time_parser.currentUnixNano(ctx.io) / 1_000_000_000;
+
+        if (std.mem.eql(u8, path_part, "/api/auth/status") and method == .GET) {
+            const status_body = file_api.stringifyAlloc(req_arena, auth_mod.AuthStatusDto{
+                .authRequired = ctx.auth.webPasswordRequired(),
+                .authenticated = ctx.auth.isWebRequestAuthenticated(cookie_hdr, auth_hdr, now_sec),
+                .mcpTokenRequired = ctx.auth.mcpTokenRequired(),
+            }) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to encode auth status");
+                continue;
+            };
+            request.respond(status_body, .{
+                .status = .ok,
+                .extra_headers = &json_headers,
+            }) catch break;
+            continue;
+        }
+
+        if (std.mem.eql(u8, path_part, "/api/auth/login") and method == .POST) {
+            if (!ctx.auth.webPasswordRequired()) {
+                const body = file_api.stringifyAlloc(req_arena, .{
+                    .ok = true,
+                    .authRequired = false,
+                    .authenticated = true,
+                    .mcpTokenRequired = ctx.auth.mcpTokenRequired(),
+                }) catch "{\"ok\":true}";
+                request.respond(body, .{
+                    .status = .ok,
+                    .extra_headers = &json_headers,
+                }) catch break;
+                continue;
+            }
+
+            var body_buf: [2048]u8 = undefined;
+            const body_reader = request.readerExpectContinue(&body_buf) catch {
+                respondErrorJson(&request, .bad_request, "failed to read request body");
+                break;
+            };
+            const raw_json = body_reader.allocRemaining(req_arena, .limited(16 * 1024)) catch {
+                respondErrorJson(&request, .bad_request, "invalid request body");
+                continue;
+            };
+            var parsed = std.json.parseFromSlice(auth_mod.LoginRequest, req_arena, raw_json, .{
+                .ignore_unknown_fields = true,
+            }) catch {
+                respondErrorJson(&request, .bad_request, "invalid JSON payload");
+                continue;
+            };
+            defer parsed.deinit();
+
+            const pw_candidate = parsed.value.password orelse "";
+            if (!ctx.auth.verifyWebPassword(pw_candidate)) {
+                request.respond("{\"ok\":false,\"error\":\"Invalid password\"}", .{
+                    .status = .unauthorized,
+                    .extra_headers = &json_headers,
+                }) catch break;
+                continue;
+            }
+
+            const tok = ctx.auth.issueSessionTokenAlloc(req_arena, ctx.io, now_sec) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to issue session");
+                continue;
+            };
+            const is_https = std.ascii.eqlIgnoreCase(std.mem.trim(u8, x_forwarded_proto_hdr, " \t\r\n"), "https");
+            const set_cookie = auth_mod.buildSetCookieHeaderAlloc(req_arena, tok, is_https) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to build cookie");
+                continue;
+            };
+            var resp_hdrs: [json_headers.len + 1]std.http.Header = undefined;
+            @memcpy(resp_hdrs[0..json_headers.len], &json_headers);
+            resp_hdrs[json_headers.len] = .{ .name = "set-cookie", .value = set_cookie };
+
+            const ok_body = file_api.stringifyAlloc(req_arena, .{
+                .ok = true,
+                .authRequired = true,
+                .authenticated = true,
+                .mcpTokenRequired = ctx.auth.mcpTokenRequired(),
+            }) catch "{\"ok\":true}";
+            request.respond(ok_body, .{
+                .status = .ok,
+                .extra_headers = &resp_hdrs,
+            }) catch break;
+            continue;
+        }
+
+        if (std.mem.eql(u8, path_part, "/api/auth/logout") and method == .POST) {
+            var resp_hdrs: [json_headers.len + 1]std.http.Header = undefined;
+            @memcpy(resp_hdrs[0..json_headers.len], &json_headers);
+            resp_hdrs[json_headers.len] = .{ .name = "set-cookie", .value = auth_mod.buildClearCookieHeader() };
+            request.respond("{\"ok\":true}", .{
+                .status = .ok,
+                .extra_headers = &resp_hdrs,
+            }) catch break;
+            continue;
+        }
+
+        if (std.mem.eql(u8, path_part, "/mcp")) {
+            const mcp_authorized = blk: {
+                if (!ctx.auth.mcpTokenRequired()) break :blk true;
+                if (ctx.auth.isMcpRequestAuthenticated(auth_hdr, x_mcp_token_hdr)) break :blk true;
+                if (file_api.getQueryParamAlloc(req_arena, query_part, "token") catch null) |q_tok| {
+                    if (q_tok.len > 0 and ctx.auth.verifyMcpToken(q_tok)) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!mcp_authorized) {
+                if (ctx.mcp) |mcp_svc| {
+                    mcp_svc.recordUnauthorizedAttempt(ctx.io, @tagName(method), user_agent_hdr);
+                }
+                var unauth_hdrs: [json_headers.len + 1]std.http.Header = undefined;
+                @memcpy(unauth_hdrs[0..json_headers.len], &json_headers);
+                unauth_hdrs[json_headers.len] = .{ .name = "www-authenticate", .value = "Bearer realm=\"webgrep-mcp\"" };
+                request.respond(
+                    "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"Unauthorized: invalid or missing MCP token\"}}",
+                    .{
+                        .status = .unauthorized,
+                        .extra_headers = &unauth_hdrs,
+                    },
+                ) catch break;
+                continue;
+            }
+            if (ctx.mcp) |mcp_svc| {
+                mcp_svc.handleHttpEndpoint(req_arena, ctx.io, &request, &cors_headers, &json_headers) catch break;
+            } else {
+                respondErrorJson(&request, .not_found, "MCP service disabled");
+            }
+            continue;
+        }
+
+        if (!ctx.auth.isWebRequestAuthenticated(cookie_hdr, auth_hdr, now_sec)) {
+            if (std.mem.eql(u8, path_part, "/api/ws") or std.mem.startsWith(u8, path_part, "/api/")) {
+                respondErrorJson(&request, .unauthorized, "unauthorized");
+                if (std.mem.eql(u8, path_part, "/api/ws")) break;
+                continue;
+            }
+        }
+
         if (std.mem.eql(u8, path_part, "/api/ws")) {
             switch (request.upgradeRequested()) {
                 .websocket => |maybe_key| {
@@ -85,6 +250,78 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                     break;
                 },
             }
+        }
+
+        if (std.mem.eql(u8, path_part, "/api/mcp") and method == .GET) {
+            if (ctx.mcp) |mcp_svc| {
+                const body = mcp_svc.buildStateJson(req_arena, ctx.io) catch {
+                    respondErrorJson(&request, .internal_server_error, "failed to read MCP state");
+                    continue;
+                };
+                request.respond(body, .{
+                    .status = .ok,
+                    .extra_headers = &json_headers,
+                }) catch break;
+            } else {
+                respondErrorJson(&request, .not_found, "MCP service disabled");
+            }
+            continue;
+        }
+
+        if (std.mem.eql(u8, path_part, "/api/mcp/config") and (method == .POST or method == .PUT)) {
+            const mcp_svc = ctx.mcp orelse {
+                respondErrorJson(&request, .not_found, "MCP service disabled");
+                continue;
+            };
+            var body_buf: [4096]u8 = undefined;
+            const body_reader = request.readerExpectContinue(&body_buf) catch {
+                respondErrorJson(&request, .bad_request, "failed to read request body");
+                break;
+            };
+            const raw_json = body_reader.allocRemaining(req_arena, .limited(64 * 1024)) catch {
+                respondErrorJson(&request, .bad_request, "invalid request body");
+                continue;
+            };
+            var parsed = std.json.parseFromSlice(mcp_mod.UpdateMcpConfigRequest, req_arena, raw_json, .{
+                .ignore_unknown_fields = true,
+            }) catch {
+                respondErrorJson(&request, .bad_request, "invalid JSON payload");
+                continue;
+            };
+            defer parsed.deinit();
+
+            mcp_svc.updateConfig(ctx.io, parsed.value) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to update MCP config");
+                continue;
+            };
+            const resp_body = mcp_svc.buildStateJson(req_arena, ctx.io) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to read MCP state");
+                continue;
+            };
+            request.respond(resp_body, .{
+                .status = .ok,
+                .extra_headers = &json_headers,
+            }) catch break;
+            continue;
+        }
+
+        if ((std.mem.eql(u8, path_part, "/api/mcp/logs/clear") and method == .POST) or
+            (std.mem.eql(u8, path_part, "/api/mcp/logs") and method == .DELETE))
+        {
+            const mcp_svc = ctx.mcp orelse {
+                respondErrorJson(&request, .not_found, "MCP service disabled");
+                continue;
+            };
+            mcp_svc.clearLogs(ctx.io);
+            const resp_body = mcp_svc.buildStateJson(req_arena, ctx.io) catch {
+                respondErrorJson(&request, .internal_server_error, "failed to read MCP state");
+                continue;
+            };
+            request.respond(resp_body, .{
+                .status = .ok,
+                .extra_headers = &json_headers,
+            }) catch break;
+            continue;
         }
 
         if (std.mem.eql(u8, path_part, "/api/meta")) {
@@ -326,19 +563,37 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
 
             const line_num = std.fmt.parseInt(u64, line_str, 10) catch 1;
             const ctx_num = std.fmt.parseInt(u64, ctx_str, 10) catch 60;
-            const since_sec: ?u64 = if (since_str_opt) |ss| blk_since: {
-                const trimmed_ss = std.mem.trim(u8, ss, " \t\r\n");
-                if (trimmed_ss.len == 0) break :blk_since null;
-                const parsed_s = std.fmt.parseInt(u64, trimmed_ss, 10) catch break :blk_since null;
-                break :blk_since if (parsed_s > 0) parsed_s else null;
-            } else null;
+            const parseOptU64 = struct {
+                fn get(arena: std.mem.Allocator, qp: []const u8, name: []const u8) ?u64 {
+                    const raw = (file_api.getQueryParamAlloc(arena, qp, name) catch null) orelse return null;
+                    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+                    if (trimmed.len == 0) return null;
+                    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+                }
+            }.get;
+            const since_sec: ?u64 = blk_since: {
+                const parsed_s = if (since_str_opt) |ss| blk_inner: {
+                    const trimmed_ss = std.mem.trim(u8, ss, " \t\r\n");
+                    if (trimmed_ss.len == 0) break :blk_inner null;
+                    break :blk_inner std.fmt.parseInt(u64, trimmed_ss, 10) catch null;
+                } else null;
+                break :blk_since if (parsed_s) |ps| if (ps > 0) ps else null else null;
+            };
 
-            const body = ctx.registry.buildLinePreviewJsonWithSince(
+            const win_query = file_api.FileWindowQuery{
+                .line = line_num,
+                .context = ctx_num,
+                .start_line = parseOptU64(req_arena, query_part, "startLine"),
+                .end_line = parseOptU64(req_arena, query_part, "endLine"),
+                .anchor_line = parseOptU64(req_arena, query_part, "anchorLine"),
+                .anchor_byte = parseOptU64(req_arena, query_part, "anchorByte"),
+            };
+
+            const body = ctx.registry.buildLinePreviewWindowJson(
                 req_arena,
                 ctx.io,
                 rel_path,
-                line_num,
-                ctx_num,
+                win_query,
                 since_sec,
             ) catch |err| {
                 switch (err) {
@@ -418,9 +673,18 @@ fn handleWebSocket(ctx: *const ServerContext, ws: *std.http.Server.WebSocket) vo
         .ws = ws,
         .io = ctx.io,
     };
+    if (ctx.mcp) |mcp_svc| {
+        mcp_svc.registerSubscriber(ctx.io, .{
+            .ctx = &channel,
+            .sendFn = WsChannel.sendText,
+        });
+    }
     var active_thread: ?std.Thread = null;
     defer {
         channel.cancel_flag.store(true, .release);
+        if (ctx.mcp) |mcp_svc| {
+            mcp_svc.unregisterSubscriber(ctx.io, &channel);
+        }
         if (active_thread) |t| t.join();
     }
 
@@ -507,7 +771,7 @@ const fallback_diagnostic_html =
     \\</head>
     \\<body>
     \\  <h1>webgrep Zig 0.17.0 backend is online</h1>
-    \\  <p>API endpoints active: <code>/api/meta</code>, <code>/api/sources</code>, <code>/api/fs/dirs</code>, <code>/api/file</code>, <code>/api/ws</code>.</p>
+    \\  <p>API endpoints active: <code>/api/meta</code>, <code>/api/sources</code>, <code>/api/fs/dirs</code>, <code>/api/file</code>, <code>/api/ws</code>, <code>/api/mcp</code>, <code>/mcp</code>.</p>
     \\  <p>Build frontend assets in <code>web/dist</code> or connect via Vite dev server.</p>
     \\</body>
     \\</html>

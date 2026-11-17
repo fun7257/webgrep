@@ -56,11 +56,15 @@ npm --prefix web run build
 # Compile and run backend unit tests (linked with libwebgrep v0.5.0)
 zig build && zig build test
 
-# Start the webgrep server (default: http://127.0.0.1:8787)
+# Start the webgrep server (default: http://127.0.0.1:8787 + active Tailscale interface(s), `--host 127.0.0.1,tailscale`)
 ./zig-out/bin/webgrep --port 8787
+
+# Optional deployment authentication (Web password-only login & MCP Bearer token via env vars or flags):
+WEBGREP_PASSWORD="your-web-password" WEBGREP_MCP_TOKEN="your-mcp-token" ./zig-out/bin/webgrep --port 8787
+# Or pass flags: ./zig-out/bin/webgrep --password "your-web-password" --mcp-token "your-mcp-token"
 ```
 
-Open **http://127.0.0.1:8787** in your browser. Click the Settings icon in the top-right corner to add a **Directory**, **Single File**, or **Docker Containers** (`auto` zero-disk live container log discovery) data source and start searching immediately.
+Open **http://127.0.0.1:8787** (or your node's Tailscale IP/MagicDNS on `:8787` — `webgrep` binds `127.0.0.1` plus active Tailscale interfaces by default and watches for Tailscale reconnects without exposing LAN/`0.0.0.0`). Click the Settings icon in the top-right corner to add a **Directory**, **Single File**, or **Docker Containers** (`auto` zero-disk live container log discovery) data source and start searching immediately.
 
 ### 3. Development Mode (Hot Reload)
 
@@ -76,6 +80,7 @@ npm --prefix web run dev
 
 - [`src/`](src/) — **Zig 0.17.0 HTTP & WebSocket Backend**
   - [`src/main.zig`](src/main.zig): CLI entry point and server bootstrap.
+  - [`src/net_bind.zig`](src/net_bind.zig): Multi-listener host parser (`--host 127.0.0.1,tailscale` default) and automatic Tailscale interface discovery/hot-binding.
   - [`src/server.zig`](src/server.zig): HTTP REST endpoints (`/api/meta`, `/api/sources`, `/api/sources/complete`, `/api/file`, `/api/context`) and full-duplex WebSocket handler (`/api/ws`).
   - [`src/search_job.zig`](src/search_job.zig): Multi-threaded search scheduler, cost-based selectivity planner, two-stage water-filling (`resumeSourceSlice` / `searcher.searchFile`), and `searchArchiveSlice` integration.
   - [`src/file_api.zig`](src/file_api.zig): Safe path sanitization, archive/compression detection, `archive::entry` virtual path protocol, and context preview builder (`ArchiveTree`, `decompress`, `encoding`).

@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import { copyTextToClipboard } from '$lib/utils';
   import Header from '$lib/components/Header.svelte';
+  import LoginView from '$lib/components/LoginView.svelte';
   import SearchBar from '$lib/components/SearchBar.svelte';
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
   import ResultList from '$lib/components/ResultList.svelte';
@@ -12,6 +13,7 @@
 
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let resizingInspector = $state(false);
+  let prevAuthState: typeof workbench.authState = 'checking';
 
   const isHomeView = $derived(
     !workbench.hasSearchedOnce &&
@@ -28,10 +30,18 @@
     const onMq = (e: MediaQueryListEvent) => (workbench.isCompact = e.matches);
     mq.addEventListener('change', onMq);
 
-    // Avoid popping the soft keyboard on touch devices at load.
-    if (!mq.matches) searchInputEl?.focus();
-
     return () => mq.removeEventListener('change', onMq);
+  });
+
+  $effect(() => {
+    const curAuth = workbench.authState;
+    const becameAuthenticated = curAuth === 'authenticated' && prevAuthState !== 'authenticated';
+    prevAuthState = curAuth;
+    if (becameAuthenticated && !workbench.isCompact && !workbench.isTouch) {
+      void tick().then(() => {
+        searchInputEl?.focus();
+      });
+    }
   });
 
   // Stacked navigation: opening the detail view pushes a history entry so the
@@ -83,6 +93,8 @@
   }
 
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (workbench.authState !== 'authenticated') return;
+
     // Alt + letter toggles (use e.code: on macOS Alt+letter yields special chars in e.key)
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
       if (e.code === 'KeyC') {
@@ -272,42 +284,59 @@
 />
 
 <div
-  class={`relative flex h-app w-screen flex-col overflow-hidden bg-background text-foreground ${
+  class={`relative flex h-app w-screen flex-col overflow-clip bg-background text-foreground ${
     resizingInspector ? 'select-none cursor-col-resize' : ''
   }`}
 >
-  <Header />
+  {#if workbench.authState === 'checking'}
+    <div class="flex flex-1 bg-background" aria-hidden="true"></div>
+  {:else if workbench.authState === 'locked' || workbench.authState === 'unlocking'}
+    <LoginView />
+  {:else}
+    <div
+      onanimationend={() => {
+        if (workbench.workspaceEnteredFromLogin) {
+          workbench.workspaceEnteredFromLogin = false;
+        }
+      }}
+      class={`flex flex-1 min-h-0 flex-col overflow-clip ${
+        workbench.workspaceEnteredFromLogin ? 'workspace-unlock-enter' : ''
+      }`}
+    >
+      <Header />
 
-  <div class="relative flex flex-1 min-h-0 overflow-hidden">
-    <main class="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
-      <SearchBar bind:inputEl={searchInputEl} hero={isHomeView} />
-      {#if !isHomeView}
-        <TelemetryBar />
-        <ResultList />
-      {/if}
-    </main>
+      <div class="relative flex flex-1 min-h-0 overflow-clip">
+        <main class="flex flex-1 flex-col min-w-0 min-h-0 overflow-clip">
+          <SearchBar bind:inputEl={searchInputEl} hero={isHomeView} />
+          {#if !isHomeView}
+            <TelemetryBar />
+            <ResultList />
+          {/if}
+        </main>
 
-    {#if !isHomeView && workbench.inspectedPath}
-      {#if workbench.isCompact}
-        {#if workbench.detailOpen}
-          <div class="detail-enter fixed inset-0 z-[45] bg-background">
+        {#if !isHomeView && workbench.inspectedPath}
+          {#if workbench.isCompact}
+            {#if workbench.detailOpen}
+              <div class="detail-enter fixed inset-0 z-[45] bg-background">
+                <InspectorPane />
+              </div>
+            {/if}
+          {:else if workbench.rightInspectorOpen}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              onpointerdown={startResizeInspector}
+              style="touch-action: none"
+              class="relative w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 z-20 before:absolute before:inset-y-0 before:-inset-x-1.5 [@media(any-pointer:coarse)]:before:-inset-x-3"
+              title={workbench.t.header.dragResizeInspector}
+            ></div>
             <InspectorPane />
-          </div>
+          {/if}
         {/if}
-      {:else if workbench.rightInspectorOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          onpointerdown={startResizeInspector}
-          style="touch-action: none"
-          class="relative w-[3px] -mr-[1px] shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/70 z-20 before:absolute before:inset-y-0 before:-inset-x-1.5 [@media(any-pointer:coarse)]:before:-inset-x-3"
-          title={workbench.t.header.dragResizeInspector}
-        ></div>
-        <InspectorPane />
-      {/if}
-    {/if}
 
-    <RightDrawer />
-  </div>
+        <RightDrawer />
+      </div>
 
-  <CommandPalette />
+      <CommandPalette />
+    </div>
+  {/if}
 </div>

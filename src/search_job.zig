@@ -64,6 +64,7 @@ pub const HitItem = struct {
     nextText: ?[]const u8 = null,
     replaced: ?[]const u8,
     isContext: bool,
+    byteOffset: ?u64 = null,
     spans: []const HitSpan,
 };
 
@@ -2644,6 +2645,7 @@ const JobRunner = struct {
                     .nextText = if (ci.nextText) |nt| (self.job_arena.dupe(u8, nt) catch null) else null,
                     .replaced = null,
                     .isContext = false,
+                    .byteOffset = ci.byteOffset,
                     .spans = spans,
                 };
                 per_task_buckets[task_idx].append(self.job_arena, .{
@@ -2859,6 +2861,7 @@ const JobRunner = struct {
                 .nextText = next_dup,
                 .replaced = r_dup,
                 .isContext = it.isContext,
+                .byteOffset = it.byteOffset,
                 .spans = spans_copy,
                 .raw_item_json = "",
             };
@@ -3474,6 +3477,7 @@ const JobRunner = struct {
                     .nextText = null,
                     .replaced = null,
                     .isContext = false,
+                    .byteOffset = null,
                     .spans = spans_list.items,
                 }) catch break;
 
@@ -4405,6 +4409,7 @@ const WorkerContext = struct {
                             .nextText = next_dup,
                             .replaced = rep_dup,
                             .isContext = it.isContext,
+                            .byteOffset = it.byteOffset,
                             .spans = spans_dup,
                         }) catch {
                             self.runner.collected_hits_overflow = true;
@@ -4713,6 +4718,11 @@ const FileSink = struct {
         else
             line.u16_column orelse line.column orelse 1;
 
+        const hit_byte_offset: ?u64 = if (!is_archive and !self.task.isDocker() and file_api.detectCompression(self.task.base_name) == null)
+            @as(u64, self.sub_start_offset) +| line.raw_offset
+        else
+            null;
+
         try self.worker.batch_items.append(self.worker.runner.gpa, .{
             .file = file_duped,
             .line = if (line.line_number > 0) line.line_number else 1,
@@ -4722,6 +4732,7 @@ const FileSink = struct {
             .nextText = null,
             .replaced = replaced_duped,
             .isContext = is_context,
+            .byteOffset = hit_byte_offset,
             .spans = spans_list.items,
         });
     }

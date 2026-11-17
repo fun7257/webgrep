@@ -2359,6 +2359,28 @@ pub fn buildContainerLinePreviewForResolvedJson(
     context_raw: u64,
     since_sec: ?u64,
 ) ![]u8 {
+    return buildContainerLineWindowForResolvedJson(
+        gpa,
+        arena,
+        io,
+        transport,
+        cid,
+        display_vpath,
+        .{ .line = target_line_raw, .context = context_raw },
+        since_sec,
+    );
+}
+
+pub fn buildContainerLineWindowForResolvedJson(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    transport: Transport,
+    cid: []const u8,
+    display_vpath: []const u8,
+    query: file_api.FileWindowQuery,
+    since_sec: ?u64,
+) ![]u8 {
     var log_reader = DockerLogReader.create(gpa, io, transport, cid, .{
         .since_sec = since_sec,
     }) catch {
@@ -2366,10 +2388,11 @@ pub fn buildContainerLinePreviewForResolvedJson(
     };
     defer log_reader.destroy();
 
-    const target_line = if (target_line_raw == 0) 1 else target_line_raw;
-    const context = @min(context_raw, 500);
-    const win_start = if (target_line > context) target_line - context else 1;
-    const win_end = target_line +| context;
+    const bounds = query.resolveBounds();
+    const win_start = bounds.start_line;
+    const win_end = bounds.end_line;
+    const explicit_range = (query.start_line != null and query.end_line != null);
+    const stop_limit = if (explicit_range) win_end +| 1 else win_end +| 1000;
     const max_preview_line_bytes: usize = 512 * 1024;
 
     var lines_out: std.ArrayList(file_api.FileLine) = .empty;
@@ -2418,9 +2441,9 @@ pub fn buildContainerLinePreviewForResolvedJson(
                 cur_line_buf.clearRetainingCapacity();
                 pos = nl + 1;
 
-                // Stop streaming once we pass the requested preview window by >= 1000 lines on huge streams
-                // (applies to both `/api/file?context=0` and `/api/context?context=N`).
-                if (line_no >= win_end +| 1000) {
+                // Stop streaming once past the requested window (`win_end + 1` for explicit ranges,
+                // or `win_end + 1000` for symmetric context queries).
+                if (line_no >= stop_limit) {
                     eof_reached = false;
                     has_unterminated_tail = false;
                     break :read_loop;
@@ -2459,9 +2482,9 @@ pub fn buildContainerLinePreviewForResolvedJson(
     return file_api.stringifyAlloc(arena, file_api.FileResponse{
         .path = display_vpath,
         .startLine = actual_start,
-        .totalLines = line_no,
+        .totalLines = if (explicit_range and !eof_reached) 0 else line_no,
         .binary = false,
-        .eof = eof_reached or (win_end >= line_no),
+        .eof = eof_reached or (!explicit_range and win_end >= line_no),
         .lines = lines_out.items,
     });
 }

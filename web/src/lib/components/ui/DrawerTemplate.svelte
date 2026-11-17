@@ -9,7 +9,10 @@
     title: string;
     badge?: string;
     headerActions?: Snippet;
+    footer?: Snippet;
     children: Snippet;
+    bodyEl?: HTMLDivElement | null;
+    bodyClass?: string;
     onClose?: () => void;
   }
 
@@ -18,7 +21,10 @@
     title,
     badge = '',
     headerActions,
+    footer,
     children,
+    bodyEl = $bindable(null),
+    bodyClass = 'px-4 md:px-5 py-4 text-[13px]',
     onClose = () => workbench.closeRightDrawer(),
   }: Props = $props();
 </script>
@@ -53,7 +59,12 @@
     </div>
   </div>
 
-  <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 md:px-5 py-4 text-[13px]">
+  <div
+    bind:this={bodyEl}
+    class={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${bodyClass}`}
+  >
     {@render children()}
   </div>
+
+  {@render footer?.()}
 </div>

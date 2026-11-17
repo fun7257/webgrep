@@ -190,14 +190,6 @@
     }
   }
 
-  function soloSource(srcId: string) {
-    workbench.setScopeSources([srcId], []);
-    onClose();
-    if (!workbench.isCompact && !workbench.isTouch) {
-      onFocusMainInput?.();
-    }
-  }
-
   function checkAllMatched() {
     if (fuzzyResults.length === 0) return;
     const matchedIds = new Set(fuzzyResults.map((r) => r.source.id));
@@ -490,11 +482,23 @@
           {@const subtitle = getSourceSubtitle(src)}
           {@const invalid = !src.exists}
 
-          <div
-            role="presentation"
+          <button
+            type="button"
+            role="option"
             data-picker-idx={idx}
+            aria-selected={checked}
+            onmousedown={(e) => e.preventDefault()}
+            onpointerdown={(e) =>
+              handleOptionPointerDown(`src:${src.id}`, e, () => {
+                toggleItem(src.id, e.altKey);
+              })}
+            onclick={(e) =>
+              handleOptionClick(`src:${src.id}`, e, () => {
+                toggleItem(src.id, e.altKey);
+              })}
             onmouseenter={() => (focusedIdx = idx)}
-            class={`group flex items-center gap-1 rounded-lg pr-1.5 ${
+            title={s.cardClickTitle(src.name)}
+            class={`touch-target group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer ${
               checked
                 ? 'bg-primary/[0.08] hover:bg-primary/[0.12]'
                 : excluded
@@ -506,93 +510,57 @@
               !src.enabled && !checked ? 'opacity-65' : ''
             }`}
           >
-            <button
-              type="button"
-              role="option"
-              aria-selected={checked}
-              onmousedown={(e) => e.preventDefault()}
-              onpointerdown={(e) =>
-                handleOptionPointerDown(`src:${src.id}`, e, () => {
-                  toggleItem(src.id, e.altKey);
-                })}
-              onclick={(e) =>
-                handleOptionClick(`src:${src.id}`, e, () => {
-                  toggleItem(src.id, e.altKey);
-                })}
-              class="touch-target flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-2.5 pr-1 text-left cursor-pointer"
+            <span
+              aria-hidden="true"
+              class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
+                checked
+                  ? 'border-primary bg-primary text-primary-foreground'
+                  : excluded
+                    ? 'border-status bg-status/15 text-status'
+                    : 'border-border bg-background/75 group-hover:border-muted-foreground/60'
+              }`}
             >
-              <span
-                aria-hidden="true"
-                class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
-                  checked
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : excluded
-                      ? 'border-status bg-status/15 text-status'
-                      : 'border-border bg-background/75 group-hover:border-muted-foreground/60'
-                }`}
-              >
-                {#if checked}
-                  <Check class="h-3 w-3 stroke-[2.75]" />
-                {:else if excluded}
-                  <Minus class="h-3 w-3 stroke-[2.5]" />
-                {/if}
-              </span>
-
-              {#if invalid}
-                <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-status" />
-              {:else}
-                <Icon
-                  class={`h-3.5 w-3.5 shrink-0 ${
-                    checked
-                      ? 'text-primary'
-                      : excluded
-                        ? 'text-status'
-                        : 'text-muted-foreground'
-                  }`}
-                />
+              {#if checked}
+                <Check class="h-3 w-3 stroke-[2.75]" />
+              {:else if excluded}
+                <Minus class="h-3 w-3 stroke-[2.5]" />
               {/if}
+            </span>
 
-              <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-1.5 min-w-0">
-                  <span
-                    class={`truncate font-mono text-[12.5px] font-medium ${
-                      excluded ? 'line-through text-status' : 'text-foreground'
-                    }`}
-                  >
-                    {@render renderHighlighted(src.name, entry.nameRanges)}
-                  </span>
-                  {#if !src.enabled}
-                    <span class="shrink-0 rounded bg-secondary px-1 py-0.2 text-[10px] text-muted-foreground">
-                      {ui.disabled}
-                    </span>
-                  {/if}
-                </div>
-                <div class="truncate font-mono text-[11px] text-muted-foreground/75">
-                  {@render renderHighlighted(subtitle, entry.subtitleRanges)}
-                </div>
-              </div>
-            </button>
-
-            {#if workbench.sources.length > 1}
-              <button
-                type="button"
-                onmousedown={(e) => e.preventDefault()}
-                onclick={(e) => {
-                  e.stopPropagation();
-                  soloSource(src.id);
-                }}
-                title={s.soloTitle(src.name)}
-                aria-label={s.soloTitle(src.name)}
-                class={`touch-target shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-background/80 hover:text-foreground active:bg-secondary cursor-pointer ${
-                  isFocused
-                    ? 'opacity-100'
-                    : 'opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100'
+            {#if invalid}
+              <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-status" />
+            {:else}
+              <Icon
+                class={`h-3.5 w-3.5 shrink-0 ${
+                  checked
+                    ? 'text-primary'
+                    : excluded
+                      ? 'text-status'
+                      : 'text-muted-foreground'
                 }`}
-              >
-                {s.soloBtn}
-              </button>
+              />
             {/if}
-          </div>
+
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span
+                  class={`truncate font-mono text-[12.5px] font-medium ${
+                    excluded ? 'line-through text-status' : 'text-foreground'
+                  }`}
+                >
+                  {@render renderHighlighted(src.name, entry.nameRanges)}
+                </span>
+                {#if !src.enabled}
+                  <span class="shrink-0 rounded bg-secondary px-1 py-0.2 text-[10px] text-muted-foreground">
+                    {ui.disabled}
+                  </span>
+                {/if}
+              </div>
+              <div class="truncate font-mono text-[11px] text-muted-foreground/75">
+                {@render renderHighlighted(subtitle, entry.subtitleRanges)}
+              </div>
+            </div>
+          </button>
         {/each}
       {/if}
     {/if}

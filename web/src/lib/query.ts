@@ -273,6 +273,25 @@ export function compileSearchQuery(
   };
 }
 
+export interface HistoryScopeFlags {
+  hasSources: boolean;
+  hasTime: boolean;
+}
+
+/**
+ * Returns value-free scope flags indicating whether a history entry restricts
+ * data sources and/or time range, without exposing specific names or values.
+ */
+export function getHistoryScopeFlags(
+  scope: Pick<ScopeFilter, 'sources' | 'excludedSources' | 'timePreset'> | null | undefined
+): HistoryScopeFlags {
+  if (!scope) return { hasSources: false, hasTime: false };
+  const hasSources =
+    scope.sources.length > 0 || (scope.excludedSources?.length ?? 0) > 0;
+  const hasTime = scope.timePreset.trim().length > 0;
+  return { hasSources, hasTime };
+}
+
 export function formatHistoryLabel(
   steps: readonly QueryStep[],
   draft: QueryStep | null

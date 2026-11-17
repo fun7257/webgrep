@@ -1123,6 +1123,23 @@ pub const SourceRegistry = struct {
         context_raw: u64,
         since_sec: ?u64,
     ) ![]u8 {
+        return self.buildLinePreviewWindowJson(
+            arena,
+            io,
+            virtual_path_raw,
+            .{ .line = target_line_raw, .context = context_raw },
+            since_sec,
+        );
+    }
+
+    pub fn buildLinePreviewWindowJson(
+        self: *SourceRegistry,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        virtual_path_raw: []const u8,
+        query: file_api.FileWindowQuery,
+        since_sec: ?u64,
+    ) ![]u8 {
         var trimmed = std.mem.trim(u8, virtual_path_raw, " \t\r\n");
         while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '/') {
             trimmed = trimmed[0 .. trimmed.len - 1];
@@ -1280,15 +1297,14 @@ pub const SourceRegistry = struct {
             if (self.listDockerCachedAlloc(arena, io, src_path)) |listed| {
                 for (listed.containers) |c| {
                     if (docker_logs.containerMatchesTargetFilter(c, clean_ref)) {
-                        if (docker_logs.buildContainerLinePreviewForResolvedJson(
+                        if (docker_logs.buildContainerLineWindowForResolvedJson(
                             self.gpa,
                             arena,
                             io,
                             listed.transport,
                             c.id,
                             display_vpath,
-                            target_line_raw,
-                            context_raw,
+                            query,
                             since_sec,
                         )) |res_json| {
                             return res_json;
@@ -1305,15 +1321,14 @@ pub const SourceRegistry = struct {
             const fresh_listed = self.listDockerFreshForSearchAlloc(arena, io, src_path) catch return error.FileNotFound;
             for (fresh_listed.containers) |c| {
                 if (docker_logs.containerMatchesTargetFilter(c, clean_ref)) {
-                    return docker_logs.buildContainerLinePreviewForResolvedJson(
+                    return docker_logs.buildContainerLineWindowForResolvedJson(
                         self.gpa,
                         arena,
                         io,
                         fresh_listed.transport,
                         c.id,
                         display_vpath,
-                        target_line_raw,
-                        context_raw,
+                        query,
                         since_sec,
                     );
                 }
@@ -1329,14 +1344,13 @@ pub const SourceRegistry = struct {
             if (std.Io.Dir.cwd().openDir(io, src_path, .{})) |source_dir_val| {
                 var source_dir = source_dir_val;
                 defer source_dir.close(io);
-                return file_api.buildFileJsonWithDisplayPath(
+                return file_api.buildFileWindowJsonWithDisplayPath(
                     arena,
                     io,
                     source_dir,
                     rel_target,
                     display_vpath,
-                    target_line_raw,
-                    context_raw,
+                    query,
                 );
             } else |_| {}
         }
@@ -1354,14 +1368,13 @@ pub const SourceRegistry = struct {
         var parent_dir = try std.Io.Dir.cwd().openDir(io, parent_path, .{});
         defer parent_dir.close(io);
 
-        return file_api.buildFileJsonWithDisplayPath(
+        return file_api.buildFileWindowJsonWithDisplayPath(
             arena,
             io,
             parent_dir,
             file_target,
             display_vpath,
-            target_line_raw,
-            context_raw,
+            query,
         );
     }
 

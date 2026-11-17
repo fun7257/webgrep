@@ -1,9 +1,17 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import { Database, Keyboard, SlidersHorizontal, Wifi, WifiOff } from 'lucide-svelte';
+  import {
+    Blocks,
+    Database,
+    Keyboard,
+    Lock,
+    SlidersHorizontal,
+    Wifi,
+    WifiOff,
+  } from 'lucide-svelte';
 
-  type HeaderTarget = 'sources' | 'shortcuts' | 'settings';
+  type HeaderTarget = 'sources' | 'mcp' | 'shortcuts' | 'settings';
 
   const hasMissingSource = $derived(
     workbench.sourcesLoaded &&
@@ -22,6 +30,9 @@
     if (target === 'sources') {
       if (workbench.sourcesDrawerOpen) workbench.closeRightDrawer();
       else workbench.openSourcesDrawer(false);
+    } else if (target === 'mcp') {
+      if (workbench.mcpDrawerOpen) workbench.closeRightDrawer();
+      else workbench.openMcpDrawer();
     } else if (target === 'shortcuts') {
       if (workbench.shortcutsDrawerOpen) workbench.closeRightDrawer();
       else workbench.openShortcutsDrawer();
@@ -72,7 +83,7 @@
       </button>
     {/if}
 
-    <!-- Right: standalone top-level menus (数据源 · 快捷键说明 · 设置) -->
+    <!-- Right: standalone top-level menus (数据源 · MCP · 快捷键说明 · 设置) -->
     <div class="flex items-center gap-1">
       <button
         type="button"
@@ -86,6 +97,23 @@
         <Database class="h-3.5 w-3.5" />
         {#if hasMissingSource}
           <span class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-status"></span>
+        {/if}
+      </button>
+
+      <button
+        type="button"
+        title={workbench.t.header.mcpTitle}
+        aria-label={workbench.t.header.mcpBtn}
+        aria-expanded={workbench.mcpDrawerOpen}
+        onpointerdown={(e) => onBtnPointerDown('mcp', e)}
+        onclick={(e) => onBtnClick('mcp', e)}
+        class={`${iconBtn} ${workbench.mcpDrawerOpen ? activeBtn : idleBtn}`}
+      >
+        <Blocks class="h-3.5 w-3.5" />
+        {#if workbench.mcpLoaded && workbench.mcpEnabled}
+          <span
+            class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary/85"
+          ></span>
         {/if}
       </button>
 
@@ -112,6 +140,18 @@
       >
         <SlidersHorizontal class="h-3.5 w-3.5" />
       </button>
+
+      {#if workbench.authRequired}
+        <button
+          type="button"
+          title={workbench.t.auth.lockTitle}
+          aria-label={workbench.t.auth.lockBtn}
+          onclick={() => void workbench.logout()}
+          class={`${iconBtn} ${idleBtn}`}
+        >
+          <Lock class="h-3.5 w-3.5" />
+        </button>
+      {/if}
     </div>
   </div>
 </header>

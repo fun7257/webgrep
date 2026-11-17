@@ -1,10 +1,17 @@
+import { flushSync } from 'svelte';
 import type {
+  AuthStatusResponse,
   DataSourceItem,
   DirSuggestEntry,
   DirSuggestResponse,
   FileHitGroup,
+  FileLine,
   FileResponse,
   HitItem,
+  McpCallLogItem,
+  McpCapabilityItem,
+  McpStateResponse,
+  McpStats,
   MetaResponse,
   QueryStep,
   ScopeFilter,
@@ -20,7 +27,24 @@ import type {
 } from './types';
 import { messages, type Locale } from './i18n';
 
-export type DrawerPanelId = 'sources' | 'shortcuts' | 'settings';
+export type DrawerPanelId = 'sources' | 'mcp' | 'shortcuts' | 'settings' | 'context';
+import {
+  DEFAULT_MCP_MAX_LOGS,
+  clampMcpMaxLogs,
+} from './mcp';
+import {
+  DEFAULT_CONTEXT_AUTO_LOAD_PACE,
+  DEFAULT_CONTEXT_STEP_LINES,
+  DEFAULT_INITIAL_CONTEXT_LINES,
+  clampContextLineSetting,
+  computeDownwardFetchWindow,
+  computeInitialFetchWindow,
+  computeMergedContextBounds,
+  computeUpwardFetchWindow,
+  mergeContextLines,
+  normalizeContextAutoLoadPace,
+  type ContextAutoLoadPace,
+} from './context-window';
 import {
   buildQueryCacheKeys,
   compileSearchQuery,
@@ -44,6 +68,13 @@ import {
   type FrameProfile,
 } from './frame';
 import type { ResultFix } from './suggest';
+import {
+  buildShareReplayUrl,
+  extractShareReplayFromUrl,
+  resolvePinnedShareTime,
+  stripShareParamFromUrl,
+  type ShareReplayState,
+} from './share';
 
 const HISTORY_STORAGE_KEY = 'webgrep.searchHistory.v2';
 const THEME_STORAGE_KEY = 'webgrep.theme.v1';
@@ -99,9 +130,35 @@ function isPossiblyTruncatedHitText(text: string): boolean {
 export interface ExecuteSearchOptions {
   forceRefresh?: boolean;
   recordInHistory?: boolean;
+  replayTimeRange?: { startMs: number; endMs: number };
+  keepShareUrl?: boolean;
+}
+
+interface ExecutedQuerySnapshot {
+  steps: QueryStep[];
+  draft: QueryStep | null;
+  sources: string[];
+  excludedSources: string[];
+  timePreset: TimePreset;
+  timeStartMs: number;
+  timeEndMs: number;
+  executedAtMs: number;
+  hidden: boolean;
+  respectIgnore: boolean;
+  maxResults: number;
 }
 
 class WorkbenchState {
+  // Authentication & Session Gate
+  authState = $state<'checking' | 'locked' | 'unlocking' | 'authenticated'>('checking');
+  authRequired = $state<boolean>(false);
+  mcpTokenRequired = $state<boolean>(false);
+  authSubmitting = $state<boolean>(false);
+  authError = $state<string | null>(null);
+  authShakeTick = $state<number>(0);
+  workspaceEnteredFromLogin = $state<boolean>(false);
+  private unlockTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Workspace metadata
   meta = $state<MetaResponse>({
     rootLabel: 'webgrep',
@@ -118,6 +175,7 @@ class WorkbenchState {
   private wsDegradedTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private pendingSearchOnOpen = false;
+  private pendingReplayTimeRange: { startMs: number; endMs: number } | undefined = undefined;
   private isUnloading = false;
   private lifecycleBound = false;
   private stopFrameProbe: (() => void) | null = null;
@@ -150,6 +208,9 @@ class WorkbenchState {
   private cancelledSearchId = -1;
   private lastExecutedKey = '';
   private lastExecutedHadDraft = false;
+  private lastExecutedSnapshot: ExecutedQuerySnapshot | null = null;
+  private pendingShareReplay: ShareReplayState | null = null;
+  private pendingReplayTarget: { path: string; line: number } | null = null;
   private displayedTimeStartMs = 0;
   errorMessage = $state<string | null>(null);
 
@@ -193,9 +254,12 @@ class WorkbenchState {
   rightDrawerOpen = $derived<boolean>(this.drawerPanel !== null);
   settingsOpen = $derived<boolean>(this.drawerPanel === 'settings');
   sourcesDrawerOpen = $derived<boolean>(this.drawerPanel === 'sources');
+  mcpDrawerOpen = $derived<boolean>(this.drawerPanel === 'mcp');
   shortcutsDrawerOpen = $derived<boolean>(this.drawerPanel === 'shortcuts');
+  contextDrawerOpen = $derived<boolean>(this.drawerPanel === 'context');
 
   openSourcesDrawer(expandAdd = false) {
+    this.abortContextFetch();
     this.paletteOpen = false;
     this.sourcePickerOpen = false;
     this.timePickerOpen = false;
@@ -203,7 +267,18 @@ class WorkbenchState {
     this.drawerPanel = 'sources';
   }
 
+  openMcpDrawer() {
+    this.abortContextFetch();
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.sourceAddOpen = false;
+    this.drawerPanel = 'mcp';
+    void this.fetchMcpState();
+  }
+
   openShortcutsDrawer() {
+    this.abortContextFetch();
     this.paletteOpen = false;
     this.sourcePickerOpen = false;
     this.timePickerOpen = false;
@@ -212,6 +287,7 @@ class WorkbenchState {
   }
 
   openSettingsDrawer() {
+    this.abortContextFetch();
     this.paletteOpen = false;
     this.sourcePickerOpen = false;
     this.timePickerOpen = false;
@@ -262,6 +338,7 @@ class WorkbenchState {
   }
 
   closeRightDrawer() {
+    this.abortContextFetch();
     this.sourceAddOpen = false;
     this.drawerPanel = null;
   }
@@ -308,6 +385,24 @@ class WorkbenchState {
   private inspectAbort: AbortController | null = null;
   private inspectorRaf: number | null = null;
 
+  // Slide-out Surrounding Records Drawer state (incremental above/below pagination)
+  contextPath = $state<string | null>(null);
+  contextAnchorLine = $state<number>(1);
+  contextLines = $state.raw<FileLine[]>([]);
+  contextTotalLines = $state<number>(0);
+  contextEof = $state<boolean>(false);
+  contextBinary = $state<boolean>(false);
+  contextLoadingInitial = $state<boolean>(false);
+  contextLoadingBefore = $state<boolean>(false);
+  contextLoadingAfter = $state<boolean>(false);
+  contextError = $state<string | null>(null);
+  contextCenterTick = $state<number>(0);
+  contextPrettyMode = $state<boolean>(false);
+  private contextSeq = 0;
+  private contextAbort: AbortController | null = null;
+  private contextFirstByte: number | null = null;
+  private contextNextByte: number | null = null;
+
   // UI Layout, Theme & Client Preferences
   locale = $state<Locale>('zh');
   darkMode = $state<boolean>(true);
@@ -323,8 +418,22 @@ class WorkbenchState {
   codeFontSize = $state<number>(13.5);
   wordWrap = $state<boolean>(true);
   previewLines = $state<number>(3);
+  contextInitialLines = $state<number>(DEFAULT_INITIAL_CONTEXT_LINES);
+  contextStepLines = $state<number>(DEFAULT_CONTEXT_STEP_LINES);
+  contextAutoLoadPace = $state<ContextAutoLoadPace>(DEFAULT_CONTEXT_AUTO_LOAD_PACE);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
   searchHistory = $state<SearchHistoryEntry[]>([]);
+
+  // MCP Service Status, Capabilities & Real-Time Call Logs
+  mcpEnabled = $state<boolean>(true);
+  mcpMaxLogs = $state<number>(DEFAULT_MCP_MAX_LOGS);
+  mcpEndpointPath = $state<string>('/mcp');
+  mcpProtocolVersion = $state<string>('2025-03-26');
+  mcpStats = $state<McpStats>({ totalCalls: 0, errorCalls: 0, lastCallMs: 0 });
+  mcpCapabilities = $state.raw<McpCapabilityItem[]>([]);
+  mcpLogs = $state.raw<McpCallLogItem[]>([]);
+  mcpLoaded = $state<boolean>(false);
+  private mcpConfigTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Derived Query Signals
   t = $derived(messages[this.locale]);
@@ -404,7 +513,9 @@ class WorkbenchState {
     this.loadTheme();
     this.loadSettings();
     this.loadHistory();
-    this.loadCachedSources();
+    if (typeof window !== 'undefined' && this.pendingShareReplay === null) {
+      this.pendingShareReplay = extractShareReplayFromUrl(window.location.href);
+    }
     if (typeof window !== 'undefined' && !this.lifecycleBound) {
       this.lifecycleBound = true;
       applyFrameProfileCssVars(this.frameProfile);
@@ -420,6 +531,14 @@ class WorkbenchState {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = null;
         }
+        if (this.mcpConfigTimer) {
+          clearTimeout(this.mcpConfigTimer);
+          this.mcpConfigTimer = null;
+        }
+        if (this.unlockTimer) {
+          clearTimeout(this.unlockTimer);
+          this.unlockTimer = null;
+        }
       });
       window.addEventListener('pagehide', (e) => {
         if (!e.persisted) {
@@ -429,15 +548,339 @@ class WorkbenchState {
       });
       window.addEventListener('pageshow', (e) => {
         this.isUnloading = false;
-        if (e.persisted) {
+        if (e.persisted && (!this.authRequired || this.authState === 'authenticated')) {
           this.connectWebSocket();
           this.fetchSources();
+          this.fetchMcpState();
         }
       });
     }
-    this.fetchMeta();
-    this.fetchSources();
+    void this.bootstrapAuth();
+  }
+
+  private async apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const res = await fetch(input, { credentials: 'same-origin', ...init });
+    if (res.status === 401 && this.authRequired) {
+      this.handleSessionExpired();
+    }
+    return res;
+  }
+
+  private startAuthenticatedSession() {
+    this.loadCachedSources();
+    void this.fetchMeta();
+    void this.fetchMcpState();
     this.connectWebSocket();
+    const replay = this.pendingShareReplay;
+    this.pendingShareReplay = null;
+    if (replay) {
+      void this.fetchSources().then(() => {
+        this.applyShareReplay(replay);
+      });
+    } else {
+      void this.fetchSources();
+    }
+  }
+
+  private clearShareUrlParamIfPresent() {
+    if (typeof window === 'undefined') return;
+    try {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has('share')) return;
+      const cleaned = stripShareParamFromUrl(window.location.href);
+      window.history.replaceState(window.history.state, '', cleaned);
+    } catch {
+      // ignore history errors
+    }
+  }
+
+  private toPortableSourceRefs(ids: readonly string[]): string[] {
+    return ids.map((id) => {
+      const src = this.sourceById.get(id);
+      if (!src) return id;
+      const lowerName = src.name.toLowerCase();
+      const sameNameCount = this.sources.reduce(
+        (acc, item) => acc + (item.name.toLowerCase() === lowerName ? 1 : 0),
+        0
+      );
+      return sameNameCount === 1 ? src.name : id;
+    });
+  }
+
+  buildPreviewShareUrl(baseHref: string): string {
+    const snap =
+      this.hasSearchedOnce && this.lastExecutedSnapshot
+        ? this.lastExecutedSnapshot
+        : {
+            steps: this.steps.map(normalizeStep).filter((s) => s.text.length > 0),
+            draft: this.draftStep,
+            sources: [...this.scope.sources],
+            excludedSources: [...(this.scope.excludedSources ?? [])],
+            timePreset: this.scope.timePreset,
+            timeStartMs: this.displayedTimeStartMs,
+            timeEndMs: 0,
+            executedAtMs: Date.now(),
+            hidden: this.hidden,
+            respectIgnore: this.respectIgnore,
+            maxResults: this.maxResults,
+          };
+
+    const pinned = resolvePinnedShareTime(
+      snap.timePreset,
+      snap.timeStartMs,
+      snap.timeEndMs,
+      snap.executedAtMs,
+      this.getEffectiveTimeBasisSummary().mtimeCount > 0
+    );
+
+    const previewHit = this.inspectedHit ?? this.activeHit;
+    const anchorPath = this.inspectedPath;
+    const anchorLine =
+      anchorPath && previewHit && previewHit.file === anchorPath
+        ? previewHit.line
+        : this.inspectedLine;
+    const matchingHit =
+      anchorPath && previewHit && previewHit.file === anchorPath && previewHit.line === anchorLine
+        ? previewHit
+        : anchorPath
+          ? this.flatHits.find((h) => h.file === anchorPath && h.line === anchorLine) ?? null
+          : null;
+    const anchorByte =
+      matchingHit && typeof matchingHit.byteOffset === 'number'
+        ? matchingHit.byteOffset
+        : null;
+
+    return buildShareReplayUrl(baseHref, {
+      steps: snap.steps.map((s) => createQueryStep(s.text, s)),
+      draft: snap.draft ? createQueryStep(snap.draft.text, snap.draft) : null,
+      sources: this.toPortableSourceRefs(snap.sources),
+      excludedSources: this.toPortableSourceRefs(snap.excludedSources),
+      timePreset: pinned.timePreset,
+      timeStartMs: pinned.timeStartMs,
+      timeEndMs: pinned.timeEndMs,
+      hidden: snap.hidden,
+      respectIgnore: snap.respectIgnore,
+      maxResults: snap.maxResults,
+      contextPath: anchorPath,
+      contextAnchorLine: anchorLine,
+      contextAnchorByte: anchorByte,
+      contextPretty: this.contextPrettyMode,
+      inspectorRaw: this.inspectorTab === 'raw',
+      openContext: this.contextDrawerOpen,
+    });
+  }
+
+  applyShareReplay(replay: ShareReplayState) {
+    this.steps = replay.steps.map((s) => createQueryStep(s.text, s));
+    if (replay.draft) {
+      this.pattern = replay.draft.text;
+      this.caseSensitive = replay.draft.caseSensitive;
+      this.wholeWord = replay.draft.wholeWord;
+      this.isRegex = replay.draft.isRegex;
+      this.draftExclude = replay.draft.exclude;
+    } else {
+      this.pattern = '';
+      this.caseSensitive = false;
+      this.wholeWord = false;
+      this.isRegex = false;
+      this.draftExclude = false;
+    }
+
+    const resolvedSources = replay.sources.map((s) => this.resolveSourceIdOrName(s));
+    const resolvedExcluded = replay.excludedSources.map((s) => this.resolveSourceIdOrName(s));
+    this.scope = {
+      sources: resolvedSources,
+      excludedSources: resolvedExcluded,
+      types: [],
+      timePreset: replay.timePreset,
+    };
+
+    this.hidden = replay.hidden;
+    this.respectIgnore = replay.respectIgnore;
+    this.maxResults = replay.maxResults;
+    this.contextPrettyMode = replay.contextPretty;
+    this.inspectorTab = replay.inspectorRaw ? 'raw' : 'structured';
+    this.saveSettings();
+
+    this.pendingReplayTarget = replay.contextPath
+      ? { path: replay.contextPath, line: replay.contextAnchorLine }
+      : null;
+
+    const replayTimeRange =
+      replay.timeStartMs > 0 || replay.timeEndMs > 0
+        ? { startMs: replay.timeStartMs, endMs: replay.timeEndMs }
+        : undefined;
+
+    if (replay.contextPath) {
+      this.displayedTimeStartMs = replay.timeStartMs;
+      this.rightInspectorOpen = true;
+      if (this.isCompact) {
+        this.detailOpen = true;
+      }
+      void this.inspectFileAtLine(
+        replay.contextPath,
+        replay.contextAnchorLine,
+        false,
+        replay.contextAnchorByte
+      );
+      if (replay.openContext) {
+        void this.openContextDrawer(
+          replay.contextPath,
+          replay.contextAnchorLine,
+          replay.contextAnchorByte
+        );
+      }
+    }
+
+    this.executeSearch({
+      forceRefresh: false,
+      recordInHistory: true,
+      keepShareUrl: true,
+      replayTimeRange,
+    });
+  }
+
+  private closeSocketForLock() {
+    this.clearWsDegradedTimer();
+    this.wsDegraded = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const sock = this.ws;
+    this.ws = null;
+    if (sock) {
+      try {
+        sock.onclose = null;
+        sock.close();
+      } catch {
+        // ignore close failure
+      }
+    }
+  }
+
+  private handleSessionExpired() {
+    if (this.authState === 'locked' || this.authState === 'checking') return;
+    if (this.unlockTimer) {
+      clearTimeout(this.unlockTimer);
+      this.unlockTimer = null;
+    }
+    this.closeRightDrawer();
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.clearSearch();
+    this.closeSocketForLock();
+    this.invalidateCaches();
+    this.sources = [];
+    this.sourcesLoaded = false;
+    this.authError = null;
+    this.workspaceEnteredFromLogin = false;
+    this.authState = 'locked';
+  }
+
+  async bootstrapAuth() {
+    try {
+      const res = await fetch('/api/auth/status', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (res.ok) {
+        const data = (await res.json()) as Partial<AuthStatusResponse>;
+        this.authRequired = Boolean(data.authRequired);
+        this.mcpTokenRequired = Boolean(data.mcpTokenRequired);
+        if (!this.authRequired || data.authenticated) {
+          this.authState = 'authenticated';
+          this.startAuthenticatedSession();
+          return;
+        }
+        this.authError = null;
+        this.authState = 'locked';
+        return;
+      }
+    } catch {
+      // Fallback when auth endpoint is unavailable
+    }
+    this.authState = 'authenticated';
+    this.startAuthenticatedSession();
+  }
+
+  async submitLogin(password: string): Promise<boolean> {
+    if (!password || this.authSubmitting) return false;
+    this.authSubmitting = true;
+    this.authError = null;
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.status === 401 || !res.ok) {
+        this.authError = res.status === 401 ? this.t.auth.invalidPassword : this.t.auth.networkError;
+        this.authShakeTick += 1;
+        this.authSubmitting = false;
+        return false;
+      }
+      const data = (await res.json().catch(() => ({}))) as Partial<AuthStatusResponse>;
+      if (typeof data.mcpTokenRequired === 'boolean') {
+        this.mcpTokenRequired = data.mcpTokenRequired;
+      }
+      this.authRequired = true;
+      this.authSubmitting = false;
+      this.workspaceEnteredFromLogin = true;
+      this.startAuthenticatedSession();
+
+      const reduceMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduceMotion) {
+        this.authState = 'authenticated';
+      } else {
+        this.authState = 'unlocking';
+        if (this.unlockTimer) clearTimeout(this.unlockTimer);
+        this.unlockTimer = setTimeout(() => {
+          this.unlockTimer = null;
+          if (this.authState === 'unlocking') {
+            this.authState = 'authenticated';
+          }
+        }, 190);
+      }
+      return true;
+    } catch {
+      this.authError = this.t.auth.networkError;
+      this.authShakeTick += 1;
+      this.authSubmitting = false;
+      return false;
+    }
+  }
+
+  async logout() {
+    if (!this.authRequired) return;
+    if (this.unlockTimer) {
+      clearTimeout(this.unlockTimer);
+      this.unlockTimer = null;
+    }
+    this.closeRightDrawer();
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.clearSearch();
+    this.closeSocketForLock();
+    this.invalidateCaches();
+    this.sources = [];
+    this.sourcesLoaded = false;
+    this.authError = null;
+    this.workspaceEnteredFromLogin = false;
+    this.authState = 'locked';
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch {
+      // ignore network failure on logout
+    }
   }
 
   private invalidateCaches() {
@@ -488,6 +931,22 @@ class WorkbenchState {
       if (typeof s.previewLines === 'number' && Number.isFinite(s.previewLines)) {
         this.previewLines = Math.max(1, Math.min(6, Math.round(s.previewLines)));
       }
+      if (typeof s.contextInitialLines === 'number') {
+        this.contextInitialLines = clampContextLineSetting(
+          s.contextInitialLines,
+          DEFAULT_INITIAL_CONTEXT_LINES
+        );
+      }
+      if (typeof s.contextStepLines === 'number') {
+        this.contextStepLines = clampContextLineSetting(
+          s.contextStepLines,
+          DEFAULT_CONTEXT_STEP_LINES
+        );
+      }
+      this.contextAutoLoadPace = normalizeContextAutoLoadPace(
+        s.contextAutoLoadPace,
+        DEFAULT_CONTEXT_AUTO_LOAD_PACE
+      );
       if (typeof s.maxResults === 'number' && Number.isFinite(s.maxResults)) {
         this.maxResults = Math.max(1, Math.min(500000, Math.round(s.maxResults)));
       }
@@ -500,6 +959,9 @@ class WorkbenchState {
       }
       if (s.locale === 'zh' || s.locale === 'en') {
         this.locale = s.locale;
+      }
+      if (typeof s.mcpMaxLogs === 'number') {
+        this.mcpMaxLogs = clampMcpMaxLogs(s.mcpMaxLogs, DEFAULT_MCP_MAX_LOGS);
       }
       if (typeof s.tenant === 'string' && s.tenant.trim().length > 0) {
         this.tenant = s.tenant.trim();
@@ -540,6 +1002,10 @@ class WorkbenchState {
           respectIgnore: this.respectIgnore,
           hidden: this.hidden,
           previewLines: this.previewLines,
+          contextInitialLines: this.contextInitialLines,
+          contextStepLines: this.contextStepLines,
+          contextAutoLoadPace: this.contextAutoLoadPace,
+          mcpMaxLogs: this.mcpMaxLogs,
           maxResults: this.maxResults,
           codeFontSize: this.codeFontSize,
           wordWrap: this.wordWrap,
@@ -555,6 +1021,9 @@ class WorkbenchState {
     this.respectIgnore = false;
     this.hidden = false;
     this.previewLines = 3;
+    this.contextInitialLines = DEFAULT_INITIAL_CONTEXT_LINES;
+    this.contextStepLines = DEFAULT_CONTEXT_STEP_LINES;
+    this.contextAutoLoadPace = DEFAULT_CONTEXT_AUTO_LOAD_PACE;
     this.maxResults = 20000;
     this.codeFontSize = 13.5;
     this.wordWrap = true;
@@ -690,7 +1159,7 @@ class WorkbenchState {
 
   async fetchMeta() {
     try {
-      const res = await fetch('/api/meta');
+      const res = await this.apiFetch('/api/meta');
       if (!res.ok) return;
       const data = (await res.json()) as Partial<MetaResponse>;
       this.meta = {
@@ -764,7 +1233,7 @@ class WorkbenchState {
   async fetchSources() {
     this.sourcesLoading = true;
     try {
-      const res = await fetch('/api/sources');
+      const res = await this.apiFetch('/api/sources');
       if (res.ok) {
         const data = (await res.json()) as SourcesResponse;
         this.applySourcesResponse(data);
@@ -793,7 +1262,7 @@ class WorkbenchState {
     ).trim();
     const resolvedTimeFormat =
       payload.timeFormat !== undefined ? payload.timeFormat.trim() : payload.config?.timeFormat;
-    const res = await fetch('/api/sources', {
+    const res = await this.apiFetch('/api/sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -822,7 +1291,7 @@ class WorkbenchState {
   }
 
   async toggleSourceEnabled(id: string) {
-    const res = await fetch('/api/sources/toggle', {
+    const res = await this.apiFetch('/api/sources/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
@@ -838,7 +1307,7 @@ class WorkbenchState {
   }
 
   async toggleAllSourcesEnabled(enabled: boolean) {
-    const res = await fetch('/api/sources/toggle', {
+    const res = await this.apiFetch('/api/sources/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -854,7 +1323,7 @@ class WorkbenchState {
   }
 
   async removeSource(id: string) {
-    const res = await fetch('/api/sources/delete', {
+    const res = await this.apiFetch('/api/sources/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
@@ -880,12 +1349,114 @@ class WorkbenchState {
   async fetchDirSuggestions(queryPath: string, kind: SourceKind = 'dir'): Promise<DirSuggestEntry[]> {
     try {
       const params = new URLSearchParams({ kind, q: queryPath });
-      const res = await fetch(`/api/sources/complete?${params.toString()}`);
+      const res = await this.apiFetch(`/api/sources/complete?${params.toString()}`);
       if (!res.ok) return [];
       const data = (await res.json()) as DirSuggestResponse;
       return Array.isArray(data.entries) ? data.entries : [];
     } catch {
       return [];
+    }
+  }
+
+  private applyMcpState(data: Partial<McpStateResponse>) {
+    if (typeof data.enabled === 'boolean') {
+      this.mcpEnabled = data.enabled;
+    }
+    if (typeof data.maxLogs === 'number' && Number.isFinite(data.maxLogs)) {
+      this.mcpMaxLogs = clampMcpMaxLogs(data.maxLogs, DEFAULT_MCP_MAX_LOGS);
+      this.saveSettings();
+    }
+    if (typeof data.endpointPath === 'string' && data.endpointPath.length > 0) {
+      this.mcpEndpointPath = data.endpointPath;
+    }
+    if (typeof data.protocolVersion === 'string' && data.protocolVersion.length > 0) {
+      this.mcpProtocolVersion = data.protocolVersion;
+    }
+    if (typeof data.tokenRequired === 'boolean') {
+      this.mcpTokenRequired = data.tokenRequired;
+    }
+    if (data.stats && typeof data.stats === 'object') {
+      this.mcpStats = {
+        totalCalls: Number(data.stats.totalCalls) || 0,
+        errorCalls: Number(data.stats.errorCalls) || 0,
+        lastCallMs: Number(data.stats.lastCallMs) || 0,
+      };
+    }
+    if (Array.isArray(data.capabilities)) {
+      this.mcpCapabilities = data.capabilities;
+    }
+    if (Array.isArray(data.logs)) {
+      this.mcpLogs = data.logs;
+    }
+    this.mcpLoaded = true;
+  }
+
+  async fetchMcpState() {
+    try {
+      const res = await this.apiFetch('/api/mcp');
+      if (!res.ok) return;
+      const data = (await res.json()) as McpStateResponse;
+      this.applyMcpState(data);
+    } catch {
+      // keep existing MCP state on transient network error
+    }
+  }
+
+  async setMcpEnabled(enabled: boolean) {
+    this.mcpEnabled = enabled;
+    try {
+      const res = await this.apiFetch('/api/mcp/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as McpStateResponse;
+        this.applyMcpState(data);
+      }
+    } catch {
+      // revert/reconcile on next sync
+    }
+  }
+
+  setMcpMaxLogs(rawMax: number) {
+    const next = clampMcpMaxLogs(rawMax, DEFAULT_MCP_MAX_LOGS);
+    this.mcpMaxLogs = next;
+    this.saveSettings();
+    if (this.mcpConfigTimer !== null) {
+      clearTimeout(this.mcpConfigTimer);
+    }
+    this.mcpConfigTimer = setTimeout(() => {
+      this.mcpConfigTimer = null;
+      void (async () => {
+        try {
+          const res = await this.apiFetch('/api/mcp/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ maxLogs: this.mcpMaxLogs }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as McpStateResponse;
+            this.applyMcpState(data);
+          }
+        } catch {
+          // ignore
+        }
+      })();
+    }, 220);
+  }
+
+  async clearMcpLogs() {
+    try {
+      const res = await this.apiFetch('/api/mcp/logs/clear', {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = (await res.json()) as McpStateResponse;
+        this.applyMcpState(data);
+      }
+    } catch {
+      // ignore
     }
   }
 
@@ -1287,6 +1858,9 @@ class WorkbenchState {
 
   connectWebSocket() {
     if (typeof window === 'undefined') return;
+    if (this.authRequired && this.authState !== 'authenticated' && this.authState !== 'unlocking') {
+      return;
+    }
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -1310,10 +1884,18 @@ class WorkbenchState {
         if (isReconnect || !this.sourcesLoaded) {
           this.fetchMeta();
           this.fetchSources();
+          this.fetchMcpState();
         }
         if (this.pendingSearchOnOpen && this.hasExecutableQuery) {
           this.pendingSearchOnOpen = false;
-          this.executeSearch({ forceRefresh: false, recordInHistory: false });
+          const replayTimeRange = this.pendingReplayTimeRange;
+          this.pendingReplayTimeRange = undefined;
+          this.executeSearch({
+            forceRefresh: false,
+            recordInHistory: false,
+            keepShareUrl: Boolean(replayTimeRange),
+            replayTimeRange,
+          });
         }
       };
 
@@ -1321,6 +1903,13 @@ class WorkbenchState {
         try {
           const raw = typeof event.data === 'string' ? event.data : '';
           if (!raw) return;
+          if (raw.startsWith('{"type":"mcp_state"')) {
+            const push = JSON.parse(raw) as { type: string; state?: McpStateResponse };
+            if (push.type === 'mcp_state' && push.state) {
+              this.applyMcpState(push.state);
+            }
+            return;
+          }
           const idMatch = /"id":(\d+)/.exec(raw.slice(0, 48));
           if (idMatch && Number(idMatch[1]) !== this.currentSearchId) {
             return;
@@ -1340,6 +1929,12 @@ class WorkbenchState {
         this.ws = null;
         this.isSearching = false;
         if (this.isUnloading) return;
+        if (this.authRequired && (this.authState === 'locked' || this.authState === 'checking')) {
+          return;
+        }
+        if (this.authRequired && this.authState === 'authenticated') {
+          void this.verifySessionOnDisconnect();
+        }
         this.wsStatus = 'reconnecting';
         this.scheduleWsDegraded();
         this.scheduleReconnect();
@@ -1353,7 +1948,26 @@ class WorkbenchState {
     }
   }
 
+  private async verifySessionOnDisconnect() {
+    try {
+      const res = await fetch('/api/auth/status', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as Partial<AuthStatusResponse>;
+      if (data.authRequired && !data.authenticated) {
+        this.handleSessionExpired();
+      }
+    } catch {
+      // keep reconnecting on transient offline state
+    }
+  }
+
   private scheduleReconnect() {
+    if (this.authRequired && (this.authState === 'locked' || this.authState === 'checking')) {
+      return;
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectAttempt += 1;
     const delay = Math.min(2500, 300 * Math.pow(1.4, Math.min(6, this.reconnectAttempt)));
@@ -1390,6 +2004,10 @@ class WorkbenchState {
     this.draftExclude = false;
     this.lastExecutedKey = '';
     this.lastExecutedHadDraft = false;
+    this.lastExecutedSnapshot = null;
+    this.pendingReplayTarget = null;
+    this.pendingReplayTimeRange = undefined;
+    this.clearShareUrlParamIfPresent();
     this.errorMessage = null;
     this.hasSearchedOnce = false;
     this.resetResultBuffer();
@@ -1609,6 +2227,19 @@ class WorkbenchState {
     this.lastExecutedHadDraft = hadDraft;
     this.displayedTimeStartMs = entry.timeStartMs;
 
+    if (this.pendingReplayTarget) {
+      const target = this.pendingReplayTarget;
+      this.pendingReplayTarget = null;
+      const matchedIdx = this.flatHits.findIndex(
+        (h) => h.file === target.path && h.line === target.line
+      );
+      if (matchedIdx >= 0) {
+        this.selectHitByIndex(matchedIdx, false);
+        this.scrollToActiveTick += 1;
+        return;
+      }
+    }
+
     if (
       this.flatHits.length > 0 &&
       this.rightInspectorOpen &&
@@ -1620,15 +2251,42 @@ class WorkbenchState {
   }
 
   executeSearch(opts: ExecuteSearchOptions = {}) {
+    if (!opts.keepShareUrl) {
+      this.clearShareUrlParamIfPresent();
+      this.pendingReplayTarget = null;
+      this.pendingReplayTimeRange = undefined;
+    }
+
     const nowMs = Date.now();
     const freshCompiled = compileSearchQuery(this.steps, this.draftStep, this.scope, nowMs);
     if (!freshCompiled.hasExecutableQuery) {
       this.cancelSearch();
       this.resetResultBuffer();
       this.hasSearchedOnce = false;
+      this.lastExecutedSnapshot = null;
       this.errorMessage = null;
       return;
     }
+
+    const reqTimeRange =
+      opts.replayTimeRange ??
+      (this.scope.timePreset ? parseTimeModifierSpec(this.scope.timePreset, nowMs) : null);
+    const reqTimeStartMs = reqTimeRange && reqTimeRange.startMs > 0 ? reqTimeRange.startMs : 0;
+    const reqTimeEndMs = reqTimeRange && reqTimeRange.endMs > 0 ? reqTimeRange.endMs : 0;
+
+    this.lastExecutedSnapshot = {
+      steps: this.steps.map(normalizeStep).filter((s) => s.text.length > 0),
+      draft: this.draftStep ? createQueryStep(this.draftStep.text, this.draftStep) : null,
+      sources: [...this.scope.sources],
+      excludedSources: [...(this.scope.excludedSources ?? [])],
+      timePreset: this.scope.timePreset,
+      timeStartMs: reqTimeStartMs,
+      timeEndMs: reqTimeEndMs,
+      executedAtMs: nowMs,
+      hidden: this.hidden,
+      respectIgnore: this.respectIgnore,
+      maxResults: this.maxResults,
+    };
 
     const keys = buildQueryCacheKeys({
       tenant: this.tenant,
@@ -1652,7 +2310,7 @@ class WorkbenchState {
     }
 
     // Tier L0: True Short-Circuit Instant Cache (< 0.05ms, preserves HitItem references for WeakMap highlight cache)
-    if (!opts.forceRefresh && !this.hasActiveDockerSource()) {
+    if (!opts.forceRefresh && !this.hasActiveDockerSource() && !opts.replayTimeRange) {
       const l0Hit = this.findValidL0Entry(keys.exactKey, keys.baseKey, nowMs);
       if (l0Hit) {
         this.cancelSearch();
@@ -1664,14 +2322,10 @@ class WorkbenchState {
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.pendingSearchOnOpen = true;
+      this.pendingReplayTimeRange = opts.replayTimeRange;
       this.connectWebSocket();
       return;
     }
-
-    const reqTimeRange = this.scope.timePreset
-      ? parseTimeModifierSpec(this.scope.timePreset, nowMs)
-      : null;
-    const reqTimeStartMs = reqTimeRange && reqTimeRange.startMs > 0 ? reqTimeRange.startMs : 0;
 
     this.currentSearchId += 1;
     const searchId = this.currentSearchId;
@@ -1715,7 +2369,7 @@ class WorkbenchState {
       maxResults: this.maxResults,
       nearbyLines: 0,
       timeStartMs: reqTimeStartMs > 0 ? reqTimeStartMs : undefined,
-      timeEndMs: reqTimeRange && reqTimeRange.endMs > 0 ? reqTimeRange.endMs : undefined,
+      timeEndMs: reqTimeEndMs > 0 ? reqTimeEndMs : undefined,
       timeMode: 'source',
       tzOffsetMin: -new Date().getTimezoneOffset(),
     };
@@ -1725,7 +2379,7 @@ class WorkbenchState {
 
   async previewTimeFormat(format: string, sample: string): Promise<TimePreviewResponse> {
     try {
-      const res = await fetch('/api/time/preview', {
+      const res = await this.apiFetch('/api/time/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1818,7 +2472,17 @@ class WorkbenchState {
           }
         }
 
-        if (
+        if (this.pendingReplayTarget) {
+          const target = this.pendingReplayTarget;
+          this.pendingReplayTarget = null;
+          const matchedIdx = this.flatHits.findIndex(
+            (h) => h.file === target.path && h.line === target.line
+          );
+          if (matchedIdx >= 0) {
+            this.selectHitByIndex(matchedIdx, false);
+            this.scrollToActiveTick += 1;
+          }
+        } else if (
           this.activeHitIndex === -1 &&
           this.flatHits.length > 0 &&
           this.rightInspectorOpen &&
@@ -2066,7 +2730,244 @@ class WorkbenchState {
     return this.sources.some((s) => s.kind === 'docker' && s.name.toLowerCase() === prefix);
   }
 
-  async inspectFileAtLine(filePath: string, line = 1, forceOpen = true) {
+  private abortContextFetch() {
+    this.contextAbort?.abort();
+    this.contextAbort = null;
+    this.contextSeq += 1;
+    this.contextLoadingInitial = false;
+    this.contextLoadingBefore = false;
+    this.contextLoadingAfter = false;
+  }
+
+  private async fetchFileWindow(
+    filePath: string,
+    opts: {
+      line: number;
+      context: number;
+      startLine?: number;
+      endLine?: number;
+      anchorLine?: number;
+      anchorByte?: number | null;
+    },
+    signal: AbortSignal
+  ): Promise<FileResponse> {
+    const dockerSinceSec = computeDockerPreviewSinceSec(
+      this.sources,
+      filePath,
+      this.displayedTimeStartMs
+    );
+    const params = new URLSearchParams({
+      tenant: this.tenant,
+      path: filePath,
+      line: String(opts.line),
+      context: String(opts.context),
+    });
+    if (opts.startLine !== undefined) params.set('startLine', String(opts.startLine));
+    if (opts.endLine !== undefined) params.set('endLine', String(opts.endLine));
+    if (opts.anchorLine !== undefined) params.set('anchorLine', String(opts.anchorLine));
+    if (typeof opts.anchorByte === 'number' && Number.isFinite(opts.anchorByte) && opts.anchorByte >= 0) {
+      params.set('anchorByte', String(Math.floor(opts.anchorByte)));
+    }
+    if (dockerSinceSec !== null) {
+      params.set('since', String(dockerSinceSec));
+    }
+    const res = await this.apiFetch(`/api/file?${params.toString()}`, { signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return (await res.json()) as FileResponse;
+  }
+
+  /**
+   * Opens the reusable right-slide drawer to show surrounding lines around `line`
+   * (without altering InspectorPane's single-record focus mode).
+   */
+  async openContextDrawer(filePath?: string, line?: number, anchorByteHint?: number | null) {
+    const targetPath = filePath ?? this.inspectedPath;
+    if (!targetPath) return;
+    const anchor = Math.max(1, line ?? (this.inspectedHit?.line ?? this.inspectedLine));
+
+    this.paletteOpen = false;
+    this.sourcePickerOpen = false;
+    this.timePickerOpen = false;
+    this.sourceAddOpen = false;
+    this.drawerPanel = 'context';
+
+    this.abortContextFetch();
+    const controller = new AbortController();
+    this.contextAbort = controller;
+    const seq = this.contextSeq;
+
+    this.contextPath = targetPath;
+    this.contextAnchorLine = anchor;
+    this.contextLines = [];
+    this.contextTotalLines = 0;
+    this.contextEof = false;
+    this.contextBinary = false;
+    this.contextError = null;
+    this.contextFirstByte = null;
+    this.contextNextByte = null;
+    this.contextLoadingInitial = true;
+
+    const matchingHit =
+      this.inspectedHit &&
+      this.inspectedHit.file === targetPath &&
+      this.inspectedHit.line === anchor &&
+      typeof this.inspectedHit.byteOffset === 'number'
+        ? this.inspectedHit
+        : null;
+    const resolvedByte =
+      typeof anchorByteHint === 'number' && Number.isFinite(anchorByteHint) && anchorByteHint >= 0
+        ? Math.floor(anchorByteHint)
+        : matchingHit
+          ? matchingHit.byteOffset
+          : undefined;
+
+    try {
+      const win = computeInitialFetchWindow(anchor, this.contextInitialLines);
+      const data = await this.fetchFileWindow(
+        targetPath,
+        {
+          line: win.line,
+          context: win.context,
+          startLine: win.targetStart,
+          endLine: win.targetEnd,
+          anchorLine: resolvedByte !== undefined ? anchor : undefined,
+          anchorByte: resolvedByte,
+        },
+        controller.signal
+      );
+      if (seq !== this.contextSeq) return;
+      const bounds = computeMergedContextBounds(data.lines, data.totalLines, data.eof);
+      this.contextLines = data.lines;
+      this.contextTotalLines = bounds.totalLines;
+      this.contextEof = bounds.eof;
+      this.contextBinary = data.binary;
+      this.contextFirstByte = typeof data.firstByte === 'number' ? data.firstByte : null;
+      this.contextNextByte = typeof data.nextByte === 'number' ? data.nextByte : null;
+      this.contextCenterTick += 1;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (seq !== this.contextSeq) return;
+      this.contextError = err instanceof Error ? err.message : 'Failed to load context';
+    } finally {
+      if (seq === this.contextSeq) {
+        this.contextLoadingInitial = false;
+      }
+    }
+  }
+
+  /**
+   * Incrementally loads up to `contextStepLines` surrounding records upward ('before')
+   * or downward ('after') inside the slide-out context drawer using O(window) byte cursors.
+   */
+  async loadContextMore(
+    direction: 'before' | 'after',
+    captureScrollAnchor?: () => (() => void) | undefined
+  ) {
+    const targetPath = this.contextPath;
+    if (
+      !targetPath ||
+      this.contextBinary ||
+      this.contextLoadingInitial ||
+      this.contextLoadingBefore ||
+      this.contextLoadingAfter
+    ) {
+      return;
+    }
+
+    const lines = this.contextLines;
+    const firstLine = lines.length > 0 ? lines[0].n : this.contextAnchorLine;
+    const lastLine = lines.length > 0 ? lines[lines.length - 1].n : this.contextAnchorLine;
+
+    const win =
+      direction === 'before'
+        ? computeUpwardFetchWindow(firstLine, this.contextStepLines)
+        : computeDownwardFetchWindow(
+            lastLine,
+            this.contextTotalLines,
+            this.contextEof,
+            this.contextStepLines
+          );
+    if (!win) return;
+
+    const controller = new AbortController();
+    this.contextAbort = controller;
+    const seq = ++this.contextSeq;
+    this.contextError = null;
+    if (direction === 'before') {
+      this.contextLoadingBefore = true;
+    } else {
+      this.contextLoadingAfter = true;
+    }
+
+    const reqAnchorLine = direction === 'before' ? firstLine : lastLine + 1;
+    const reqAnchorByte =
+      direction === 'before' ? this.contextFirstByte : this.contextNextByte;
+
+    try {
+      const data = await this.fetchFileWindow(
+        targetPath,
+        {
+          line: win.line,
+          context: win.context,
+          startLine: win.targetStart,
+          endLine: win.targetEnd,
+          anchorLine: reqAnchorByte !== null ? reqAnchorLine : undefined,
+          anchorByte: reqAnchorByte,
+        },
+        controller.signal
+      );
+      if (seq !== this.contextSeq) return;
+
+      // Keep only rows strictly within [win.targetStart, win.targetEnd] when backend returns a symmetric window
+      const scopedIncoming = data.lines.filter(
+        (item) => item.n >= win.targetStart && item.n <= win.targetEnd
+      );
+      const merged = mergeContextLines(this.contextLines, scopedIncoming);
+      const lastFetched = data.lines[data.lines.length - 1]?.n ?? 0;
+      const lastKept = scopedIncoming[scopedIncoming.length - 1]?.n ?? 0;
+      const reachedEndOnBatch =
+        direction === 'before'
+          ? this.contextEof || (data.eof && lastKept >= lastFetched)
+          : data.eof && lastKept >= lastFetched;
+      const bounds = computeMergedContextBounds(
+        merged,
+        Math.max(this.contextTotalLines, data.totalLines),
+        reachedEndOnBatch
+      );
+      if (direction === 'before' && typeof data.firstByte === 'number') {
+        this.contextFirstByte = data.firstByte;
+      }
+      if (direction === 'after' && typeof data.nextByte === 'number') {
+        this.contextNextByte = data.nextByte;
+      }
+      const restoreScroll = direction === 'before' ? captureScrollAnchor?.() : undefined;
+
+      flushSync(() => {
+        this.contextLines = merged;
+        this.contextTotalLines = bounds.totalLines;
+        this.contextEof = bounds.eof;
+      });
+      restoreScroll?.();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (seq !== this.contextSeq) return;
+      this.contextError = err instanceof Error ? err.message : 'Failed to load more context';
+    } finally {
+      if (seq === this.contextSeq) {
+        this.contextLoadingBefore = false;
+        this.contextLoadingAfter = false;
+      }
+    }
+  }
+
+  async inspectFileAtLine(
+    filePath: string,
+    line = 1,
+    forceOpen = true,
+    anchorByteHint?: number | null
+  ) {
     const targetLine = Math.max(1, line);
     if (this.inspectedHit && (this.inspectedHit.file !== filePath || this.inspectedHit.line !== targetLine)) {
       this.inspectedHit = null;
@@ -2113,22 +3014,29 @@ class WorkbenchState {
     this.inspectorError = null;
 
     try {
-      const params = new URLSearchParams({
-        tenant: this.tenant,
-        path: filePath,
-        line: String(targetLine),
-        context: '0',
-      });
-      if (dockerSinceSec !== null) {
-        params.set('since', String(dockerSinceSec));
-      }
-      const res = await fetch(`/api/file?${params.toString()}`, {
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = (await res.json()) as FileResponse;
+      const hitByte =
+        typeof anchorByteHint === 'number' && Number.isFinite(anchorByteHint) && anchorByteHint >= 0
+          ? Math.floor(anchorByteHint)
+          : this.inspectedHit &&
+              this.inspectedHit.file === filePath &&
+              this.inspectedHit.line === targetLine &&
+              typeof this.inspectedHit.byteOffset === 'number'
+            ? this.inspectedHit.byteOffset
+            : undefined;
+      const data = await this.fetchFileWindow(
+        filePath,
+        hitByte !== undefined
+          ? {
+              line: targetLine,
+              context: 0,
+              startLine: targetLine,
+              endLine: targetLine,
+              anchorLine: targetLine,
+              anchorByte: hitByte,
+            }
+          : { line: targetLine, context: 0 },
+        controller.signal
+      );
       if (seq !== this.inspectSeq) return;
       if (reqRevision === this.sourceRevision) {
         this.putCachedFileContext(cacheKey, data);

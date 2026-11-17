@@ -1,13 +1,16 @@
 import type { Component } from 'svelte';
 import {
+  Blocks,
   Clock,
   Database,
   FolderPlus,
   Keyboard,
   Languages,
+  Lock,
   PanelRight,
   SlidersHorizontal,
   SunMoon,
+  UnfoldVertical,
 } from 'lucide-svelte';
 import { workbench } from './state.svelte';
 
@@ -56,6 +59,12 @@ export function buildCommands(): Command[] {
       run: () => workbench.openSourcesDrawer(true),
     },
     {
+      id: 'mcp',
+      icon: Blocks as unknown as Command['icon'],
+      title: p.mcp,
+      run: () => workbench.openMcpDrawer(),
+    },
+    {
       id: 'theme',
       icon: SunMoon as unknown as Command['icon'],
       title: p.theme,
@@ -80,5 +89,25 @@ export function buildCommands(): Command[] {
       title: p.inspector,
       run: () => workbench.toggleInspectorPane(),
     },
+    ...(workbench.inspectedPath
+      ? [
+          {
+            id: 'context-drawer',
+            icon: UnfoldVertical as unknown as Command['icon'],
+            title: p.contextDrawer,
+            run: () => workbench.openContextDrawer(),
+          },
+        ]
+      : []),
+    ...(workbench.authRequired
+      ? [
+          {
+            id: 'lock-workspace',
+            icon: Lock as unknown as Command['icon'],
+            title: p.lock,
+            run: () => void workbench.logout(),
+          },
+        ]
+      : []),
   ];
 }

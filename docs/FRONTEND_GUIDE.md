@@ -60,7 +60,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - **搜索框左侧双内嵌正交范围选择器（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) + [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)，Decoupled Source & Time Scope）**：
   - 数据源、时间范围与文本内容彻底解耦，**搜索框内不解析 `in:` 或 `time:` 等任何内联修饰词**（`in:foo`、`-O3`、`@Vector` 一律作为 100% 纯字面量内容检索）；**不再提供文件类型筛选入口**，也不再在搜索框下方单独占据一行 `ScopeBar`。
   - 放大镜图标紧邻右侧、细竖线左侧依次内嵌两大正交维度，与下方同源弹窗系统高度一致：
-    1. **数据源（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte)）**：默认显示简洁的「全部」，单源时显示对应类型图标与源名（桌面带一键重置 `×`），多选时显示 `已选 N`；点击弹出与 `bg-popover` 主题同源的列表勾选浮层——桌面端锚定于触发器正下方并自动视口裁边、自动聚焦顶部**模糊搜索**输入框（支持子序列与空格多词匹配及 `text-primary` 字符高亮）、仅在存在 2 种及以上源类型时渐进渲染单色分类键帽、置顶 `[✓] 全部数据源`、整行点击实时切换勾选且保持列表展开方便连续多选、全部取消勾选自动回到「全部」、支持 `Alt+点击` 排除、`仅看` 单源直达与 `↑↓`/`Enter`/`Tab`/`Esc` 键盘流；移动端为可下拉关闭底部面板；
+    1. **数据源（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte)）**：默认显示简洁的「全部」，单源时显示对应类型图标与源名（桌面带一键重置 `×`），多选时显示 `已选 N`；点击弹出与 `bg-popover` 主题同源的列表勾选浮层——桌面端锚定于触发器正下方并自动视口裁边、自动聚焦顶部**模糊搜索**输入框（支持子序列与空格多词匹配及 `text-primary` 字符高亮）、仅在存在 2 种及以上源类型时渐进渲染单色分类键帽、置顶 `[✓] 全部数据源`、整行点击实时切换勾选且保持列表展开方便连续多选、全部取消勾选自动回到「全部」、支持 `Alt+点击` 排除与 `↑↓`/`Enter`/`Tab`/`Esc` 键盘流（无冗余行尾「仅看」按钮）；移动端为可下拉关闭底部面板；
     2. **时间范围（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)）**：桌面端默认显示「不限」与下拉箭头、窄屏（`< 640px`）空闲态自动收拢为纯净时钟图标以守住 `<input>` 宽度预算（选定后高亮显示紧凑时长如 `45m`/`今天`/`11-14..`）；点击弹出与 `SourcePickerPopover` 1:1 同源的 `bg-popover` 主题面板（移动端为可下拉关闭底部面板），顶部提供自动聚焦的高自由度快捷输入栏（支持模糊过滤内置预设、`45m` / `2h` / `最近10分钟` 等任意相对时长及整行日志/时间戳/区间直接粘贴解析，按回车 1 键直达并实时联动下方槽位）；默认态顶部置顶 `[✓] 全部时间` 与一行紧凑「当前数据源时间基准摘要 + 配置跳转」；主体为按排障时间尺度分层的 3×4 快捷矩阵（`5m` / `15m` / `30m` / `1h`、`3h` / `6h` / `12h` / `24h`、`今天` / `昨天` / `7d` / `30d`），悬停/键盘移动与重开面板时自动实时同步至下方分段槽位；下方为默认预填好的 `起 / 止` 分段式 `年 月 日 | 时:分:秒` 槽位输入框（支持点击整段高亮、智能自动跳格、`↑↓` 步进微调、`现在` 开放上界切换、以及整行日志与 20+ 种时间戳/区间直接粘贴提取）；实际时间筛选依据采用**按数据源独立不叠加**的 `timeMode: 'source'` 模型——默认普通目录/文件源仅按文件 `stat.mtime` 筛选、配置了 `config.timeFormat` 为 `'auto'`（作为 `内容时间` 下的默认第一选项，内置 20+ 种常见时间格式零分配自动嗅探）或自定义 `yyyy-MM-dd` / `yyyy-hm` 日期图像、传统 `strftime`、`json:<field>`、`regex:<pattern>` 的日志源及 `docker` 零落盘容器日志源（默认 `'auto'`，也可显式切为 `文件修改时间`）则仅按行内解析时间戳 + 堆栈续行回溯筛选，且在添加/编辑数据源时通过 [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) 二分开关（`文件修改时间` | `内容时间`）结合 `POST /api/time/preview` 随时对自动识别或自定义格式实时测试样例日志），修改任一范围会基于当前有效条件自动执行/更新（或点击 `×` / `全部时间` 重置）。
 
 ### 2.2 查询模型、严格单行匹配与前端缓存规范（[`query.ts`](../web/src/lib/query.ts) / [`state.svelte.ts`](../web/src/lib/state.svelte.ts) / [`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）
@@ -75,12 +75,13 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 | 独立范围筛选（`ScopeFilter`） | `sources`、`excludedSources`（编码为 `globs: ["!id"]`）、`timePreset`（内置预设或自定义 `开始..结束` 区间，编译为 `timeStartMs` / `timeEndMs`）、`timeMode: 'source'`（按数据源 `config.timeFormat` 与流路径自动决定 `mtime` 或行内时间戳，**互不叠加**）、`sourceTimeFormatsSig` 与 `tzOffsetMin` | 与文本检索解耦，不占用搜索框字符（`types` 已从界面移除并固定为空数组）；无文本输入时单独选择 `timePreset` 亦可触发按时间过滤检索（`mtime` 源空关键字按单文件 1 条摘要输出，内容时间源按行内时间戳流式返回且不叠加文件 `mtime` 预裁剪）；上述字段及数据源格式签名均纳入前端 L0 与后端 L1/L2 缓存键完全隔离 |
 | 严格单行匹配（`nearbyLines = 0`） | 前后端强制 `nearbyLines = 0`、`strictLine = true`，界面不再提供跨行邻近兜底 | 确保每条命中都在同一行内同时满足全部 `+`/`-` 条件 |
 | 4 层缓存与持久化体系 | `localStorage` 结构化历史/设置 + 内存 L0 步骤 LRU 精确缓存 + 16 槽位上下文预览 LRU | **搜索历史**（`MAX_SEARCH_HISTORY = 30`）仅在用户显式点击/回车执行后按 `historyId` 去重写入；**L0 结果缓存**（`MAX_L0_ENTRIES = 24`、单条 `<= 20,000`、总行预算 `<= 50,000`、`30s` TTL）键包含 `tenant`、`sourceRevision`、生效源列表、`ScopeFilter`、`QueryStep[]` 与 `timeBucket`，命中后真正短路零网络请求并重建 `groupIndexByFile` 索引同时保留 `HitItem` 对象引用以命中 `WeakMap` 缓存；**预览 LRU** 配合 `AbortController` + `inspectSeq` 序号守卫防旧响应竞态 |
-- **单条记录纯粹预览（[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）**：
-  - 预览窗口**100% 专注当前选中的单条命中记录**（`context = 0`，不再展示前后邻近行或「展开更多上下文」按钮），采用统一克制的灰阶卡片承载，不渲染多余的行号高亮条或彩色语法着色；
+- **单条记录纯粹预览（[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）与按需上下文抽屉（[`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte)）**：
+  - 预览窗口默认**100% 专注当前选中的单条命中记录**（`context = 0`，不在主预览正文直接混入前后无关邻近行），采用统一克制的灰阶卡片承载；
   - 若命中行的流式文本未触及 4,096 UTF-8 字节截断上限（`< 4092` 字节），切换命中时直接零网络延迟即时渲染（0ms），仅当记录可能被截断或直接按路径+行号打开时才按 `context=0` 请求 `/api/file` 获取完整单条记录（最高 512 KiB）；
+  - 需要排查当前记录前后的相邻日志或代码上下文时，可在 `InspectorPane` 顶部点击上下文图标按钮（或命令面板 `查看当前命中上下文`），复用 [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) + [`DrawerTemplate.svelte`](../web/src/lib/components/ui/DrawerTemplate.svelte) 从右侧滑出（移动端为可下拉关闭的底部抽屉，采用纯容器内滚动定位与 `overflow-clip` + `contain: layout paint` 合成隔离，严禁调用 `scrollIntoView` 牵动底层工作区），默认以目标行居中高亮加载上下各 `10` 行（可通过设置项 `contextInitialLines` 配置 `1–100`），通过 `highlightCodeWithMatches` 对常见日志级别/时间戳/URL/JSON/KV/YAML/TOML/SQL 与多语言代码行自动做语法与语义高亮，并在右上角操作区提供 **「#行号」** 一键定位回中、一键切换格式化展开（`<Braces />` / `<FileText />`）与一键复制；[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte) 顶栏提供一键分享图标按钮（`?share=`，冻结完整多步条件、开关、数据源、执行时间窗口、预览视图模式及当前命中定位，支持打开链接 100% 确定性重放）；摒弃翻页按钮与弹性阻尼松手门槛，直接在列表顶部/底部滑到边缘时按可配节奏（`contextAutoLoadPace`：慢 `480ms` / 标准 `240ms` / 快 `90ms`）自动触发增量加载上文/下文（每次默认 `10` 行，可通过设置项 `contextStepLines` 配置 `1–100`；普通文件通过命中 `byteOffset` + 窗口 `firstByte`/`nextByte` 游标实现 `64 KiB` `pread` `O(window)` 毫秒级加载，向上追加通过 `flushSync` + 目标行位置差值锚定实现零跳动滚动），同时适配普通文件、压缩流、归档 `::` 虚拟路径与 Docker `since` 行号对齐预览；
   - 支持 JSON / 嵌套 JSON / KV / HTML / STRUCT 结构化拆解视图与纯原文视图一键切换（统一灰阶配色与柔和内联匹配词高亮），完整保留鼠标/触屏划词复制以及 `+`（追加下一层筛选）/ `-`（排除筛选）气泡操作。
 - **智能补全与无结果兜底（[`suggest.ts`](../web/src/lib/suggest.ts)，纯函数、有单测）**：
-  - **历史记录与结果词补全**：聚焦下拉列出匹配 `entry.label` 的结构化历史记录（含 `+`/`-`/`Aa`/`ab`/`.*` 标记与单条删除）以及当前结果高频标识符前缀补全（`computeWordCompletion`）；
+  - **历史记录与结果词补全**：首页（以及非点击/输入态）默认不自动展开下拉列表；仅在点击搜索框、输入内容或按 `ArrowDown` 时按需展开，列出匹配 `entry.label` 的结构化历史记录（含 `+`/`-`/`Aa`/`ab`/`.*` 标记、当记录指定了数据源或时间范围时以简洁无具体数值的 `数据源` / `时间` 徽章标识，以及单条删除）与当前结果高频标识符前缀补全（`computeWordCompletion`）；
   - **灰色补全（ghost text）**：光标在末尾时优先展示单词补全剩余部分，否则在单步非正则模式下展示匹配的正面单条历史文本（`historyGhost`）；`Tab` / `→` 接受；
   - **正则疑似提醒**：关闭 `.*` 时若输入含明显正则元字符（`\d+`、`.*`、`^foo` 等），在下拉底部提示一键「开启 `.*` 正则」；
   - **无结果兜底**：结果为空时给出最多 5 个一键修正（关闭 `Aa`、关闭 `ab`、搜全部数据源、不限时间、移除最后一层条件），点击即生效并自动执行重搜。
@@ -263,8 +264,8 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - 新增图标前确认 `lucide-svelte` 中存在该名称（如没有 `wrap-text`，用 `AlignLeft` 代替）；按需具名导入，禁止全量导入。
 
 ### 8.3 顶栏
-- 仅保留三项：连接状态图标（断线时变为可点击的 `WifiOff`，状态色）、数据源（`Database`，有缺失源时带状态色圆点）、设置（`SlidersHorizontal`）。
-- **禁止**在顶栏加入计数动画、主题/语言/快捷键独立按钮；这些进入设置或命令面板。
+- 保持克制的图标式一级入口：连接状态图标（断线时变为可点击的 `WifiOff`，状态色）、数据源（`Database`，有缺失源时带状态色圆点）、MCP 服务（`Blocks`，启用时带主色状态圆点，承载 MCP 状态、能力列表与可配置实时调用日志）、快捷键说明（`Keyboard`）、设置（`SlidersHorizontal`）。
+- **禁止**在顶栏加入计数动画或主题/语言独立按钮；这些进入设置或命令面板。
 
 ### 8.4 结果行
 - 复制按钮**常驻**显示（低对比），不得使用 `opacity-0 group-hover:opacity-100`。
@@ -322,7 +323,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 ### 10.4 手势与面板
 - 长按结果行（480ms）弹出底部操作面板：复制、限定 `in:源`、排除 `-in:源`；移动超过 8px 取消。
 - 结果列表在 `scrollTop === 0` 时下拉可重新搜索（`touchstart/move/end`，带 `RefreshCw` 指示）；列表使用 `overscroll-contain`。
-- 顶栏 `<Header />` 右侧的三个独立一级菜单（「数据源」、「快捷键说明」、「设置」）共享统一的 [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 容器：桌面端在 `<Header />` 下方从右侧 `translate3d` 丝滑滑出，采用与主界面一致的 `bg-background` 画布与透明无模糊遮罩以保持结果实时预览，内部复用 `bg-card/55` Layer-1 色调分组及单色高反差抬升键帽样式 `Segmented`；各面板完全独立、互不交叉切换；移动端为顶部带拖拽把手的底部抽屉，下拉超过 96px 关闭；搜索放大镜右侧 [`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) 与 [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte) 在桌面端均为同源 `bg-popover` 锚定浮层，在窄屏均为可下拉关闭底部面板；命令面板在窄屏均为顶部全宽/底部视图。
+- 顶栏 `<Header />` 右侧的四个独立一级菜单（「数据源」、「MCP 服务」、「快捷键说明」、「设置」）共享统一的 [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 容器：桌面端在 `<Header />` 下方从右侧 `translate3d` 丝滑滑出，采用与主界面一致的 `bg-background` 画布与透明无模糊遮罩以保持结果实时预览，内部复用 `bg-card/55` Layer-1 色调分组及单色高反差抬升键帽样式 `Segmented`；各面板完全独立、互不交叉切换；移动端为顶部带拖拽把手的底部抽屉，下拉超过 96px 关闭；搜索放大镜右侧 [`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) 与 [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte) 在桌面端均为同源 `bg-popover` 锚定浮层，在窄屏均为可下拉关闭底部面板；命令面板在窄屏均为顶部全宽/底部视图。
 
 ### 10.5 视口与触控细节
 - 根容器使用 `h-app`（`100vh` → `100dvh`），顶/底使用 `pt-safe` / `pb-safe`（`env(safe-area-inset-*)`），`index.html` 的 viewport 带 `viewport-fit=cover`。
@@ -331,9 +332,9 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 ## 十一、设置与数据源面板规范
 
-- [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 负责统一的工作区右侧滑出/移动端底部抽屉外壳（桌面端透明无模糊遮罩、GPU 进退场动画、移动端拖拽把手），[`DrawerTemplate.svelte`](../web/src/lib/components/ui/DrawerTemplate.svelte) 负责统一的协调色页眉模板（图标徽章、标题、计数、右侧操作区与关闭按钮），[`SettingsPopover.svelte`](../web/src/lib/components/SettingsPopover.svelte) 根据传入的独立 `mode`（`'sources' | 'shortcuts' | 'settings'`）分别挂载对应的单功能子面板（`SourcesPane`〔含 `AddSourceForm`〕、`ShortcutsPane`、`GeneralPane`），彼此无标签栏或交叉跳转入口。
+- [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) 负责统一的工作区右侧滑出/移动端底部抽屉外壳（桌面端透明无模糊遮罩、GPU 进退场动画、移动端拖拽把手），[`DrawerTemplate.svelte`](../web/src/lib/components/ui/DrawerTemplate.svelte) 负责统一的协调色页眉与可选吸底操作栏模板（图标徽章、标题、计数、右侧操作区、滚动内容区与底部 `footer` 槽位），[`SettingsPopover.svelte`](../web/src/lib/components/SettingsPopover.svelte) 根据传入的 `mode`（`'sources' | 'mcp' | 'shortcuts' | 'settings' | 'context'`）分别挂载对应的独立功能面板（`SourcesPane`〔含 `AddSourceForm`〕、`McpPane`〔MCP 状态、能力列表与默认 20 条可配实时调用日志〕、`ShortcutsPane`、`GeneralPane` 以及按需上下文查看面板 [`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte)），其中四个顶栏一级面板彼此严格无标签栏或交叉跳转入口。
 - 设置项统一使用 [`ui/SettingRow`](../web/src/lib/components/ui/SettingRow.svelte)（图标 + 短标签 + 控件，说明放 `hint`）；二选/多选用 [`ui/Segmented`](../web/src/lib/components/ui/Segmented.svelte)（图标或短文字）；开关用 `ui/Switch`，数值用 `ui/NumberStepper`。**不要**在面板里手写分段按钮样式。
-- 会重新搜索的设置（最大结果数、`hidden`、`respectIgnore`）走“保存 + 在有已生效查询时重搜”；仅影响显示的设置（字体大小、自动换行、行距、单条预览行数 `previewLines`）只保存并即时生效（已移除实时防抖/liveSearch 与邻近上下文行数设置）。
+- 会重新搜索的设置（最大结果数、`hidden`、`respectIgnore`）走“保存 + 在有已生效查询时重搜”；仅影响显示的设置（字体大小、自动换行、行距、单条预览行数 `previewLines`、上下文默认上下行数 `contextInitialLines`、每次加载条数 `contextStepLines`、自动加载调速 `contextAutoLoadPace`）只保存并即时生效。
 - 数据源：
   - 类型支持 `dir`（目录）、`file`（单文件）与 `docker`（零落盘 Docker 容器日志）三段式 [`ui/Segmented`](../web/src/lib/components/ui/Segmented.svelte) 切换；`docker` 默认使用 `auto` 自动探测本机套接字/守护进程并默认启用 `'auto'` 内容时间解析（支持显式切换为 `文件修改时间`），输入框聚焦或输入时走 `/api/sources/complete?kind=docker` 自动补全全部容器与单容器目标 `endpoint::容器名`。
   - 添加表单内联在数据源页（`workbench.sourceAddOpen`），`openSettings('add-source')` 仅作为“打开数据源页并展开表单”的别名，不是独立标签页。

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { flushSync, untrack } from 'svelte';
   import { workbench } from '$lib/state.svelte';
+  import { getHistoryScopeFlags } from '$lib/query';
   import type { HitItem, QueryStep, SearchHistoryEntry } from '$lib/types';
   import {
     buildVocabulary,
@@ -25,6 +26,7 @@
     FileText,
     Folder,
     FolderGit2,
+    History,
     Lightbulb,
     Loader2,
     Plus,
@@ -52,6 +54,8 @@
   let toggledFlagOnDown: string | null = null;
   let sourceTriggerOnDown = false;
   let timeTriggerOnDown = false;
+  let pointerFocusingInput = false;
+  let searchBoxWrapEl = $state<HTMLDivElement | null>(null);
   let sourcePickerWrapEl = $state<HTMLDivElement | null>(null);
   let timePickerWrapEl = $state<HTMLDivElement | null>(null);
 
@@ -369,6 +373,15 @@
       }
     }
 
+    if (!hasOpenDropdown && e.key === 'ArrowDown' && !e.altKey && workbench.flatHits.length === 0 && workbench.searchHistory.length > 0) {
+      e.preventDefault();
+      flushSync(() => {
+        dropdownOpen = true;
+      });
+      activeIdx = dropdownItems.length > 0 ? 0 : -1;
+      return;
+    }
+
     if (hasOpenDropdown && dropdownItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -423,6 +436,45 @@
     if (focused) scheduleVocabularyBuild();
   }
 
+  function handleInputPointerDown() {
+    if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
+    if (workbench.timePickerOpen) workbench.closeTimePicker();
+    pointerFocusingInput = true;
+    flushSync(() => {
+      dropdownOpen = true;
+    });
+    setTimeout(syncCursorPos, 0);
+  }
+
+  function isPillPaddingTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    return !(
+      target === inputEl ||
+      target.closest('button') ||
+      sourcePickerWrapEl?.contains(target) ||
+      timePickerWrapEl?.contains(target)
+    );
+  }
+
+  function handlePillSurfacePointerDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (!isPillPaddingTarget(e.target)) return;
+    if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
+    if (workbench.timePickerOpen) workbench.closeTimePicker();
+    pointerFocusingInput = true;
+    flushSync(() => {
+      dropdownOpen = true;
+    });
+    inputEl?.focus();
+    setTimeout(syncCursorPos, 0);
+  }
+
+  function handlePillSurfaceMousedown(e: MouseEvent) {
+    if (e.button !== 0 || !isPillPaddingTarget(e.target)) return;
+    e.preventDefault();
+    inputEl?.focus();
+  }
+
   function handleFocus() {
     if (workbench.sourcePickerOpen) {
       workbench.closeSourcePicker();
@@ -431,7 +483,10 @@
       workbench.closeTimePicker();
     }
     focused = true;
-    dropdownOpen = true;
+    if (pointerFocusingInput) {
+      pointerFocusingInput = false;
+      dropdownOpen = true;
+    }
     syncCursorPos();
   }
 
@@ -439,6 +494,7 @@
     focused = false;
     dropdownOpen = false;
     activeIdx = -1;
+    pointerFocusingInput = false;
     cancelScheduledVocabulary();
   }
 
@@ -496,6 +552,10 @@
     if (workbench.timePickerOpen && timePickerWrapEl && !timePickerWrapEl.contains(target)) {
       workbench.closeTimePicker();
     }
+    if (dropdownOpen && searchBoxWrapEl && !searchBoxWrapEl.contains(target)) {
+      dropdownOpen = false;
+      activeIdx = -1;
+    }
   }
 </script>
 
@@ -533,8 +593,11 @@
 
   <!-- Unified Google-Style Single-Text Search Box Wrapper -->
   <div class={`relative ${hero ? 'w-full max-w-[680px]' : 'w-full'}`}>
-    <div class="relative">
+    <div bind:this={searchBoxWrapEl} class="relative">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
+        onpointerdown={handlePillSurfacePointerDown}
+        onmousedown={handlePillSurfaceMousedown}
         class={`relative flex items-center gap-1 sm:gap-2 border min-w-0 ${
           hero ? 'min-h-12 px-2 sm:px-4 py-1' : 'min-h-11 px-2 sm:px-3.5 py-1'
         } ${
@@ -790,17 +853,16 @@
             autocorrect="off"
             spellcheck={false}
             placeholder={placeholderText}
-            onmousedown={() => {
-              if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
-              if (workbench.timePickerOpen) workbench.closeTimePicker();
-              dropdownOpen = true;
-              setTimeout(syncCursorPos, 0);
-            }}
+            onpointerdown={handleInputPointerDown}
             onfocus={handleFocus}
             onblur={handleBlur}
             oninput={handleInput}
             onkeydown={handleKeydown}
-            onclick={syncCursorPos}
+            onclick={() => {
+              pointerFocusingInput = false;
+              if (focused) dropdownOpen = true;
+              syncCursorPos();
+            }}
             onkeyup={syncCursorPos}
             onselect={syncCursorPos}
             class="relative h-full w-full min-w-0 bg-transparent px-1 font-mono text-[14.5px] [@media(any-pointer:coarse)]:text-[16px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
@@ -916,6 +978,7 @@
             <div class="max-h-52 md:max-h-64 overflow-y-auto py-1 pb-2">
               {#each historySuggestions as entry, hi (entry.id)}
                 {@const isSelected = hi === activeIdx}
+                {@const scopeFlags = getHistoryScopeFlags(entry.scope)}
                 <div
                   role="button"
                   tabindex="-1"
@@ -929,14 +992,32 @@
                     isSelected ? 'bg-secondary/80' : 'hover:bg-secondary/50'
                   }`}
                 >
-                  <div class="flex items-center gap-3 min-w-0">
-                    <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
+                  <div class="flex items-center gap-2 min-w-0">
+                    <History class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
                     <span class="font-mono text-[13.5px] text-foreground truncate">
                       {entry.label}
                     </span>
                     {#if entry.draft && stepFlagTag(entry.draft)}
                       <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
                         {stepFlagTag(entry.draft)}
+                      </span>
+                    {/if}
+                    {#if scopeFlags.hasSources}
+                      <span
+                        title={workbench.t.searchBar.historyHasSourceTitle}
+                        class="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-primary ring-1 ring-inset ring-primary/20 shrink-0"
+                      >
+                        <Database class="h-2.5 w-2.5 shrink-0" />
+                        <span>{workbench.t.searchBar.historyHasSourceBadge}</span>
+                      </span>
+                    {/if}
+                    {#if scopeFlags.hasTime}
+                      <span
+                        title={workbench.t.searchBar.historyHasTimeTitle}
+                        class="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-primary ring-1 ring-inset ring-primary/20 shrink-0"
+                      >
+                        <Clock class="h-2.5 w-2.5 shrink-0" />
+                        <span>{workbench.t.searchBar.historyHasTimeBadge}</span>
                       </span>
                     {/if}
                   </div>

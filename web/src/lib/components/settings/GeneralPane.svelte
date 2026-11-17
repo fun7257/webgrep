@@ -1,5 +1,11 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
+  import {
+    MAX_CONTEXT_LINE_SETTING,
+    MIN_CONTEXT_LINE_SETTING,
+    clampContextLineSetting,
+    normalizeContextAutoLoadPace,
+  } from '$lib/context-window';
   import NumberStepper from '../ui/NumberStepper.svelte';
   import Segmented from '../ui/Segmented.svelte';
   import SettingRow from '../ui/SettingRow.svelte';
@@ -7,6 +13,8 @@
   import {
     AlignLeft,
     ALargeSmall,
+    ChevronsUpDown,
+    Gauge,
     Languages,
     ListOrdered,
     Moon,
@@ -102,6 +110,62 @@
           step={1}
           widthClass="w-10"
           onchange={(v) => display(() => (workbench.previewLines = v))}
+        />
+      </SettingRow>
+    </div>
+  </div>
+
+  <div>
+    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
+      {s.sectionContext}
+    </div>
+    <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
+      <SettingRow
+        icon={UnfoldVertical}
+        label={s.contextInitialLinesLabel}
+        hint={s.contextInitialLinesDesc}
+      >
+        <NumberStepper
+          value={workbench.contextInitialLines}
+          min={MIN_CONTEXT_LINE_SETTING}
+          max={MAX_CONTEXT_LINE_SETTING}
+          step={1}
+          widthClass="w-10"
+          onchange={(v) =>
+            display(() => (workbench.contextInitialLines = clampContextLineSetting(v)))}
+        />
+      </SettingRow>
+
+      <SettingRow
+        icon={ChevronsUpDown}
+        label={s.contextStepLinesLabel}
+        hint={s.contextStepLinesDesc}
+      >
+        <NumberStepper
+          value={workbench.contextStepLines}
+          min={MIN_CONTEXT_LINE_SETTING}
+          max={MAX_CONTEXT_LINE_SETTING}
+          step={1}
+          widthClass="w-10"
+          onchange={(v) =>
+            display(() => (workbench.contextStepLines = clampContextLineSetting(v)))}
+        />
+      </SettingRow>
+
+      <SettingRow
+        icon={Gauge}
+        label={s.contextAutoLoadPaceLabel}
+        hint={s.contextAutoLoadPaceDesc}
+      >
+        <Segmented
+          value={workbench.contextAutoLoadPace}
+          options={[
+            { value: 'slow', label: s.paceSlow, title: `${s.paceSlow} (480ms)` },
+            { value: 'normal', label: s.paceNormal, title: `${s.paceNormal} (240ms)` },
+            { value: 'fast', label: s.paceFast, title: `${s.paceFast} (90ms)` },
+          ]}
+          onchange={(v) =>
+            display(() => (workbench.contextAutoLoadPace = normalizeContextAutoLoadPace(v)))}
         />
       </SettingRow>
     </div>

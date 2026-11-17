@@ -208,6 +208,55 @@ html:not(.dark) textarea::selection {
   color: hsl(var(--foreground) / 0.72);
 }
 
+/* Common log & config semantic tokens (timestamps, URLs, log levels) */
+.syn-timestamp {
+  color: #0e7490;
+}
+.syn-url {
+  color: #0969da;
+  text-decoration: underline;
+  text-decoration-color: #0969da55;
+  text-underline-offset: 2px;
+}
+.syn-log-error {
+  color: #cf222e;
+  font-weight: 600;
+}
+.syn-log-warn {
+  color: #9a6700;
+  font-weight: 600;
+}
+.syn-log-info {
+  color: #1a7f37;
+  font-weight: 500;
+}
+.syn-log-debug {
+  color: #57606a;
+}
+
+.dark .syn-timestamp {
+  color: #56d4dd;
+}
+.dark .syn-url {
+  color: #58a6ff;
+  text-decoration-color: #58a6ff66;
+}
+.dark .syn-log-error {
+  color: #ff7b72;
+  font-weight: 600;
+}
+.dark .syn-log-warn {
+  color: #e3b341;
+  font-weight: 600;
+}
+.dark .syn-log-info {
+  color: #56d364;
+  font-weight: 500;
+}
+.dark .syn-log-debug {
+  color: #8b949e;
+}
+
 /* CSS Containment & GPU Compositor Isolation for Adaptive 60Hz–240Hz Virtual Scrolling */
 .virtual-row-strict {
   contain: strict;
@@ -298,8 +347,85 @@ body {
   animation: detail-slide-in var(--motion-sheet, 150ms) cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* Minimalist password-only Login screen & unlock choreography (120Hz GPU transform + opacity) */
+@keyframes auth-stage-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes auth-stage-unlock-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale3d(1.045, 1, 1);
+  }
+}
+
+@keyframes auth-pill-error-shake {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  18% {
+    transform: translate3d(-6px, 0, 0);
+  }
+  38% {
+    transform: translate3d(5px, 0, 0);
+  }
+  58% {
+    transform: translate3d(-3.5px, 0, 0);
+  }
+  78% {
+    transform: translate3d(2px, 0, 0);
+  }
+}
+
+@keyframes workspace-unlock-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 5px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.auth-stage-enter {
+  will-change: transform, opacity;
+  animation: auth-stage-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.auth-stage-unlock {
+  will-change: transform, opacity;
+  animation: auth-stage-unlock-out 190ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.auth-pill-shake {
+  will-change: transform;
+  animation: auth-pill-error-shake 320ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+.workspace-unlock-enter {
+  will-change: transform, opacity;
+  animation: workspace-unlock-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .detail-enter {
+  .detail-enter,
+  .auth-stage-enter,
+  .auth-stage-unlock,
+  .auth-pill-shake,
+  .workspace-unlock-enter {
     animation: none;
   }
 }

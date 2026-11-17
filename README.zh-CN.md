@@ -56,11 +56,15 @@ npm --prefix web run build
 # 编译并运行后端单元测试（链接 libwebgrep v0.5.0 引擎）
 zig build && zig build test
 
-# 启动 webgrep 服务（默认监听 http://127.0.0.1:8787）
+# 启动 webgrep 服务（默认监听 http://127.0.0.1:8787 + 活跃的 Tailscale 网卡，即 `--host 127.0.0.1,tailscale`）
 ./zig-out/bin/webgrep --port 8787
+
+# 部署鉴权（可选）：设置 Web 单密码登录与 MCP Bearer Token（均可通过环境变量或 CLI 参数传入）
+WEBGREP_PASSWORD="your-web-password" WEBGREP_MCP_TOKEN="your-mcp-token" ./zig-out/bin/webgrep --port 8787
+# 或使用命令行参数：./zig-out/bin/webgrep --password "your-web-password" --mcp-token "your-mcp-token"
 ```
 
-浏览器打开 **http://127.0.0.1:8787**，点击右上角设置图标进入数据源管理，即可添加目录、单文件/归档包或 **Docker 容器**（零落盘自动发现全部容器日志）开始极速检索。
+浏览器打开 **http://127.0.0.1:8787**（或 Tailscale 网络 IP / MagicDNS `:8787`，`webgrep` 默认仅绑定 `127.0.0.1` 与 Tailscale 网卡并自动监听 Tailscale 热上线，不暴露局域网 / `0.0.0.0`），点击右上角设置图标进入数据源管理，即可添加目录、单文件/归档包或 **Docker 容器**（零落盘自动发现全部容器日志）开始极速检索。
 
 ### 3. 前端热更新开发模式（可选）
 
@@ -76,6 +80,7 @@ npm --prefix web run dev
 
 - [`src/`](src/) — **Zig 0.17.0 HTTP & WebSocket 后端服务**
   - [`src/main.zig`](src/main.zig)：命令行参数解析与服务启动入口。
+  - [`src/net_bind.zig`](src/net_bind.zig)：多地址监听解析（默认 `--host 127.0.0.1,tailscale`）与 Tailscale 虚拟网卡自动发现及后台热绑定。
   - [`src/server.zig`](src/server.zig)：HTTP 接口（`/api/meta`、`/api/sources`、`/api/sources/complete`、`/api/file`、`/api/context`）与 WebSocket 全双工检索通道（`/api/ws`）。
   - [`src/search_job.zig`](src/search_job.zig)：多线程并发检索调度器、代价导向选择性规划器、二阶段弹性注水（`resumeSourceSlice` / `searcher.searchFile`）与 `searchArchiveSlice` 归档直搜。
   - [`src/file_api.zig`](src/file_api.zig)：路径安全消毒、多文件归档与单流压缩识别、`archive::entry` 虚拟路径协议及上下文窗口构建器（集成 `ArchiveTree`、`decompress`、`encoding`）。

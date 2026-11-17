@@ -69,6 +69,8 @@ export interface FileResponse {
   totalLines: number;
   binary: boolean;
   eof: boolean;
+  firstByte?: number | null;
+  nextByte?: number | null;
   lines: FileLine[];
 }
 
@@ -86,6 +88,7 @@ export interface HitItem {
   nextText?: string | null;
   replaced?: string | null;
   isContext?: boolean;
+  byteOffset?: number | null;
   spans: HitSpan[];
 }
 
@@ -225,4 +228,55 @@ export interface SearchHistoryEntry {
   label: string;
   timestamp: number;
 }
+
+export interface McpParamMeta {
+  name: string;
+  type: string;
+  required: boolean;
+  description: string;
+}
+
+export interface McpCapabilityItem {
+  name: string;
+  category: string;
+  description: string;
+  params: McpParamMeta[];
+}
+
+export interface McpCallLogItem {
+  seq: number;
+  timestampMs: number;
+  method: string;
+  toolName: string;
+  argsSummary: string;
+  resultSummary: string;
+  durationMs: number;
+  ok: boolean;
+  errorMessage: string;
+  clientInfo: string;
+}
+
+export interface McpStats {
+  totalCalls: number;
+  errorCalls: number;
+  lastCallMs: number;
+}
+
+export interface McpStateResponse {
+  enabled: boolean;
+  maxLogs: number;
+  endpointPath: string;
+  protocolVersion: string;
+  tokenRequired?: boolean;
+  stats: McpStats;
+  capabilities: McpCapabilityItem[];
+  logs: McpCallLogItem[];
+}
+
+export interface AuthStatusResponse {
+  authRequired: boolean;
+  authenticated: boolean;
+  mcpTokenRequired: boolean;
+}
+
 

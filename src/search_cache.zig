@@ -22,6 +22,7 @@ pub const CachedHitItem = struct {
     nextText: ?[]const u8 = null,
     replaced: ?[]const u8,
     isContext: bool,
+    byteOffset: ?u64 = null,
     spans: []const CachedSpan,
     raw_item_json: []const u8 = "",
 };

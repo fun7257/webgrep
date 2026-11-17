@@ -19,8 +19,12 @@
     switch (activeMode) {
       case 'sources':
         return workbench.t.settings.panelSourcesTitle;
+      case 'mcp':
+        return workbench.t.settings.panelMcpTitle;
       case 'shortcuts':
         return workbench.t.settings.panelShortcutsTitle;
+      case 'context':
+        return workbench.t.inspector.contextDrawerTitle;
       case 'settings':
       default:
         return workbench.t.settings.panelSettingsTitle;
@@ -126,8 +130,9 @@
 </script>
 
 {#if mounted && activeMode}
+  {@const isContextMode = activeMode === 'context'}
   <div
-    class={`fixed md:absolute inset-0 z-30 flex items-end md:items-stretch md:justify-end ${
+    class={`drawer-overlay-root fixed md:absolute inset-0 z-50 md:z-30 flex items-end md:items-stretch md:justify-end overflow-clip ${
       isOpen ? 'pointer-events-auto' : 'pointer-events-none'
     }`}
     role="dialog"
@@ -146,7 +151,11 @@
     <div
       bind:this={panelEl}
       ontransitionend={handleTransitionEnd}
-      class="drawer-panel pb-safe md:pb-0 relative z-10 flex w-full max-h-[82dvh] h-[78dvh] md:h-full md:max-h-none md:w-[440px] lg:w-[460px] flex-col overflow-hidden rounded-t-2xl md:rounded-tr-none md:rounded-tl-xl border-t md:border-l border-border/65 bg-background text-foreground shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[-10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[-14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]"
+      class={`drawer-panel pb-safe md:pb-0 relative z-10 flex w-full ${
+        isContextMode
+          ? 'h-[84dvh] max-h-[88dvh] md:h-full md:max-h-none md:w-[560px] lg:w-[680px] xl:w-[760px]'
+          : 'max-h-[82dvh] h-[78dvh] md:h-full md:max-h-none md:w-[440px] lg:w-[460px]'
+      } flex-col overflow-hidden rounded-t-2xl md:rounded-tr-none md:rounded-tl-xl border-t md:border-l border-border/65 bg-background text-foreground shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[-10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[-14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]`}
       data-open={entered ? 'true' : 'false'}
       data-dragging={dragging ? 'true' : 'false'}
       style:transform={dragging || dragY > 0 ? `translate3d(0, ${dragY}px, 0)` : undefined}
@@ -172,6 +181,11 @@
 {/if}
 
 <style>
+  .drawer-overlay-root {
+    isolation: isolate;
+    contain: layout paint;
+  }
+
   .drawer-scrim {
     opacity: 0;
     transition: opacity var(--motion-sheet, 150ms) cubic-bezier(0.4, 0, 1, 1);
