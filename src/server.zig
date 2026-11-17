@@ -1,4 +1,5 @@
 const std = @import("std");
+const web_assets = @import("web_assets");
 const auth_mod = @import("auth.zig");
 const file_api = @import("file_api.zig");
 const mcp_mod = @import("mcp.zig");
@@ -10,6 +11,7 @@ pub const ServerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     web_dir_path: []const u8,
+    web_dir_explicit: bool = false,
     registry: *source_registry.SourceRegistry,
     mcp: ?*mcp_mod.McpService = null,
     auth: auth_mod.AuthGuard = .{},
@@ -777,6 +779,61 @@ const fallback_diagnostic_html =
     \\</html>
 ;
 
+fn respondStaticBytes(
+    request: *std.http.Server.Request,
+    bytes: []const u8,
+    mime: []const u8,
+) !void {
+    const headers = [_]std.http.Header{
+        .{ .name = "content-type", .value = mime },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "access-control-allow-origin", .value = "*" },
+    };
+    try request.respond(bytes, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn tryServeDiskAsset(
+    ctx: *const ServerContext,
+    arena: std.mem.Allocator,
+    request: *std.http.Server.Request,
+    target_rel: []const u8,
+) !bool {
+    var web_dir = std.Io.Dir.cwd().openDir(ctx.io, ctx.web_dir_path, .{}) catch return false;
+    defer web_dir.close(ctx.io);
+
+    const max_asset_bytes = std.Io.Limit.limited(32 * 1024 * 1024);
+    if (web_dir.readFileAlloc(ctx.io, target_rel, arena, max_asset_bytes)) |bytes| {
+        try respondStaticBytes(request, bytes, mimeTypeForPath(target_rel));
+        return true;
+    } else |_| {}
+
+    if (web_dir.readFileAlloc(ctx.io, "index.html", arena, max_asset_bytes)) |index_bytes| {
+        try respondStaticBytes(request, index_bytes, "text/html; charset=utf-8");
+        return true;
+    } else |_| {}
+
+    return false;
+}
+
+fn tryServeEmbeddedAsset(
+    request: *std.http.Server.Request,
+    target_rel: []const u8,
+) !bool {
+    if (web_assets.assets.len == 0) return false;
+    if (web_assets.get(target_rel)) |bytes| {
+        try respondStaticBytes(request, bytes, mimeTypeForPath(target_rel));
+        return true;
+    }
+    if (web_assets.get("index.html")) |index_bytes| {
+        try respondStaticBytes(request, index_bytes, "text/html; charset=utf-8");
+        return true;
+    }
+    return false;
+}
+
 fn serveStaticAsset(
     ctx: *const ServerContext,
     arena: std.mem.Allocator,
@@ -790,46 +847,13 @@ fn serveStaticAsset(
     };
     const target_rel = if (clean_rel.len == 0) "index.html" else clean_rel;
 
-    var web_dir = std.Io.Dir.cwd().openDir(ctx.io, ctx.web_dir_path, .{}) catch {
-        const headers = [_]std.http.Header{
-            .{ .name = "content-type", .value = "text/html; charset=utf-8" },
-            .{ .name = "access-control-allow-origin", .value = "*" },
-        };
-        try request.respond(fallback_diagnostic_html, .{
-            .status = .ok,
-            .extra_headers = &headers,
-        });
-        return;
-    };
-    defer web_dir.close(ctx.io);
-
-    const max_asset_bytes = std.Io.Limit.limited(32 * 1024 * 1024);
-    if (web_dir.readFileAlloc(ctx.io, target_rel, arena, max_asset_bytes)) |bytes| {
-        const mime = mimeTypeForPath(target_rel);
-        const headers = [_]std.http.Header{
-            .{ .name = "content-type", .value = mime },
-            .{ .name = "cache-control", .value = "no-store" },
-            .{ .name = "access-control-allow-origin", .value = "*" },
-        };
-        try request.respond(bytes, .{
-            .status = .ok,
-            .extra_headers = &headers,
-        });
-        return;
-    } else |_| {}
-
-    if (web_dir.readFileAlloc(ctx.io, "index.html", arena, max_asset_bytes)) |index_bytes| {
-        const headers = [_]std.http.Header{
-            .{ .name = "content-type", .value = "text/html; charset=utf-8" },
-            .{ .name = "cache-control", .value = "no-store" },
-            .{ .name = "access-control-allow-origin", .value = "*" },
-        };
-        try request.respond(index_bytes, .{
-            .status = .ok,
-            .extra_headers = &headers,
-        });
-        return;
-    } else |_| {}
+    if (ctx.web_dir_explicit) {
+        if (try tryServeDiskAsset(ctx, arena, request, target_rel)) return;
+        if (try tryServeEmbeddedAsset(request, target_rel)) return;
+    } else {
+        if (try tryServeEmbeddedAsset(request, target_rel)) return;
+        if (try tryServeDiskAsset(ctx, arena, request, target_rel)) return;
+    }
 
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "text/html; charset=utf-8" },
@@ -839,4 +863,14 @@ fn serveStaticAsset(
         .status = .ok,
         .extra_headers = &headers,
     });
+}
+
+test "embedded web_assets lookup and mime types" {
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", mimeTypeForPath("index.html"));
+    try std.testing.expectEqualStrings("application/javascript; charset=utf-8", mimeTypeForPath("assets/app.js"));
+    try std.testing.expectEqualStrings("text/css; charset=utf-8", mimeTypeForPath("assets/app.css"));
+    if (web_assets.assets.len > 0) {
+        const html = web_assets.get("index.html") orelse return error.MissingEmbeddedIndexHtml;
+        try std.testing.expect(std.mem.indexOf(u8, html, "<html") != null);
+    }
 }

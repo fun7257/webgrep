@@ -20,7 +20,9 @@ pub fn main(init: std.process.Init) !void {
         (std.fmt.parseInt(u16, p, 10) catch 8787)
     else
         8787;
-    var web_dir_arg: []const u8 = init.environ_map.get("WEBGREP_WEB_DIR") orelse "web/dist";
+    const env_web_dir = init.environ_map.get("WEBGREP_WEB_DIR");
+    var web_dir_arg: []const u8 = env_web_dir orelse "web/dist";
+    var web_dir_explicit: bool = (env_web_dir != null);
     var password_arg: ?[]const u8 = init.environ_map.get("WEBGREP_PASSWORD");
     var mcp_token_arg: ?[]const u8 = init.environ_map.get("WEBGREP_MCP_TOKEN");
     var mcp_stdio_mode = false;
@@ -39,7 +41,10 @@ pub fn main(init: std.process.Init) !void {
                 port_arg = std.fmt.parseInt(u16, val, 10) catch port_arg;
             }
         } else if (std.mem.eql(u8, arg, "--web-dir")) {
-            if (args_it.next()) |val| web_dir_arg = try arena.dupe(u8, val);
+            if (args_it.next()) |val| {
+                web_dir_arg = try arena.dupe(u8, val);
+                web_dir_explicit = true;
+            }
         } else if (std.mem.eql(u8, arg, "--password")) {
             if (args_it.next()) |val| password_arg = try arena.dupe(u8, val);
         } else if (std.mem.eql(u8, arg, "--mcp-token")) {
@@ -82,6 +87,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .io = io,
         .web_dir_path = web_dir_arg,
+        .web_dir_explicit = web_dir_explicit,
         .registry = &registry,
         .mcp = &mcp_service,
         .auth = auth_guard,
