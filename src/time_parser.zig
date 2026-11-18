@@ -1,5 +1,6 @@
 const std = @import("std");
 const libwebgrep = @import("libwebgrep");
+const prefilter = @import("prefilter.zig");
 
 pub const TimeMode = enum {
     auto,
@@ -21,6 +22,15 @@ pub const TimeMode = enum {
             .source => "source",
             .content => "content",
             .mtime => "mtime",
+        };
+    }
+
+    pub fn toPrefilter(self: TimeMode) prefilter.TimeFilterMode {
+        return switch (self) {
+            .auto => .auto,
+            .source => .source,
+            .content => .content,
+            .mtime => .mtime,
         };
     }
 };
@@ -2763,6 +2773,44 @@ pub const CompiledTimeParser = struct {
             .strftime => |*sf| sf.parseLine(raw_line, ctx),
             .json_field => |*jf| jf.parseLine(raw_line, ctx, cache),
             .regex_capture => |*rp| rp.parseLine(raw_line, ctx, scratch, cache),
+        };
+    }
+};
+
+pub const TimeHookAdapter = struct {
+    parser: *const CompiledTimeParser,
+    scratch: ?*libwebgrep.RegexScratch = null,
+    cache: ?*PrefixEpochCache = null,
+
+    pub fn parseHook(
+        raw_ctx: ?*anyopaque,
+        line: []const u8,
+        fallback_year: u16,
+        fallback_month: u8,
+        fallback_day: u8,
+        tz_offset_min: i16,
+        _: ?u32,
+    ) ?prefilter.TimeParseResult {
+        const self: *TimeHookAdapter = @ptrCast(@alignCast(raw_ctx orelse return null));
+        const ctx = FallbackTimeContext{
+            .year = fallback_year,
+            .month = fallback_month,
+            .day = fallback_day,
+            .tz_offset_sec = @as(i64, tz_offset_min) * 60,
+        };
+        const ns = self.parser.parseLine(line, ctx, self.scratch, self.cache) orelse return null;
+        return .{ .ts_ns = ns, .format_id = 100 };
+    }
+
+    pub fn continuationHook(_: ?*anyopaque, line: []const u8) bool {
+        return isLikelyContinuationLine(line);
+    }
+
+    pub fn toTimeHooks(self: *TimeHookAdapter) prefilter.TimeHooks {
+        return .{
+            .ctx = self,
+            .parseLineFn = if (self.parser.mode != .auto) parseHook else null,
+            .isContinuationFn = continuationHook,
         };
     }
 };

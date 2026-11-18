@@ -431,6 +431,8 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                         error.ExpectedFileFoundDir => respondErrorJson(&request, .bad_request, "当前选择的是「单文件」类型，但输入路径是一个目录"),
                         error.DockerUnavailable => respondErrorJson(&request, .bad_request, "未检测到可用的 Docker 守护进程或目标容器（请确认 Docker / OrbStack / Colima 已启动且 Socket 可访问）"),
                         error.InvalidDockerEndpoint => respondErrorJson(&request, .bad_request, "无效的 Docker 连接地址（支持留空自动识别、unix://、tcp:// 或容器目录路径）"),
+                        error.InvalidPluginPreset => respondErrorJson(&request, .bad_request, "无效的预过滤预设 (pluginPreset)"),
+                        error.InvalidPluginId => respondErrorJson(&request, .bad_request, "包含未知的预过滤插件 ID"),
                         else => respondErrorJson(&request, .internal_server_error, @errorName(err)),
                     }
                     continue;

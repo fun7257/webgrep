@@ -17,6 +17,7 @@
 9. [快捷键与命令面板规范](#九快捷键与命令面板规范)
 10. [移动端与触控规范](#十移动端与触控规范)
 11. [设置与数据源面板规范](#十一设置与数据源面板规范)
+12. [模块化架构与人机协作（Human-AI Collaboration）规范](#十二模块化架构与人机协作human-ai-collaboration规范)
 
 ---
 
@@ -30,8 +31,9 @@
 | **Svelte** | **`^5.57.2`** + `@sveltejs/vite-plugin-svelte` **`^7.3.1`** | 全面启用 **Svelte 5 Runes**（`$state`、`$state.raw`、`$derived`、`$derived.by`、`$effect`、`{#snippet}` / `{@render}`），**严禁混用 Svelte 4 旧语法**（`export let`、`$:`、`createEventDispatcher`、`<slot>`）。 |
 
 ### 必跑校验命令
-每次修改前端代码后，必须确保以下两条命令零报错通过：
+每次修改前端代码后，必须确保以下三条命令零报错通过：
 ```bash
+npm --prefix web run test    # Node 原生测试 (node --experimental-strip-types --test)
 npm --prefix web run check   # TypeScript 7 (tsc --noEmit) 全量类型检查 (<100ms)
 npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 ```
@@ -40,7 +42,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 ## 二、产品与交互规范：零负担渐进式搜索
 
-### 2.1 类 Google 纯净单文本搜索框与无限层级递进条件链（[`SearchBar.svelte`](../web/src/lib/components/SearchBar.svelte)）
+### 2.1 类 Google 纯净单文本搜索框与无限层级递进条件链（[`SearchBar.svelte`](../web/src/lib/components/SearchBar.svelte) + [`components/search/*`](../web/src/lib/components/search/)）
 - **纯净单文本搜索框（Pure Single-Text Search Box）**：
   - 搜索框内部始终保持纯粹的**单文本输入框**（`workbench.pattern`），不向输入框内部塞入折叠抽屉或内联胶囊，桌面端与移动端均保持极简清爽。
   - **空格即普通字面量空格**：单次输入内部的**空格一律视为普通字面量空格**（无需加双引号即可直接搜索含空格整句或正则）。
@@ -57,11 +59,11 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
     - 点击第 2 层及以后层级的 `+` / `-` 按钮可原地切换同行「包含 / 排除」；
     - 点击任意层级的文本可将该层条件连同开关状态原位取回单文本搜索框重新编辑；
     - 点击 `×` 移除该层级，末尾提供「清空条件链」一键重置。
-- **搜索框左侧双内嵌正交范围选择器（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) + [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)，Decoupled Source & Time Scope）**：
+- **搜索框左侧双内嵌正交范围选择器（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte) + [`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)，共享 [`pickers/FloatingPopoverShell.svelte`](../web/src/lib/components/pickers/FloatingPopoverShell.svelte) 与 [`pickers/DateTimeRangeSlots.svelte`](../web/src/lib/components/pickers/DateTimeRangeSlots.svelte)，Decoupled Source & Time Scope）**：
   - 数据源、时间范围与文本内容彻底解耦，**搜索框内不解析 `in:` 或 `time:` 等任何内联修饰词**（`in:foo`、`-O3`、`@Vector` 一律作为 100% 纯字面量内容检索）；**不再提供文件类型筛选入口**，也不再在搜索框下方单独占据一行 `ScopeBar`。
   - 放大镜图标紧邻右侧、细竖线左侧依次内嵌两大正交维度，与下方同源弹窗系统高度一致：
     1. **数据源（[`SourcePickerPopover.svelte`](../web/src/lib/components/SourcePickerPopover.svelte)）**：默认显示简洁的「全部」，单源时显示对应类型图标与源名（桌面带一键重置 `×`），多选时显示 `已选 N`；点击弹出与 `bg-popover` 主题同源的列表勾选浮层——桌面端锚定于触发器正下方并自动视口裁边、自动聚焦顶部**模糊搜索**输入框（支持子序列与空格多词匹配及 `text-primary` 字符高亮）、仅在存在 2 种及以上源类型时渐进渲染单色分类键帽、置顶 `[✓] 全部数据源`、整行点击实时切换勾选且保持列表展开方便连续多选、全部取消勾选自动回到「全部」、支持 `Alt+点击` 排除与 `↑↓`/`Enter`/`Tab`/`Esc` 键盘流（无冗余行尾「仅看」按钮）；移动端为可下拉关闭底部面板；
-    2. **时间范围（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)）**：桌面端默认显示「不限」与下拉箭头、窄屏（`< 640px`）空闲态自动收拢为纯净时钟图标以守住 `<input>` 宽度预算（选定后高亮显示紧凑时长如 `45m`/`今天`/`11-14..`）；点击弹出与 `SourcePickerPopover` 1:1 同源的 `bg-popover` 主题面板（移动端为可下拉关闭底部面板），顶部提供自动聚焦的高自由度快捷输入栏（支持模糊过滤内置预设、`45m` / `2h` / `最近10分钟` 等任意相对时长及整行日志/时间戳/区间直接粘贴解析，按回车 1 键直达并实时联动下方槽位）；默认态顶部置顶 `[✓] 全部时间` 与一行紧凑「当前数据源时间基准摘要 + 配置跳转」；主体为按排障时间尺度分层的 3×4 快捷矩阵（`5m` / `15m` / `30m` / `1h`、`3h` / `6h` / `12h` / `24h`、`今天` / `昨天` / `7d` / `30d`），悬停/键盘移动与重开面板时自动实时同步至下方分段槽位；下方为默认预填好的 `起 / 止` 分段式 `年 月 日 | 时:分:秒` 槽位输入框（支持点击整段高亮、智能自动跳格、`↑↓` 步进微调、`现在` 开放上界切换、以及整行日志与 20+ 种时间戳/区间直接粘贴提取）；实际时间筛选依据采用**按数据源独立不叠加**的 `timeMode: 'source'` 模型——默认普通目录/文件源仅按文件 `stat.mtime` 筛选、配置了 `config.timeFormat` 为 `'auto'`（作为 `内容时间` 下的默认第一选项，内置 20+ 种常见时间格式零分配自动嗅探）或自定义 `yyyy-MM-dd` / `yyyy-hm` 日期图像、传统 `strftime`、`json:<field>`、`regex:<pattern>` 的日志源及 `docker` 零落盘容器日志源（默认 `'auto'`，也可显式切为 `文件修改时间`）则仅按行内解析时间戳 + 堆栈续行回溯筛选，且在添加/编辑数据源时通过 [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) 二分开关（`文件修改时间` | `内容时间`）结合 `POST /api/time/preview` 随时对自动识别或自定义格式实时测试样例日志），修改任一范围会基于当前有效条件自动执行/更新（或点击 `×` / `全部时间` 重置）。
+    2. **时间范围（[`TimeRangePicker.svelte`](../web/src/lib/components/TimeRangePicker.svelte)）**：桌面端默认显示「不限」与下拉箭头、窄屏（`< 640px`）空闲态自动收拢为纯净时钟图标以守住 `<input>` 宽度预算（选定后高亮显示紧凑时长如 `45m`/`今天`/`11-14..`）；点击弹出与 `SourcePickerPopover` 1:1 同源的 `bg-popover` 主题面板（移动端为可下拉关闭底部面板），顶部提供自动聚焦的高自由度快捷输入栏（支持模糊过滤内置预设、`45m` / `2h` / `最近10分钟` 等任意相对时长及整行日志/时间戳/区间直接粘贴解析，按回车 1 键直达并实时联动下方槽位）；默认态顶部置顶纯净的 `[✓] 不限时间`（搜索时只专注时间范围选择，不在搜索栏或弹窗中暴露“内容时间/行时间/文件时间”区分）；主体为按排障时间尺度分层的 3×4 快捷矩阵（`5m` / `15m` / `30m` / `1h`、`3h` / `6h` / `12h` / `24h`、`今天` / `昨天` / `7d` / `30d`），悬停/键盘移动与重开面板时自动实时同步至下方分段槽位；下方为默认预填好的 `起 / 止` 分段式 `年 月 日 | 时:分:秒` 槽位输入框（支持点击整段高亮、智能自动跳格、`↑↓` 步进微调、`现在` 开放上界切换、以及整行日志与 20+ 种时间戳/区间直接粘贴提取）；底层如何解析时间戳或按文件时间剪枝，完全在配置数据源时通过统一的 [`SourcePrefilterEditor.svelte`](../web/src/lib/components/settings/SourcePrefilterEditor.svelte)（内含 [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) 结合 `POST /api/time/preview` 实时测试示例行）一次性确认。
 
 ### 2.2 查询模型、严格单行匹配与前端缓存规范（[`query.ts`](../web/src/lib/query.ts) / [`state.svelte.ts`](../web/src/lib/state.svelte.ts) / [`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）
 
@@ -72,10 +74,10 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 |------|------|----------|
 | 多层级条件链 + 当前输入 | 所有条件必须在**同一行**同时满足（AND 管道），每个条件内部空格保留为字面量空格 | 正向条件首位作为 `primaryPattern`、其余作 `contains`，否定条件作 `excludes`（第 2 层及以后可通过 `+`/`-` 切换，或只保留至少 1 个正向词/时间范围） |
 | `Aa` / `ab` / `.*` 显式开关 | 分别控制当前步骤区分大小写（`$c`）、全词匹配（`$w`）、正则模式（`$r`），可任意组合为 `$rc` / `$rw` / `$cw` / `$rcw` | 默认全关；纯文本恰好形如 `$x(...)` 时在编译期用 `$r(...)` 转义防止后端误解析为修饰符；正则编译失败直接报错诊断，严禁静默退化 |
-| 独立范围筛选（`ScopeFilter`） | `sources`、`excludedSources`（编码为 `globs: ["!id"]`）、`timePreset`（内置预设或自定义 `开始..结束` 区间，编译为 `timeStartMs` / `timeEndMs`）、`timeMode: 'source'`（按数据源 `config.timeFormat` 与流路径自动决定 `mtime` 或行内时间戳，**互不叠加**）、`sourceTimeFormatsSig` 与 `tzOffsetMin` | 与文本检索解耦，不占用搜索框字符（`types` 已从界面移除并固定为空数组）；无文本输入时单独选择 `timePreset` 亦可触发按时间过滤检索（`mtime` 源空关键字按单文件 1 条摘要输出，内容时间源按行内时间戳流式返回且不叠加文件 `mtime` 预裁剪）；上述字段及数据源格式签名均纳入前端 L0 与后端 L1/L2 缓存键完全隔离 |
+| 独立范围筛选（`ScopeFilter`） | `sources`、`excludedSources`（编码为 `globs: ["!id"]`）、`timePreset`（内置预设或自定义 `开始..结束` 区间，编译为 `timeStartMs` / `timeEndMs`）、`timeMode: 'source'`（按数据源 `config.timeFormat` 与流路径自动决定 `mtime` 或行内时间戳，**互不叠加**）、`sourceTimeFormatsSig`、`sourcePluginsSig` 与 `tzOffsetMin` | 与文本检索解耦，不占用搜索框字符（`types` 已从界面移除并固定为空数组）；无文本输入时单独选择 `timePreset` 亦可触发按时间过滤检索（`mtime` 源空关键字按单文件 1 条摘要输出，内容时间源按行内时间戳流式返回且不叠加文件 `mtime` 预裁剪）；上述字段及数据源时间格式/预过滤插件配置签名（`sourcePluginsSig`）均纳入前端 L0 与后端 L1/L2 缓存键完全隔离 |
 | 严格单行匹配（`nearbyLines = 0`） | 前后端强制 `nearbyLines = 0`、`strictLine = true`，界面不再提供跨行邻近兜底 | 确保每条命中都在同一行内同时满足全部 `+`/`-` 条件 |
 | 4 层缓存与持久化体系 | `localStorage` 结构化历史/设置 + 内存 L0 步骤 LRU 精确缓存 + 16 槽位上下文预览 LRU | **搜索历史**（`MAX_SEARCH_HISTORY = 30`）仅在用户显式点击/回车执行后按 `historyId` 去重写入；**L0 结果缓存**（`MAX_L0_ENTRIES = 24`、单条 `<= 20,000`、总行预算 `<= 50,000`、`30s` TTL）键包含 `tenant`、`sourceRevision`、生效源列表、`ScopeFilter`、`QueryStep[]` 与 `timeBucket`，命中后真正短路零网络请求并重建 `groupIndexByFile` 索引同时保留 `HitItem` 对象引用以命中 `WeakMap` 缓存；**预览 LRU** 配合 `AbortController` + `inspectSeq` 序号守卫防旧响应竞态 |
-- **单条记录纯粹预览（[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte)）与按需上下文抽屉（[`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte)）**：
+- **单条记录纯粹预览（[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte) + [`inspector/InspectorHeader.svelte`](../web/src/lib/components/inspector/InspectorHeader.svelte) + [`inspector/StructuredRecordView.svelte`](../web/src/lib/components/inspector/StructuredRecordView.svelte)）与按需上下文抽屉（[`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte)）**：
   - 预览窗口默认**100% 专注当前选中的单条命中记录**（`context = 0`，不在主预览正文直接混入前后无关邻近行），采用统一克制的灰阶卡片承载；
   - 若命中行的流式文本未触及 4,096 UTF-8 字节截断上限（`< 4092` 字节），切换命中时直接零网络延迟即时渲染（0ms），仅当记录可能被截断或直接按路径+行号打开时才按 `context=0` 请求 `/api/file` 获取完整单条记录（最高 512 KiB）；
   - 需要排查当前记录前后的相邻日志或代码上下文时，可在 `InspectorPane` 顶部点击上下文图标按钮（或命令面板 `查看当前命中上下文`），复用 [`RightDrawer.svelte`](../web/src/lib/components/RightDrawer.svelte) + [`DrawerTemplate.svelte`](../web/src/lib/components/ui/DrawerTemplate.svelte) 从右侧滑出（移动端为可下拉关闭的底部抽屉，采用纯容器内滚动定位与 `overflow-clip` + `contain: layout paint` 合成隔离，严禁调用 `scrollIntoView` 牵动底层工作区），默认以目标行居中高亮加载上下各 `10` 行（可通过设置项 `contextInitialLines` 配置 `1–100`），通过 `highlightCodeWithMatches` 对常见日志级别/时间戳/URL/JSON/KV/YAML/TOML/SQL 与多语言代码行自动做语法与语义高亮，并在右上角操作区提供 **「#行号」** 一键定位回中、一键切换格式化展开（`<Braces />` / `<FileText />`）与一键复制；[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte) 顶栏提供一键分享图标按钮（`?share=`，冻结完整多步条件、开关、数据源、执行时间窗口、预览视图模式及当前命中定位，支持打开链接 100% 确定性重放）；摒弃翻页按钮与弹性阻尼松手门槛，直接在列表顶部/底部滑到边缘时按可配节奏（`contextAutoLoadPace`：慢 `480ms` / 标准 `240ms` / 快 `90ms`）自动触发增量加载上文/下文（每次默认 `10` 行，可通过设置项 `contextStepLines` 配置 `1–100`；普通文件通过命中 `byteOffset` + 窗口 `firstByte`/`nextByte` 游标实现 `64 KiB` `pread` `O(window)` 毫秒级加载，向上追加通过 `flushSync` + 目标行位置差值锚定实现零跳动滚动），同时适配普通文件、压缩流、归档 `::` 虚拟路径与 Docker `since` 行号对齐预览；
@@ -91,7 +93,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 
 ## 三、Svelte 5 细粒度响应式与内存管理铁律
 
-### 3.1 大数据集强制使用 `$state.raw`（[`state.svelte.ts`](../web/src/lib/state.svelte.ts)）
+### 3.1 大数据集强制使用 `$state.raw`（[`state.svelte.ts`](../web/src/lib/state.svelte.ts) + [`state/stream-buffer.ts`](../web/src/lib/state/stream-buffer.ts)）
 流式搜索结果经常包含数千至数万条 `HitItem`。如果使用普通 `$state([])`，Svelte 5 会递归将每一条 `HitItem` 及其 `spans` 数组包装为 `Proxy`，导致严重的内存膨胀与 GC 停顿。
 
 - **错误写法（严禁）**：
@@ -106,7 +108,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
   fileGroups = $state.raw<FileHitGroup[]>([]);
   flatHits = $state.raw<HitItem[]>([]);
   ```
-  在 [`flushPendingHitsSync`](../web/src/lib/state.svelte.ts) 中合并流式分片时，仅对本次有新增命中的 `FileHitGroup` 做浅拷贝（`touchedGroups`），未发生变动的文件分组保持原对象引用不变。
+  在 [`flushPendingHitsSync`](../web/src/lib/state.svelte.ts) 与 [`mergeHitChunks`](../web/src/lib/state/stream-buffer.ts) 中合并流式分片时，仅对本次有新增命中的 `FileHitGroup` 做浅拷贝（`touchedGroups`），未发生变动的文件分组保持原对象引用不变。
 
 ### 3.2 消除 `{#each}` 内部广播依赖（O(1) 选中态更新）
 在虚拟列表 `{#each visibleSlice.items as row (row.key)}` 中，严禁在每行内部直接读取高频变化的全局对象信号。
@@ -126,19 +128,19 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
   {@const active = row.idx === workbench.activeHitIndex}
   ```
 
-### 3.3 `WeakMap` 零分配高亮分词缓存（[`utils.ts`](../web/src/lib/utils.ts)）
+### 3.3 `WeakMap` 零分配高亮分词缓存（[`highlight/segments.ts`](../web/src/lib/highlight/segments.ts) / [`utils.ts`](../web/src/lib/utils.ts)）
 单条 JSON 日志行可达数千字符。若在滚动帧或选中态切换时重复调用 `buildHighlightSegments`（含 `toLowerCase()`、Span 排序、长行窗口裁剪与字符串切片），会产生大量短命对象分配并触发 GC 掉帧。
 
 - **强制规范**：
-  - 虚拟列表中的高亮分词必须调用 [`getCachedHighlightSegments(item, containsTerms, isCaseInsensitive, segmentCacheKey)`](../web/src/lib/utils.ts)；
+  - 虚拟列表中的高亮分词必须调用 [`getCachedHighlightSegments(item, containsTerms, isCaseInsensitive, segmentCacheKey)`](../web/src/lib/highlight/segments.ts)（亦由门面 [`utils.ts`](../web/src/lib/utils.ts) 统一转发）；
   - 内部使用 `WeakMap<HitItem, { cacheKey: string; segments: HighlightSegment[] }>` 缓存分词结果；
   - 滚动与上下键导航时直接 **O(1) 命中缓存（零内存分配）**；当新搜索替换 `flatHits` 后，旧 `HitItem` 引用脱离，由引擎自动垃圾回收，无任何内存泄漏风险。
-  - 文件路径解析统一调用带缓存的 [`splitFilePath(filePath)`](../web/src/lib/utils.ts)。
+  - 文件路径解析统一调用带缓存的 [`splitFilePath(filePath)`](../web/src/lib/format.ts)（亦由门面 [`utils.ts`](../web/src/lib/utils.ts) 统一转发）。
 
 ### 3.4 编译级模板复用 `{#snippet}`
-对于列表行、详情面板（JSON 视图 / 原文视图 / KV 视图）中重复出现的高亮片段渲染，优先使用 Svelte 5 的 `{#snippet renderSegments(segments)}` 与 `{@render renderSegments(segments)}`。严禁将高频渲染的单行词元拆分为独立 `.svelte` 子组件而引入额外的组件实例开销。
+对于列表行、详情面板（[`StructuredRecordView.svelte`](../web/src/lib/components/inspector/StructuredRecordView.svelte) 中的 JSON/KV 视图、[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte) 原文视图及 [`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte)）中重复出现的高亮片段渲染，优先使用 Svelte 5 的 `{#snippet renderSegments(segments)}` / `{#snippet renderHighlighted(text)}` / `{#snippet renderCodeSegments(segments)}` 与 `{@render ...}`。严禁将高频渲染的单行词元拆分为独立 `.svelte` 子组件而引入额外的组件实例开销。
 
-> 适用范围仅限结果列表与详情中的**高频行内片段**。设置、数据源等低频面板应拆分为小组件复用（`ui/SettingRow`、`ui/Segmented`、`settings/*Pane`，见第十一章），以保持单文件职责单一。
+> 适用范围仅限结果列表与详情中的**高频行内片段**。搜索栏、范围弹窗、预览顶栏、设置与数据源等低频面板或共享外壳应拆分为小组件复用（`ui/SettingRow`、`ui/Segmented`、`settings/*Pane`、`search/*`、`pickers/*`、`inspector/*`，见第十一、十二章），以保持单文件职责单一。
 
 ---
 
@@ -207,6 +209,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 1. **状态栏左侧视觉锚点固定（[`TelemetryBar.svelte`](../web/src/lib/components/TelemetryBar.svelte)）**：
    - 命中数（`Hash` 图标 + 数字）必须永远固定在状态栏最左侧第一位；
    - 临时状态（检索中的转圈与 `Square` 停止图标、完成后的 `Timer` 图标 + 耗时）共用其右侧的同一槽位原地切换；
+   - 当 `done` 帧报告 `filesPruned > 0` 时，预过滤剪枝指标胶囊（`-N · saved`）仅挂载于耗时与上限警告图标之后，确保 `filesPruned = 0` 时零像素偏移且整栏高度恒定 `h-6`；
    - **严禁**在最左侧动态插入/移除临时状态元素，杜绝搜索开始和结束时整行内容与胶囊左右横跳。
 2. **结果行高单调锁死（[`ResultList.svelte`](../web/src/lib/components/ResultList.svelte) `lockedMaxLines`）**：
    - 同一次搜索、同一 `previewLines`（1–6，默认 3）、字号与容器宽度桶下的流式追加过程中，多行预览的最大行数（1 ~ `previewLines` 行）只增不减，仅在开启新搜索、修改 `previewLines` 或调整布局时重置，防止后续分片到达时已渲染行上下抽动；
@@ -238,8 +241,10 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - [ ] 新增按钮、状态是否优先用图标，文字是否放进 `title` / `aria-label`？
 - [ ] 可点击元素在触屏下命中区是否 ≥ 44px（`.touch-target`）？是否依赖 `hover` 才能看到核心操作？
 - [ ] 窄屏（< 768px）下列表/详情/设置是否仍可用？输入框字号在触屏下是否为 16px（避免 iOS 聚焦放大）？
-- [ ] 快捷键是否使用 `e.code`（`Alt + C` / `Alt + W` / `Alt + R` / `?` / `⌘,`）、是否同步更新了顶栏一级「快捷键说明」抽屉（`i18n.ts` / `ShortcutsPane.svelte`）？
-- [ ] 文案是否进入 `i18n.ts`（zh / en 同步），组件内有无散落的 `locale === 'zh' ? … : …`？
+- [ ] 快捷键是否使用 `e.code`（`Alt + C` / `Alt + W` / `Alt + R` / `?` / `⌘,`）、是否同步更新了顶栏一级「快捷键说明」抽屉（`i18n/zh.ts`、`i18n/en.ts` / `ShortcutsPane.svelte`）？
+- [ ] 文案是否进入 `i18n/zh.ts` 与 `i18n/en.ts`（经 `i18n.ts` 门面导出，zh / en 同步），组件内有无散落的 `locale === 'zh' ? … : …`？
+- [ ] 纯 TypeScript 模块（`web/src/lib/**/*.ts`，不含 `.svelte.ts`）与测试文件（`web/tests/**/*.test.ts`）是否对相对路径导入显式携带 `.ts` 后缀且不使用 `$lib/` 别名？
+- [ ] 职责边界是否遵循第十二章模块化规范（高频内联词元保留为 `{#snippet}`、低频区域拆分子组件、门面导出零运行时损耗）？
 - [ ] `npm --prefix web run test && npm --prefix web run check && npm --prefix web run build` 是否零报错、零警告通过？
 
 ---
@@ -301,7 +306,7 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 1. `Alt + 字母` 必须用 `e.code`（`KeyC`、`KeyW`、`KeyR` 等）判断，macOS 下 `e.key` 会变成特殊字符；且仅在未按 `meta/ctrl` 时生效。
 2. 不占用浏览器保留键（如 `⌘D` 加书签）。新增入口优先放进命令面板，而不是新增全局快捷键。
 3. `Alt + C`、`Alt + W`、`Alt + R` 分别对应搜索框内当前步骤的 `Aa`、`ab`、`.*` 显式开关。
-4. 新增、修改快捷键必须同步更新 `i18n.ts` 的 `shortcuts.items`（带 `group: 'syntax' | 'nav' | 'panel'`），设置的「快捷键」页会据此分组渲染。
+4. 新增、修改快捷键必须同步更新 [`i18n/zh.ts`](../web/src/lib/i18n/zh.ts) 与 [`i18n/en.ts`](../web/src/lib/i18n/en.ts)（经 [`i18n.ts`](../web/src/lib/i18n.ts) 门面导出）的 `shortcuts.items`（带 `group: 'syntax' | 'nav' | 'panel'`），设置的「快捷键」页会据此分组渲染。
 
 ## 十、移动端与触控规范
 
@@ -337,8 +342,61 @@ npm --prefix web run build   # Vite 8 (Rolldown) 生产环境打包校验
 - 会重新搜索的设置（最大结果数、`hidden`、`respectIgnore`）走“保存 + 在有已生效查询时重搜”；仅影响显示的设置（字体大小、自动换行、行距、单条预览行数 `previewLines`、上下文默认上下行数 `contextInitialLines`、每次加载条数 `contextStepLines`、自动加载调速 `contextAutoLoadPace`）只保存并即时生效。
 - 数据源：
   - 类型支持 `dir`（目录）、`file`（单文件）与 `docker`（零落盘 Docker 容器日志）三段式 [`ui/Segmented`](../web/src/lib/components/ui/Segmented.svelte) 切换；`docker` 默认使用 `auto` 自动探测本机套接字/守护进程并默认启用 `'auto'` 内容时间解析（支持显式切换为 `文件修改时间`），输入框聚焦或输入时走 `/api/sources/complete?kind=docker` 自动补全全部容器与单容器目标 `endpoint::容器名`。
+  - 统一数据源模式、时间格式确认与插件微调：在添加与编辑数据源（[`SourcePrefilterEditor.svelte`](../web/src/lib/components/settings/SourcePrefilterEditor.svelte) + [`SourceTimeFormatEditor.svelte`](../web/src/lib/components/settings/SourceTimeFormatEditor.svelte) + [`prefilter.ts`](../web/src/lib/prefilter.ts)）中整合为单一卡片——顶部提供单行 `Segmented` 数据源模式切换（`auto` 自动 / `timeseries` 时序 / `code` 代码 / `raw` 原始），非 `code` 模式下内联提供可折叠的「时间格式」确认与示例行实时验证（不再额外展示“文件修改时间 vs 内容时间”开关，也不区分“内容时间”和“行时间”），底部提供默认折叠的「插件微调 / Plugins」开关列表，修改模式、时间格式或插件覆盖会同步刷新 `sourceTimeFormatsSig` / `sourcePluginsSig` 并即时失效 L0 缓存。
   - 添加表单内联在数据源页（`workbench.sourceAddOpen`），`openSettings('add-source')` 仅作为“打开数据源页并展开表单”的别名，不是独立标签页。
   - 行结构：类型图标（缺失路径变状态色警告）、名称、路径、启用开关、删除。停用的行整体变淡。
   - 删除为**两步确认**（第一次点击图标变为对勾，2.5 秒内再点才删除），不得改回一键删除。
   - 路径补全的目录项右侧有进入下一级的 `>` 按钮，不依赖键盘 `Tab`。
 - 所有文案（含错误提示、占位符）走 `t.settings.*` / `t.ui.*`，禁止在组件里写死中英文。
+
+---
+
+## 十二、模块化架构与人机协作（Human-AI Collaboration）规范
+
+为避免单文件膨胀超过千行带来的语义退化、类型检查拖慢与并行修改冲突，前端工作台（`web/src/lib/`）按**职责正交、热路径隔离、门面稳定**三项工程原则拆分为清晰的多层模块体系。
+
+### 12.1 精准模块边界与目录布局
+
+| 目录 / 模块 | 职责边界 | 核心导出 / 组件 |
+| :--- | :--- | :--- |
+| [`lib/format.ts`](../web/src/lib/format.ts) | 通用样式合并、剪贴板、字节/耗时格式化、路径缓存与纳秒/Epoch 时间提取 | `cn`、`copyTextToClipboard`、`formatBytes`、`formatMs`、`formatThroughput`、`splitFilePath`（4096 项缓存 + `::` 归档虚拟路径）、`skipLeadingNanoTimestampOffset`、`extractLeadingNanoTimestamp`、`detectInlineEpochHint` |
+| [`lib/highlight/*`](../web/src/lib/highlight/segments.ts) | 搜索词编译、匹配区间分段、`WeakMap` 零分配缓存与语法/语义融合分词 | `highlight/segments.ts`（`compileTermMatcher` 256 项 LRU、`collectTermSpans`、`buildHighlightSegments`、`getCachedHighlightSegments`）；`highlight/syntax.ts`（`tokenizeCodeSyntax`、`syntaxKindToClass`、`highlightCodeWithMatches`） |
+| [`lib/structured/*`](../web/src/lib/structured/analyzer.ts) | 单条记录结构化解码与格式化 | `structured/analyzer.ts`（`decodeHumanEscapes`、`universalPrettyStructure`、`analyzeStructuredLine`〔128 项 LRU + 256KB 阈值〕、`formatContextRecordPretty`） |
+| [`lib/time-range/*`](../web/src/lib/time-range/presets.ts) | 时间预设矩阵、粘贴解析、起止槽位状态与快捷表达式匹配 | `presets.ts`（预设矩阵与标签格式化）、`paste-parser.ts`（日志/时间戳粘贴提取）、`slots.ts`（`YYYY-MM-DD \| HH:MM:SS` 分段槽位与同步解析）、`quick-candidates.ts`（`parseQuickTimeExpression`、`matchQuickTimeCandidates`） |
+| [`lib/i18n/*`](../web/src/lib/i18n/zh.ts) | 中英双语静态文案字典（**禁止加 `as const`**，保证两端键/类型对等校验） | `i18n/zh.ts`（`zh`）、`i18n/en.ts`（`en: typeof zh`） |
+| [`lib/state/*`](../web/src/lib/state/persistence.ts) | 状态持久化、纯 HTTP 客户端、Copy-on-Write 流式缓冲、查询纯变换与 WS 传输 | `persistence.ts`（`localStorage` 读写与历史/设置归一化）、`api-client.ts`（注入 `fetcher` 的无状态 API 客户端）、`stream-buffer.ts`（`mergeHitChunks` 身份保持型 CoW 与 16 槽位 `FileContextLruCache`）、`query-actions.ts`（范围/步骤纯转换）、`ws-transport.ts`（`SearchWsTransport`、650ms 降级计时与 48B 报文快滤） |
+| [`lib/state.svelte.ts`](../web/src/lib/state.svelte.ts) | Svelte 5 Runes 全局响应式协调器（热路径直接持有 `$state.raw`） | `WorkbenchState`、`workbench`、Stale-While-Revalidate 与 VSync 自适应冲刷调度 |
+| [`components/search/*`](../web/src/lib/components/search/SearchScopeTriggers.svelte) | 搜索栏三块可独立演进的子区域（主组件 `SearchBar.svelte` 保留输入/键盘/补全调度） | `SearchScopeTriggers.svelte`（放大镜右侧数据源/时间触发器）、`SearchAttachedDropdown.svelte`（移动端 `SymbolBar` + 历史/词库/正则提示）、`ConditionChainBar.svelte`（`#1 -> #2 -> #3` 条件链） |
+| [`components/pickers/*`](../web/src/lib/components/pickers/FloatingPopoverShell.svelte) | 范围选择器共享浮层外壳与分段式日期时间槽位控件 | `FloatingPopoverShell.svelte`（桌面视口裁边 `bg-popover` 浮层 + 移动端下拉关闭抽屉）、`DateTimeRangeSlots.svelte`（`起/止` 年月日时分秒输入与粘贴提取） |
+| [`components/inspector/*`](../web/src/lib/components/inspector/InspectorHeader.svelte) | 单条命中记录右侧预览栏拆分（`InspectorPane.svelte` 统筹数据、缓存、原文与手势） | `InspectorHeader.svelte`（位置面包屑、划词操作、`data-inspector-context-btn`、零延迟视图切换、复制/分享/关闭）、`StructuredRecordView.svelte`（递归 JSON 树、KV 视图、格式视图与内联 `{#snippet}`） |
+
+### 12.2 零成本门面转发规则（Zero-Cost Barrel Facade Rule）
+- [`utils.ts`](../web/src/lib/utils.ts)、[`time-range.ts`](../web/src/lib/time-range.ts) 与 [`i18n.ts`](../web/src/lib/i18n.ts) 作为稳定的公共门面（Barrel Facade），统一分组 `export { ... } from './...'` 转发对应子模块的所有函数、常量与类型。
+- **构建期零开销**：Vite 8（Rolldown）在生产构建阶段会自动执行跨模块静态 Tree-shaking 与内联，门面文件不产生任何运行时包装函数或打包体积膨胀。
+- **兼容性与演进**：现有 `.svelte` 组件与核心测试可继续从 `$lib/utils`、`$lib/time-range`、`$lib/i18n` 导入，保证重构期外部调用零破坏；新开发内部子模块时，同域内部互引直接引用精细子模块路径（如 `./format.ts`、`./slots.ts`），避免经由顶层门面产生循环依赖。
+
+### 12.3 Node 原生测试显式 `.ts` 导入铁律（`node --experimental-strip-types`）
+- 仓库单测（`npm --prefix web run test`）直接通过 Node 原生 `node --experimental-strip-types --test` 运行，**不经过 Vite/Rollup 别名转换**。
+- **强制规则**：
+  1. 凡在纯 TypeScript 模块（`web/src/lib/**/*.ts`，**不含** `.svelte.ts`）及测试文件（`web/tests/**/*.test.ts`）中引入同仓相对模块，**必须显式写出 `.ts` 文件扩展名**（例如 `import type { HitItem } from '../types.ts';`、`import { splitFilePath } from './format.ts';`）；
+  2. 上述纯 `.ts` 文件中**严禁使用 `$lib/` 路径别名**，否则 `npm --prefix web run test` 将在 Node 原生解析阶段直接报错 `ERR_MODULE_NOT_FOUND`；
+  3. [`tsconfig.json`](../web/tsconfig.json) 已启用 `"allowImportingTsExtensions": true` 与 `"noEmit": true`，保证 `tsc --noEmit` 与 Node 原生运行期对 `.ts` 后缀解析完全一致；
+  4. 仅 `.svelte` 组件与 `.svelte.ts` Runes 文件交由 Vite + `@sveltejs/vite-plugin-svelte` 编译，可按惯例使用 `$lib/*`（或无后缀相对路径）。
+
+### 12.4 `{#snippet}` vs `.svelte` 子组件拆分边界
+- **高频内联渲染 → 必须保留为组件内 `{#snippet}`**：
+  - 虚拟列表行内高亮分段、[`StructuredRecordView.svelte`](../web/src/lib/components/inspector/StructuredRecordView.svelte) 中的 `renderSegments` / `renderHighlighted`、[`InspectorPane.svelte`](../web/src/lib/components/InspectorPane.svelte) 与 [`ContextDrawerPane.svelte`](../web/src/lib/components/ContextDrawerPane.svelte) 中的 `renderCodeSegments`，均属于每帧/每次按键可触发数百至上千次的微片段渲染。
+  - Svelte 5 会将 `{#snippet}` 编译为轻量的内联函数调用；**严禁**将单个高亮词元、标签徽章或行内 token 拆成独立的 `.svelte` 子组件，以免引入组件实例分配与响应式边界开销。
+- **低频结构化区域与共享交互外壳 → 应当拆分为独立 `.svelte` 子组件**：
+  - 如 `components/search/*`、`components/pickers/*`、`components/inspector/InspectorHeader.svelte`、`components/ui/*`、`components/settings/*` 等具备清晰 Props 契约、独立 DOM 状态或跨处复用的模块，拆分为独立组件可显著降低单文件认知负担、消除重复模板并提升增量编译效率。
+
+### 12.5 人机协同与多 Agent 并行无冲突所有权规范
+为支持人类工程师与多 AI Agent（或 `/swarm` 工作流）安全并行开发，按**正交文件域 + 冻结公共契约**原则约束变更边界：
+1. **契约先行，按域互斥认领**：跨模块改动前先对齐公共类型与门面签名（[`types.ts`](../web/src/lib/types.ts)、[`utils.ts`](../web/src/lib/utils.ts)、[`time-range.ts`](../web/src/lib/time-range.ts)、[`i18n.ts`](../web/src/lib/i18n.ts)、`WorkbenchState` 公开方法），随后按正交子域分配独占文件所有权：
+   - **渲染工具与语法域**：`format.ts`、`highlight/*`、`structured/*`、`utils.ts`
+   - **时间与国际化域**：`time-range/*`、`time-range.ts`、`i18n/*`、`i18n.ts`
+   - **核心状态与传输域**：`state/*`、`state.svelte.ts`
+   - **搜索与范围弹窗域**：`components/search/*`、`components/pickers/*`、`SearchBar.svelte`、`TimeRangePicker.svelte`、`SourcePickerPopover.svelte`
+   - **记录预览与文档域**：`components/inspector/*`、`InspectorPane.svelte`、`docs/FRONTEND_GUIDE.md`、`AGENTS.md`
+2. **严格禁止双写与越界修改**：同一任务周期内严禁两位开发者或两个 Agent 同时编辑同一文件；未获明确授权时，非虚拟列表专项任务不得改动 [`ResultList.svelte`](../web/src/lib/components/ResultList.svelte) 或破坏 `state.svelte.ts` 中 `$state.raw` 与 `HitItem` 引用不变性。
+3. **独立验证门禁**：每次并行合流后，必须按序执行 `npm --prefix web run test && npm --prefix web run check && npm --prefix web run build` 与 `zig build && zig build test`，确认零类型错误、零单测回归及 Vite 构建正常。

@@ -48,6 +48,9 @@ pub const CAPABILITIES = [_]CapabilityMeta{
             .{ .name = "timePreset", .type = "string", .required = false, .description = "Relative time window: 5m, 15m, 30m, 1h, 6h, 24h, today, 7d, 30d" },
             .{ .name = "timeStartMs", .type = "integer", .required = false, .description = "Inclusive Unix epoch start timestamp in ms" },
             .{ .name = "timeEndMs", .type = "integer", .required = false, .description = "Inclusive Unix epoch end timestamp in ms" },
+            .{ .name = "pluginPreset", .type = "string", .required = false, .description = "Prefilter preset override: auto | timeseries | code | raw" },
+            .{ .name = "plugins", .type = "object", .required = false, .description = "Per-query plugin overrides: { enable?: string[], disable?: string[] }" },
+            .{ .name = "kvPredicates", .type = "object[]", .required = false, .description = "JSON/logfmt structured line predicates: [{ key, op: eq|neq|contains|gt_num|lt_num|exists, value, caseSensitive }]" },
             .{ .name = "maxResults", .type = "integer", .required = false, .description = "Max hits to return (default 50, range 1..500)" },
         },
     },
@@ -1024,6 +1027,9 @@ pub const McpService = struct {
         const sources = try extractStringArrayAlloc(arena, args_obj, "sources");
         const file_globs = try extractStringArrayAlloc(arena, args_obj, "fileGlobs");
         const types = try extractStringArrayAlloc(arena, args_obj, "types");
+        const plugin_preset = extractString(args_obj, "pluginPreset");
+        const plugins_override = try extractPluginsOverrideAlloc(arena, args_obj, "plugins");
+        const kv_predicates = try extractKvPredicatesAlloc(arena, args_obj, "kvPredicates");
 
         var time_start_ms = extractU64(args_obj, "timeStartMs") orelse 0;
         var time_end_ms = extractU64(args_obj, "timeEndMs") orelse 0;
@@ -1042,12 +1048,12 @@ pub const McpService = struct {
             raw_pattern;
 
         const has_time = (time_start_ms > 0 or time_end_ms > 0);
-        if (safe_pattern.len == 0 and contains.len == 0 and !has_time) {
+        if (safe_pattern.len == 0 and contains.len == 0 and !has_time and kv_predicates.len == 0) {
             return .{
                 .text = "",
                 .summary = "",
                 .ok = false,
-                .error_message = "Provide `pattern`, `contains`, or a time range (`timePreset` / `timeStartMs`)",
+                .error_message = "Provide `pattern`, `contains`, `kvPredicates`, or a time range (`timePreset` / `timeStartMs`)",
             };
         }
 
@@ -1095,6 +1101,9 @@ pub const McpService = struct {
             .timeEndMs = time_end_ms,
             .timeMode = "source",
             .nearbyLines = 0,
+            .pluginPreset = plugin_preset,
+            .plugins = plugins_override,
+            .kvPredicates = kv_predicates,
         };
 
         var collector = McpSearchCollector{
@@ -1148,6 +1157,9 @@ pub const McpService = struct {
             .filesMatched = collector.done.filesMatched,
             .filesSearched = collector.done.filesSearched,
             .bytesSearched = collector.done.bytesSearched,
+            .filesPruned = collector.done.filesPruned,
+            .bytesSaved = collector.done.bytesSaved,
+            .bytesScanned = collector.done.bytesScanned,
             .elapsedMs = collector.done.elapsedMs,
             .limitHit = collector.done.limitHit,
             .returnedHits = compact_hits.len,
@@ -1223,6 +1235,9 @@ const McpSearchCollector = struct {
                 .matchedLines = parsed.value.matchedLines,
                 .bytesSearched = parsed.value.bytesSearched,
                 .limitHit = try self.arena.dupe(u8, parsed.value.limitHit),
+                .filesPruned = parsed.value.filesPruned,
+                .bytesSaved = parsed.value.bytesSaved,
+                .bytesScanned = parsed.value.bytesScanned,
             };
         } else if (std.mem.eql(u8, msg_type, "error")) {
             var parsed = std.json.parseFromSlice(search_job.ErrorFrame, self.arena, json_text, .{
@@ -1440,6 +1455,14 @@ fn buildToolsListResponseAlloc(arena: std.mem.Allocator, id_val: std.json.Value)
                 try jw.objectField("type");
                 try jw.write("string");
                 try jw.endObject();
+            } else if (std.mem.eql(u8, p.type, "object[]")) {
+                try jw.objectField("type");
+                try jw.write("array");
+                try jw.objectField("items");
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("object");
+                try jw.endObject();
             } else {
                 try jw.objectField("type");
                 try jw.write(p.type);
@@ -1537,6 +1560,63 @@ fn extractStringArrayAlloc(
         },
         else => return &.{},
     }
+}
+
+fn extractPluginsOverrideAlloc(
+    arena: std.mem.Allocator,
+    obj: ?std.json.ObjectMap,
+    key: []const u8,
+) !?source_registry.PluginsOverrideDto {
+    const map = obj orelse return null;
+    const val = map.get(key) orelse return null;
+    const inner_map = switch (val) {
+        .object => |o| o,
+        else => return null,
+    };
+    const en = try extractStringArrayAlloc(arena, inner_map, "enable");
+    const dis = try extractStringArrayAlloc(arena, inner_map, "disable");
+    if (en.len == 0 and dis.len == 0) return null;
+    return .{
+        .enable = if (en.len > 0) en else null,
+        .disable = if (dis.len > 0) dis else null,
+    };
+}
+
+fn extractKvPredicatesAlloc(
+    arena: std.mem.Allocator,
+    obj: ?std.json.ObjectMap,
+    key: []const u8,
+) ![]const search_job.KvPredicateDto {
+    const map = obj orelse return &.{};
+    const val = map.get(key) orelse return &.{};
+    const arr = switch (val) {
+        .array => |a| a,
+        else => return &.{},
+    };
+    var out: std.ArrayList(search_job.KvPredicateDto) = .empty;
+    for (arr.items) |item| {
+        const item_map = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const k = extractString(item_map, "key") orelse "";
+        const op = extractString(item_map, "op") orelse "eq";
+        const cs = extractBool(item_map, "caseSensitive") orelse false;
+        const v: []const u8 = if (item_map.get("value")) |vv| switch (vv) {
+            .string => |s| s,
+            .integer => |n| try std.fmt.allocPrint(arena, "{d}", .{n}),
+            .float => |f| try std.fmt.allocPrint(arena, "{d}", .{f}),
+            .bool => |b| if (b) "true" else "false",
+            else => "",
+        } else "";
+        try out.append(arena, .{
+            .key = k,
+            .op = op,
+            .value = v,
+            .caseSensitive = cs,
+        });
+    }
+    return out.items;
 }
 
 fn formatSearchArgsSummaryAlloc(arena: std.mem.Allocator, args_obj: ?std.json.ObjectMap) ![]const u8 {
@@ -1762,7 +1842,7 @@ test "McpService handles initialize, tools/list, tools/call, disabled rejection,
         try std.testing.expectEqual(@as(usize, 0), state_cleared.value.logs.len);
     }
 
-    // Reload from mcp.json and verify persisted enabled=true & maxLogs=25
+        // Reload from mcp.json and verify persisted enabled=true & maxLogs=25
     {
         var reloaded = try McpService.init(gpa, io, tmp_path, &reg);
         defer reloaded.deinit(io);
@@ -1770,5 +1850,33 @@ test "McpService handles initialize, tools/list, tools/call, disabled rejection,
         const state_json_reloaded = try reloaded.buildStateJson(arena, io);
         const state_reloaded = try std.json.parseFromSlice(McpStateDto, arena, state_json_reloaded, .{ .ignore_unknown_fields = true });
         try std.testing.expectEqual(@as(u32, 25), state_reloaded.value.maxLogs);
+
+        // Verify tools/list exposes prefilter & kvPredicates schema and webgrep_search honors kvPredicates + telemetry
+        const list_resp = (try reloaded.handleRpcPayload(
+            arena,
+            io,
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}",
+            "unit-test",
+        )).?;
+        try std.testing.expect(std.mem.indexOf(u8, list_resp, "\"pluginPreset\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, list_resp, "\"kvPredicates\"") != null);
+
+        const kv_f = try tmp.dir.createFile(io, "kv.jsonl", .{ .truncate = true });
+        var kv_f_mut = kv_f;
+        var wb: [256]u8 = undefined;
+        var fw = kv_f_mut.writer(io, &wb);
+        try fw.interface.writeAll("{\"level\":\"ERROR\",\"status\":503}\n{\"level\":\"INFO\",\"status\":200}\n");
+        try fw.interface.flush();
+        kv_f_mut.close(io);
+
+        const kv_search_resp = (try reloaded.handleRpcPayload(
+            arena,
+            io,
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"webgrep_search\",\"arguments\":{\"pluginPreset\":\"auto\",\"kvPredicates\":[{\"key\":\"status\",\"op\":\"gt_num\",\"value\":500}]}}}",
+            "unit-test",
+        )).?;
+        try std.testing.expect(std.mem.indexOf(u8, kv_search_resp, "\\\"totalMatches\\\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, kv_search_resp, "\\\"filesPruned\\\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, kv_search_resp, "\\\"bytesSaved\\\":") != null);
     }
 }

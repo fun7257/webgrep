@@ -2,12 +2,20 @@ const std = @import("std");
 const libwebgrep = @import("libwebgrep");
 const docker_logs = @import("docker_logs.zig");
 const file_api = @import("file_api.zig");
+const prefilter = @import("prefilter.zig");
 const search_cache = @import("search_cache.zig");
+
+pub const PluginsOverrideDto = struct {
+    enable: ?[]const []const u8 = null,
+    disable: ?[]const []const u8 = null,
+};
 
 pub const SourceConfigDto = struct {
     path: []const u8 = "",
     endpoint: ?[]const u8 = null,
     timeFormat: ?[]const u8 = null,
+    pluginPreset: ?[]const u8 = null,
+    plugins: ?PluginsOverrideDto = null,
 };
 
 pub const SourceKindMetaDto = struct {
@@ -31,6 +39,8 @@ pub const SourceInfoDto = struct {
     config: SourceConfigDto,
     path: []const u8,
     exists: bool,
+    pluginPreset: []const u8 = "auto",
+    plugins: ?PluginsOverrideDto = null,
 };
 
 pub const SourcesResponse = struct {
@@ -46,6 +56,10 @@ pub const SearchableSource = struct {
     path: []const u8,
     enabled: bool,
     time_format: []const u8 = "",
+    plugin_preset: []const u8 = "auto",
+    plugins_enable: []const []const u8 = &.{},
+    plugins_disable: []const []const u8 = &.{},
+    plugin_sig: u64 = 0,
 };
 
 pub const UpsertSourceRequest = struct {
@@ -56,6 +70,8 @@ pub const UpsertSourceRequest = struct {
     config: ?SourceConfigDto = null,
     enabled: bool = true,
     timeFormat: ?[]const u8 = null,
+    pluginPreset: ?[]const u8 = null,
+    plugins: ?PluginsOverrideDto = null,
 };
 
 pub const ToggleSourceRequest = struct {
@@ -90,6 +106,8 @@ const PersistedSource = struct {
     path: []const u8 = "",
     config: ?SourceConfigDto = null,
     enabled: bool = true,
+    pluginPreset: ?[]const u8 = null,
+    plugins: ?PluginsOverrideDto = null,
 };
 
 const PersistedFile = struct {
@@ -105,6 +123,9 @@ const SourceRecord = struct {
     path: []u8,
     enabled: bool = true,
     time_format: []u8,
+    plugin_preset: []u8,
+    plugins_enable: [][]u8,
+    plugins_disable: [][]u8,
 
     fn deinit(self: *SourceRecord, gpa: std.mem.Allocator) void {
         gpa.free(self.id);
@@ -112,6 +133,9 @@ const SourceRecord = struct {
         gpa.free(self.name);
         gpa.free(self.path);
         gpa.free(self.time_format);
+        gpa.free(self.plugin_preset);
+        freeStringList(gpa, self.plugins_enable);
+        freeStringList(gpa, self.plugins_disable);
     }
 };
 
@@ -124,9 +148,91 @@ pub const RegistryError = error{
     ExpectedFileFoundDir,
     DockerUnavailable,
     InvalidDockerEndpoint,
+    InvalidPluginPreset,
+    InvalidPluginId,
     DuplicateSourceName,
     SourceNotFound,
 };
+
+fn freeStringList(alloc: std.mem.Allocator, items: [][]u8) void {
+    for (items) |item| alloc.free(item);
+    if (items.len > 0) alloc.free(items);
+}
+
+fn normalizePluginPresetStrict(raw_opt: ?[]const u8) !?[]const u8 {
+    const raw = raw_opt orelse return null;
+    const p = prefilter.Preset.parseStrict(raw) orelse return error.InvalidPluginPreset;
+    return p.asStr();
+}
+
+fn clonePluginIdsAlloc(
+    alloc: std.mem.Allocator,
+    raw_list_opt: ?[]const []const u8,
+    strict: bool,
+) ![][]u8 {
+    const raw_list = raw_list_opt orelse return alloc.alloc([]u8, 0);
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |it| alloc.free(it);
+        out.deinit(alloc);
+    }
+    for (raw_list) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        const pid = prefilter.PluginId.parse(trimmed) orelse {
+            if (strict) return error.InvalidPluginId;
+            continue;
+        };
+        const canon = pid.asStr();
+        var dup = false;
+        for (out.items) |existing| {
+            if (std.mem.eql(u8, existing, canon)) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        const copy = try alloc.dupe(u8, canon);
+        errdefer alloc.free(copy);
+        try out.append(alloc, copy);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn makePluginsOverrideDtoFromConst(
+    enable: []const []const u8,
+    disable: []const []const u8,
+) ?PluginsOverrideDto {
+    if (enable.len == 0 and disable.len == 0) return null;
+    return .{
+        .enable = if (enable.len > 0) enable else null,
+        .disable = if (disable.len > 0) disable else null,
+    };
+}
+
+fn makePluginsOverrideDtoFromOwned(
+    arena: std.mem.Allocator,
+    enable: []const []u8,
+    disable: []const []u8,
+) !?PluginsOverrideDto {
+    if (enable.len == 0 and disable.len == 0) return null;
+    var en_const: ?[]const []const u8 = null;
+    if (enable.len > 0) {
+        const s = try arena.alloc([]const u8, enable.len);
+        for (enable, 0..) |it, i| s[i] = it;
+        en_const = s;
+    }
+    var dis_const: ?[]const []const u8 = null;
+    if (disable.len > 0) {
+        const s = try arena.alloc([]const u8, disable.len);
+        for (disable, 0..) |it, i| s[i] = it;
+        dis_const = s;
+    }
+    return .{
+        .enable = en_const,
+        .disable = dis_const,
+    };
+}
 
 /// Generates a standard 36-character RFC 4122 UUID v4 string (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
 pub fn generateUuidV4Alloc(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -372,6 +478,7 @@ pub const SourceRegistry = struct {
             .data_root_path = data_root_path,
             .home_dir = home_dir,
         };
+        reg.search_cache.initSketchStore(gpa, io, data_root_path);
         reg.loadFromDisk(io) catch {};
         return reg;
     }
@@ -669,6 +776,17 @@ pub const SourceRegistry = struct {
             const tf_copy = try self.gpa.dupe(u8, trimmed_tf);
             errdefer self.gpa.free(tf_copy);
 
+            const maybe_cfg_preset: ?[]const u8 = (if (ps.config) |cfg| cfg.pluginPreset else null) orelse ps.pluginPreset;
+            const parsed_preset = prefilter.Preset.parse(maybe_cfg_preset orelse "auto").asStr();
+            const preset_copy = try self.gpa.dupe(u8, parsed_preset);
+            errdefer self.gpa.free(preset_copy);
+
+            const maybe_cfg_plugins: ?PluginsOverrideDto = (if (ps.config) |cfg| cfg.plugins else null) orelse ps.plugins;
+            const en_copy = try clonePluginIdsAlloc(self.gpa, if (maybe_cfg_plugins) |ov| ov.enable else null, false);
+            errdefer freeStringList(self.gpa, en_copy);
+            const dis_copy = try clonePluginIdsAlloc(self.gpa, if (maybe_cfg_plugins) |ov| ov.disable else null, false);
+            errdefer freeStringList(self.gpa, dis_copy);
+
             try self.sources.append(self.gpa, .{
                 .id = id_copy,
                 .kind = kind_copy,
@@ -676,6 +794,9 @@ pub const SourceRegistry = struct {
                 .path = path_copy,
                 .enabled = ps.enabled,
                 .time_format = tf_copy,
+                .plugin_preset = preset_copy,
+                .plugins_enable = en_copy,
+                .plugins_disable = dis_copy,
             });
         }
 
@@ -721,6 +842,7 @@ pub const SourceRegistry = struct {
         try persisted_list.ensureTotalCapacity(arena, self.sources.items.len);
 
         for (self.sources.items) |src| {
+            const ov_dto = try makePluginsOverrideDtoFromOwned(arena, src.plugins_enable, src.plugins_disable);
             persisted_list.appendAssumeCapacity(.{
                 .id = src.id,
                 .kind = src.kind,
@@ -729,6 +851,8 @@ pub const SourceRegistry = struct {
                 .config = .{
                     .path = src.path,
                     .timeFormat = serializedSourceTimeFormat(src.kind, src.time_format),
+                    .pluginPreset = src.plugin_preset,
+                    .plugins = ov_dto,
                 },
                 .enabled = src.enabled,
             });
@@ -765,6 +889,17 @@ pub const SourceRegistry = struct {
         const is_docker_kind = std.mem.eql(u8, eff_kind, "docker");
         if (!std.mem.eql(u8, eff_kind, "dir") and !is_file_kind and !is_docker_kind) {
             return error.UnsupportedSourceKind;
+        }
+
+        const maybe_req_preset: ?[]const u8 = (if (req.config) |cfg| cfg.pluginPreset else null) orelse req.pluginPreset;
+        const validated_req_preset = try normalizePluginPresetStrict(maybe_req_preset);
+        const maybe_req_plugins: ?PluginsOverrideDto = (if (req.config) |cfg| cfg.plugins else null) orelse req.plugins;
+        if (maybe_req_plugins) |ov| {
+            // Validate plugin IDs early before mutating any registry state.
+            const en_check = try clonePluginIdsAlloc(arena, ov.enable, true);
+            _ = en_check;
+            const dis_check = try clonePluginIdsAlloc(arena, ov.disable, true);
+            _ = dis_check;
         }
 
         const raw_path = resolveConfigPath(req.config, req.path);
@@ -910,6 +1045,13 @@ pub const SourceRegistry = struct {
             const next_path = try self.gpa.dupe(u8, real_path);
             errdefer self.gpa.free(next_path);
             const next_tf: ?[]u8 = if (capped_req_tf) |tf| try self.gpa.dupe(u8, tf) else null;
+            errdefer if (next_tf) |tf| self.gpa.free(tf);
+            const next_preset: ?[]u8 = if (validated_req_preset) |ps| try self.gpa.dupe(u8, ps) else null;
+            errdefer if (next_preset) |ps| self.gpa.free(ps);
+            const next_en: ?[][]u8 = if (maybe_req_plugins) |ov| try clonePluginIdsAlloc(self.gpa, ov.enable, true) else null;
+            errdefer if (next_en) |en| freeStringList(self.gpa, en);
+            const next_dis: ?[][]u8 = if (maybe_req_plugins) |ov| try clonePluginIdsAlloc(self.gpa, ov.disable, true) else null;
+            errdefer if (next_dis) |dis| freeStringList(self.gpa, dis);
 
             self.gpa.free(rec.kind);
             self.gpa.free(rec.name);
@@ -923,6 +1065,18 @@ pub const SourceRegistry = struct {
                 self.gpa.free(rec.time_format);
                 rec.time_format = tf;
             }
+            if (next_preset) |ps| {
+                self.gpa.free(rec.plugin_preset);
+                rec.plugin_preset = ps;
+            }
+            if (next_en) |en| {
+                freeStringList(self.gpa, rec.plugins_enable);
+                rec.plugins_enable = en;
+            }
+            if (next_dis) |dis| {
+                freeStringList(self.gpa, rec.plugins_disable);
+                rec.plugins_disable = dis;
+            }
         } else {
             const new_id = try generateUuidV4Alloc(self.gpa, io);
             errdefer self.gpa.free(new_id);
@@ -935,6 +1089,12 @@ pub const SourceRegistry = struct {
             const default_tf: []const u8 = if (is_docker_kind) "auto" else "";
             const next_tf = try self.gpa.dupe(u8, capped_req_tf orelse default_tf);
             errdefer self.gpa.free(next_tf);
+            const next_preset = try self.gpa.dupe(u8, validated_req_preset orelse "auto");
+            errdefer self.gpa.free(next_preset);
+            const next_en = try clonePluginIdsAlloc(self.gpa, if (maybe_req_plugins) |ov| ov.enable else null, true);
+            errdefer freeStringList(self.gpa, next_en);
+            const next_dis = try clonePluginIdsAlloc(self.gpa, if (maybe_req_plugins) |ov| ov.disable else null, true);
+            errdefer freeStringList(self.gpa, next_dis);
 
             try self.sources.append(self.gpa, .{
                 .id = new_id,
@@ -943,6 +1103,9 @@ pub const SourceRegistry = struct {
                 .path = next_path,
                 .enabled = req.enabled,
                 .time_format = next_tf,
+                .plugin_preset = next_preset,
+                .plugins_enable = next_en,
+                .plugins_disable = next_dis,
             });
         }
 
@@ -1048,6 +1211,7 @@ pub const SourceRegistry = struct {
                 }
             }
 
+            const ov_dto = makePluginsOverrideDtoFromConst(src.plugins_enable, src.plugins_disable);
             try dto_list.append(arena, .{
                 .id = src.id,
                 .kind = src.kind,
@@ -1058,9 +1222,13 @@ pub const SourceRegistry = struct {
                 .config = .{
                     .path = src.path,
                     .timeFormat = serializedSourceTimeFormat(src.kind, src.time_format),
+                    .pluginPreset = src.plugin_preset,
+                    .plugins = ov_dto,
                 },
                 .path = src.path,
                 .exists = ready,
+                .pluginPreset = src.plugin_preset,
+                .plugins = ov_dto,
             });
         }
 
@@ -1082,6 +1250,11 @@ pub const SourceRegistry = struct {
         try out.ensureTotalCapacity(arena, self.sources.items.len);
 
         for (self.sources.items) |s| {
+            const en_slice = try arena.alloc([]const u8, s.plugins_enable.len);
+            for (s.plugins_enable, 0..) |it, i| en_slice[i] = try arena.dupe(u8, it);
+            const dis_slice = try arena.alloc([]const u8, s.plugins_disable.len);
+            for (s.plugins_disable, 0..) |it, i| dis_slice[i] = try arena.dupe(u8, it);
+            const chain = prefilter.resolvePluginChainFromNames(s.plugin_preset, en_slice, dis_slice);
             out.appendAssumeCapacity(.{
                 .id = try arena.dupe(u8, s.id),
                 .kind = try arena.dupe(u8, s.kind),
@@ -1089,6 +1262,10 @@ pub const SourceRegistry = struct {
                 .path = try arena.dupe(u8, s.path),
                 .enabled = s.enabled,
                 .time_format = try arena.dupe(u8, s.time_format),
+                .plugin_preset = try arena.dupe(u8, s.plugin_preset),
+                .plugins_enable = en_slice,
+                .plugins_disable = dis_slice,
+                .plugin_sig = chain.signature,
             });
         }
         return out.toOwnedSlice(arena);
@@ -2102,5 +2279,119 @@ test "SourceRegistry Docker source registration, persistence, live summary, auto
         try std.testing.expectEqualStrings("docker-mtime", snap3[0].name);
         try std.testing.expectEqualStrings("", snap3[0].time_format);
         try std.testing.expectEqualStrings("auto", snap3[1].time_format);
+    }
+}
+
+test "SourceRegistry validates and persists pluginPreset and per-source plugin overrides" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "logs", .default_dir);
+    try tmp.dir.createDir(io, "data", .default_dir);
+
+    var buf1: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp_len = try tmp.dir.realPath(io, &buf1);
+    const tmp_root = buf1[0..tmp_len];
+    const logs_path = try std.fmt.allocPrint(arena, "{s}/logs", .{tmp_root});
+    const data_path = try std.fmt.allocPrint(arena, "{s}/data", .{tmp_root});
+
+    var src_id: []const u8 = "";
+    var expected_sig: u64 = 0;
+
+    {
+        var reg = SourceRegistry.init(gpa, io, data_path, null);
+        defer reg.deinit(io);
+
+        // Reject unknown preset and unknown plugin ID cleanly
+        try std.testing.expectError(error.InvalidPluginPreset, reg.upsertSource(arena, io, .{
+            .kind = "dir",
+            .name = "bad-preset",
+            .config = .{ .path = logs_path, .pluginPreset = "turbo_magic" },
+        }));
+        try std.testing.expectError(error.InvalidPluginId, reg.upsertSource(arena, io, .{
+            .kind = "dir",
+            .name = "bad-plugin",
+            .config = .{
+                .path = logs_path,
+                .pluginPreset = "auto",
+                .plugins = .{ .enable = &.{"nonexistent_plugin"} },
+            },
+        }));
+
+        // Valid preset + deduplicated overrides persist cleanly
+        try reg.upsertSource(arena, io, .{
+            .kind = "dir",
+            .name = "prod-logs",
+            .config = .{
+                .path = logs_path,
+                .pluginPreset = "timeseries",
+                .plugins = .{
+                    .enable = &.{ "sidecar_sketch", "sidecar_sketch" },
+                    .disable = &.{"mtime_window"},
+                },
+            },
+        });
+
+        const snap = try reg.snapshotAllSources(arena, io);
+        try std.testing.expectEqual(@as(usize, 1), snap.len);
+        src_id = try arena.dupe(u8, snap[0].id);
+        expected_sig = snap[0].plugin_sig;
+        try std.testing.expect(expected_sig != 0);
+        try std.testing.expectEqualStrings("timeseries", snap[0].plugin_preset);
+        try std.testing.expectEqual(@as(usize, 1), snap[0].plugins_enable.len);
+        try std.testing.expectEqualStrings("sidecar_sketch", snap[0].plugins_enable[0]);
+        try std.testing.expectEqual(@as(usize, 1), snap[0].plugins_disable.len);
+        try std.testing.expectEqualStrings("mtime_window", snap[0].plugins_disable[0]);
+
+        const json = try reg.buildSourcesJson(arena, io);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"pluginPreset\":\"timeseries\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"sidecar_sketch\"") != null);
+    }
+
+    // Reload from disk and verify exact persistence, then edit name preserving existing preset/plugins
+    {
+        var reg2 = SourceRegistry.init(gpa, io, data_path, null);
+        defer reg2.deinit(io);
+
+        const snap2 = try reg2.snapshotAllSources(arena, io);
+        try std.testing.expectEqual(@as(usize, 1), snap2.len);
+        try std.testing.expectEqualStrings("timeseries", snap2[0].plugin_preset);
+        try std.testing.expectEqual(expected_sig, snap2[0].plugin_sig);
+        try std.testing.expectEqual(@as(usize, 1), snap2[0].plugins_enable.len);
+        try std.testing.expectEqual(@as(usize, 1), snap2[0].plugins_disable.len);
+
+        // Upsert leaving pluginPreset/plugins null preserves previous values
+        try reg2.upsertSource(arena, io, .{
+            .id = src_id,
+            .kind = "dir",
+            .name = "prod-logs-renamed",
+            .config = .{ .path = logs_path },
+        });
+        const snap3 = try reg2.snapshotAllSources(arena, io);
+        try std.testing.expectEqualStrings("prod-logs-renamed", snap3[0].name);
+        try std.testing.expectEqualStrings("timeseries", snap3[0].plugin_preset);
+        try std.testing.expectEqual(expected_sig, snap3[0].plugin_sig);
+
+        // Explicit clear of overrides + switching preset to "code" recomputes plugin_sig
+        try reg2.upsertSource(arena, io, .{
+            .id = src_id,
+            .kind = "dir",
+            .name = "prod-logs-renamed",
+            .config = .{ .path = logs_path },
+            .pluginPreset = "code",
+            .plugins = .{ .enable = &.{}, .disable = &.{} },
+        });
+        const snap4 = try reg2.snapshotAllSources(arena, io);
+        try std.testing.expectEqualStrings("code", snap4[0].plugin_preset);
+        try std.testing.expectEqual(@as(usize, 0), snap4[0].plugins_enable.len);
+        try std.testing.expectEqual(@as(usize, 0), snap4[0].plugins_disable.len);
+        try std.testing.expect(snap4[0].plugin_sig != expected_sig);
     }
 }

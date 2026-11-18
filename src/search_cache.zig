@@ -1,4 +1,5 @@
 const std = @import("std");
+const prefilter = @import("prefilter.zig");
 
 pub const MAX_CACHE_ENTRIES: usize = 64;
 pub const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024; // 32 MB total budget for query result cache
@@ -63,10 +64,15 @@ pub const CachedQueryEntry = struct {
     total_matches: u64,
     matched_lines: u64,
     bytes_searched: u64,
+    files_pruned: u64 = 0,
+    bytes_saved: u64 = 0,
+    bytes_scanned: u64 = 0,
     limit_hit: bool,
     all_lines_exact: bool = true,
     archive_unrestricted: bool = true,
     archive_filter_hash: u64 = 0,
+    plugin_sig: u64 = 0,
+    kv_predicates_hash: u64 = 0,
     approx_bytes: usize,
     access_tick: u64,
 
@@ -157,8 +163,56 @@ pub const SearchCache = struct {
     negative_files: [MAX_NEGATIVE_FILE_ENTRIES]NegativeFileEntry = @splat(.{}),
     hot_mmap_files: [MAX_HOT_MMAP_FILES]HotFileMapEntry = @splat(.{}),
     dir_slots: [MAX_DIR_CACHE_ENTRIES]DirTopologySlot = @splat(.{}),
+    sketch_store: ?*prefilter.sidecar_sketch.SketchStore = null,
+    sketch_cache_dir: ?[]u8 = null,
+    sketch_dirty: std.atomic.Value(bool) = .init(false),
+    sketch_io_mutex: std.Io.Mutex = .init,
+
+    pub fn initSketchStore(self: *SearchCache, gpa: std.mem.Allocator, io: std.Io, data_root_path: []const u8) void {
+        const store = self.ensureSketchStore(gpa, io) orelse return;
+        const trimmed = std.mem.trimEnd(u8, std.mem.trim(u8, data_root_path, " \t\r\n"), "/");
+        if (trimmed.len == 0) return;
+
+        const dir_path = std.fmt.allocPrint(gpa, "{s}/sketches", .{trimmed}) catch return;
+        self.sketch_io_mutex.lockUncancelable(io);
+        defer self.sketch_io_mutex.unlock(io);
+        if (self.sketch_cache_dir) |old_dir| gpa.free(old_dir);
+        self.sketch_cache_dir = dir_path;
+        store.loadFromCacheDir(gpa, io, dir_path);
+    }
+
+    pub fn ensureSketchStore(self: *SearchCache, gpa: std.mem.Allocator, io: std.Io) ?*prefilter.sidecar_sketch.SketchStore {
+        if (@atomicLoad(?*prefilter.sidecar_sketch.SketchStore, &self.sketch_store, .acquire)) |s| {
+            return s;
+        }
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.sketch_store) |s| return s;
+        const created = gpa.create(prefilter.sidecar_sketch.SketchStore) catch return null;
+        created.* = .{};
+        @atomicStore(?*prefilter.sidecar_sketch.SketchStore, &self.sketch_store, created, .release);
+        return created;
+    }
+
+    pub fn getSketchStore(self: *const SearchCache) ?*prefilter.sidecar_sketch.SketchStore {
+        return @atomicLoad(?*prefilter.sidecar_sketch.SketchStore, &self.sketch_store, .acquire);
+    }
+
+    pub fn markSketchDirty(self: *SearchCache) void {
+        self.sketch_dirty.store(true, .release);
+    }
+
+    pub fn saveSketchStore(self: *SearchCache, gpa: std.mem.Allocator, io: std.Io) void {
+        if (!self.sketch_dirty.swap(false, .acq_rel)) return;
+        const store = self.getSketchStore() orelse return;
+        self.sketch_io_mutex.lockUncancelable(io);
+        defer self.sketch_io_mutex.unlock(io);
+        const dir_path = self.sketch_cache_dir orelse return;
+        store.saveToCacheDir(gpa, io, dir_path) catch {};
+    }
 
     pub fn deinit(self: *SearchCache, gpa: std.mem.Allocator, io: std.Io) void {
+        self.saveSketchStore(gpa, io);
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         for (self.entries.items) |*e| e.deinit();
@@ -173,6 +227,15 @@ pub const SearchCache = struct {
         }
         for (&self.dir_slots) |*ds| {
             ds.deinit();
+        }
+        if (self.sketch_store) |store| {
+            store.deinit(gpa);
+            gpa.destroy(store);
+            self.sketch_store = null;
+        }
+        if (self.sketch_cache_dir) |dir_path| {
+            gpa.free(dir_path);
+            self.sketch_cache_dir = null;
         }
     }
 
@@ -197,6 +260,10 @@ pub const SearchCache = struct {
         for (&self.dir_slots) |*ds| {
             ds.deinit();
         }
+        if (self.sketch_store) |store| {
+            store.clear();
+        }
+        self.sketch_dirty.store(false, .release);
     }
 
     pub fn lookupDirTopology(

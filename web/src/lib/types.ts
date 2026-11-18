@@ -50,12 +50,45 @@ export interface ScopeFilter {
   timeFormat?: string;
 }
 
+export type PluginPreset = 'auto' | 'timeseries' | 'code' | 'raw';
+export type PrefilterStage = 'source_plan' | 'file_prune' | 'window_narrow' | 'line_filter';
+
+export interface PluginOverrides {
+  enable?: string[];
+  disable?: string[];
+}
+
+export interface PluginMetadata {
+  id?: string;
+  id_str?: string;
+  nameKey?: string;
+  name_key?: string;
+  description?: string;
+  stages?: PrefilterStage[] | string[];
+  defaultPresets?: (PluginPreset | string)[];
+  default_presets?: (PluginPreset | string)[];
+  costHint?: string;
+  cost_hint?: string;
+}
+
+export interface PresetMetadata {
+  id?: PluginPreset | string;
+  id_str?: PluginPreset | string;
+  nameKey?: string;
+  name_key?: string;
+  description?: string;
+  defaultPlugins?: string[];
+  default_plugins?: string[];
+}
+
 export interface MetaResponse {
   rootLabel: string;
   root: string;
   engine: string;
   types: string[];
   scopes?: string[];
+  plugins?: PluginMetadata[];
+  presets?: (PluginPreset | PresetMetadata | string)[];
 }
 
 export interface FileLine {
@@ -103,6 +136,8 @@ export interface SourceConfig {
   path: string;
   endpoint?: string | null;
   timeFormat?: string | null;
+  pluginPreset?: PluginPreset | string | null;
+  plugins?: PluginOverrides | null;
 }
 
 export interface DataSourceItem {
@@ -115,6 +150,8 @@ export interface DataSourceItem {
   config: SourceConfig;
   path: string;
   exists: boolean;
+  pluginPreset?: PluginPreset | string | null;
+  plugins?: PluginOverrides | null;
 }
 
 export type DataSourceEntry = DataSourceItem;
@@ -162,6 +199,8 @@ export interface WsSearchMessage {
   timeMode?: TimeFilterMode;
   timeFormat?: string;
   tzOffsetMin?: number;
+  pluginPreset?: PluginPreset;
+  plugins?: PluginOverrides;
 }
 
 export interface TimePreviewResponse {
@@ -206,6 +245,8 @@ export type WsIncomingMessage =
       searchCount?: number;
       cacheHit?: string;
       nearbyLines?: number;
+      filesPruned?: number;
+      bytesSaved?: number;
     }
   | {
       type: 'error';

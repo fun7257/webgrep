@@ -102,6 +102,7 @@ test {
     _ = file_api;
     _ = mcp;
     _ = net_bind;
+    _ = @import("prefilter.zig");
     _ = search_job;
     _ = server;
     _ = source_registry;

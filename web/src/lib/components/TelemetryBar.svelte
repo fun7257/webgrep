@@ -1,7 +1,21 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
+  import { formatPrunedTelemetry } from '$lib/prefilter';
   import { formatMs } from '$lib/utils';
-  import { AlertTriangle, Hash, Loader2, Square, Timer } from 'lucide-svelte';
+  import { AlertTriangle, Filter, Hash, Loader2, Square, Timer } from 'lucide-svelte';
+
+  const prunedView = $derived(
+    workbench.isSearching
+      ? { visible: false, filesPruned: 0, bytesSaved: 0, compactText: '', filesText: '', savedText: '' }
+      : formatPrunedTelemetry(workbench.filesPruned, workbench.bytesSaved)
+  );
+
+  const prunedTitle = $derived.by(() => {
+    if (!prunedView.visible) return '';
+    return prunedView.savedText
+      ? workbench.t.telemetry.prunedTooltipWithBytes(prunedView.filesText, prunedView.savedText)
+      : workbench.t.telemetry.prunedTooltipFilesOnly(prunedView.filesText);
+  });
 </script>
 
 {#if workbench.hasSearchedOnce || workbench.isSearching || workbench.errorMessage}
@@ -52,6 +66,16 @@
             title={workbench.t.telemetry.cappedAt(workbench.maxResults)}
           >
             <AlertTriangle class="h-3 w-3" />
+          </span>
+        {/if}
+
+        {#if prunedView.visible}
+          <span
+            class="inline-flex h-5 max-w-full items-center gap-1 truncate rounded bg-secondary/65 px-1.5 text-[11px] leading-none text-muted-foreground/90 ring-1 ring-inset ring-border/50 shrink-0 tabular-nums"
+            title={prunedTitle}
+          >
+            <Filter class="h-2.5 w-2.5 shrink-0" />
+            <span class="truncate">{prunedView.compactText}</span>
           </span>
         {/if}
       {/if}

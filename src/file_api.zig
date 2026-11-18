@@ -1,5 +1,6 @@
 const std = @import("std");
 const libwebgrep = @import("libwebgrep");
+const prefilter = @import("prefilter.zig");
 
 pub const PathError = error{
     InvalidPath,
@@ -245,12 +246,85 @@ pub fn sanitizeUtf8Truncated(arena: std.mem.Allocator, input: []const u8, max_by
     return out.toOwnedSlice(arena);
 }
 
+pub const PluginMetaDto = struct {
+    id: []const u8,
+    nameKey: []const u8,
+    description: []const u8,
+    stages: []const []const u8,
+    defaultPresets: []const []const u8,
+    costHint: []const u8,
+};
+
+pub const PresetMetaDto = struct {
+    id: []const u8,
+    nameKey: []const u8,
+    description: []const u8,
+    defaultPlugins: []const []const u8,
+};
+
+fn comptimeStageStrs(comptime stages: []const prefilter.Stage) []const []const u8 {
+    comptime {
+        var arr: [stages.len][]const u8 = undefined;
+        for (stages, 0..) |st, i| arr[i] = st.asStr();
+        const frozen = arr;
+        return &frozen;
+    }
+}
+
+fn comptimePresetStrs(comptime presets: []const prefilter.Preset) []const []const u8 {
+    comptime {
+        var arr: [presets.len][]const u8 = undefined;
+        for (presets, 0..) |p, i| arr[i] = p.asStr();
+        const frozen = arr;
+        return &frozen;
+    }
+}
+
+fn comptimePluginIdStrs(comptime pids: []const prefilter.PluginId) []const []const u8 {
+    comptime {
+        var arr: [pids.len][]const u8 = undefined;
+        for (pids, 0..) |pid, i| arr[i] = pid.asStr();
+        const frozen = arr;
+        return &frozen;
+    }
+}
+
+pub const builtin_plugins: [prefilter.PLUGIN_CATALOG.len]PluginMetaDto = blk: {
+    var out: [prefilter.PLUGIN_CATALOG.len]PluginMetaDto = undefined;
+    for (prefilter.PLUGIN_CATALOG, 0..) |entry, i| {
+        out[i] = .{
+            .id = entry.id_str,
+            .nameKey = entry.name_key,
+            .description = entry.description,
+            .stages = comptimeStageStrs(entry.stages),
+            .defaultPresets = comptimePresetStrs(entry.default_presets),
+            .costHint = entry.cost_hint,
+        };
+    }
+    break :blk out;
+};
+
+pub const builtin_presets: [prefilter.PRESET_CATALOG.len]PresetMetaDto = blk: {
+    var out: [prefilter.PRESET_CATALOG.len]PresetMetaDto = undefined;
+    for (prefilter.PRESET_CATALOG, 0..) |entry, i| {
+        out[i] = .{
+            .id = entry.id_str,
+            .nameKey = entry.name_key,
+            .description = entry.description,
+            .defaultPlugins = comptimePluginIdStrs(entry.default_plugins),
+        };
+    }
+    break :blk out;
+};
+
 pub const MetaResponse = struct {
     rootLabel: []const u8,
     root: []const u8,
     engine: []const u8 = "libwebgrep 0.5.0 · SIMD",
     types: []const []const u8 = &builtin_types,
     scopes: []const []const u8 = &.{},
+    plugins: []const PluginMetaDto = &builtin_plugins,
+    presets: []const PresetMetaDto = &builtin_presets,
 };
 
 pub fn buildMetaJson(arena: std.mem.Allocator, root_path: []const u8, root_label: []const u8) ![]u8 {
@@ -708,9 +782,8 @@ fn validateLineAnchor(
     const a_line = anchor_line_opt orelse return null;
     const a_byte = anchor_byte_opt orelse return null;
     if (a_line == 0 or a_byte >= file_size) return null;
-    if (a_line == 1) {
-        if (a_byte == 0 or a_byte == content_base) return content_base;
-        return null;
+    if (a_line == 1 and (a_byte == 0 or a_byte == content_base)) {
+        return content_base;
     }
     if (a_byte <= content_base) return null;
     var prev_buf: [1]u8 = undefined;
@@ -1452,4 +1525,47 @@ test "buildPlainFileWindowJson avoids full-file scan on >2 MiB files and chains 
     try std.testing.expect(p_end.value.eof);
     try std.testing.expectEqual(total_test_lines, p_end.value.totalLines);
     try std.testing.expectEqual(@as(u64, 50_000), p_end.value.lines[p_end.value.lines.len - 1].n);
+}
+
+test "file_api: buildMetaJson exposes prefilter plugins and presets catalogs" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const json = try buildMetaJson(arena, "", "webgrep");
+    const parsed = try std.json.parseFromSlice(MetaResponse, arena, json, .{
+        .ignore_unknown_fields = true,
+    });
+    try std.testing.expectEqual(@as(usize, prefilter.PLUGIN_CATALOG.len), parsed.value.plugins.len);
+    try std.testing.expectEqual(@as(usize, prefilter.PRESET_CATALOG.len), parsed.value.presets.len);
+    try std.testing.expectEqualStrings("path_scope", parsed.value.plugins[0].id);
+    try std.testing.expectEqualStrings("auto", parsed.value.presets[0].id);
+    try std.testing.expect(parsed.value.presets[0].defaultPlugins.len > 0);
+}
+
+test "file_api: validateLineAnchor supports anchorLine=1 at narrowed mid-file byte offset" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const payload = "header line\ntarget window line 1\ntarget window line 2\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "win.log", .data = payload });
+
+    const anchor_off: u64 = "header line\n".len;
+    const w_json = try buildFileWindowJsonWithDisplayPath(arena, io, tmp.dir, "win.log", "win.log", .{
+        .start_line = 1,
+        .end_line = 2,
+        .anchor_line = 1,
+        .anchor_byte = anchor_off,
+    });
+    const parsed = try std.json.parseFromSlice(FileResponse, arena, w_json, .{});
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.lines.len);
+    try std.testing.expectEqualStrings("target window line 1", parsed.value.lines[0].text);
+    try std.testing.expectEqual(@as(?u64, anchor_off), parsed.value.firstByte);
 }

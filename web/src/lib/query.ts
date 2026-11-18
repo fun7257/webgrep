@@ -350,6 +350,7 @@ export function buildQueryCacheKeys(params: {
   timeFormat?: string;
   tzOffsetMin?: number;
   sourceTimeFormatsSig?: string;
+  sourcePluginsSig?: string;
   steps: readonly QueryStep[];
   contextLines?: number;
   hidden: boolean;
@@ -366,6 +367,7 @@ export function buildQueryCacheKeys(params: {
   const timeFormat = (params.timeFormat ?? '').trim();
   const tzOffsetMin = params.tzOffsetMin ?? 0;
   const sourceTimeFormatsSig = params.sourceTimeFormatsSig ?? '';
+  const sourcePluginsSig = params.sourcePluginsSig ?? '';
 
   const historyId = JSON.stringify({
     t: params.tenant,
@@ -388,6 +390,7 @@ export function buildQueryCacheKeys(params: {
     tf: timeFormat,
     tz: tzOffsetMin,
     sf: sourceTimeFormatsSig,
+    sp: sourcePluginsSig,
     q: normSteps,
     ctx: params.contextLines ?? 0,
     hid: params.hidden,

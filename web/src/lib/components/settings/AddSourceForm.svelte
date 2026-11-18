@@ -1,9 +1,10 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import type { DirSuggestEntry } from '$lib/types';
+  import { DEFAULT_PLUGIN_PRESET, type NormalizedPluginOverrides } from '$lib/prefilter';
+  import type { DirSuggestEntry, PluginPreset } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
-  import SourceTimeFormatEditor from './SourceTimeFormatEditor.svelte';
+  import SourcePrefilterEditor from './SourcePrefilterEditor.svelte';
   import {
     AlertTriangle,
     ChevronRight,
@@ -31,6 +32,8 @@
   let timeFormatInput = $state('');
   let timeFormatTouched = $state(false);
   let timeFormatValid = $state(true);
+  let pluginPresetInput = $state<PluginPreset>(DEFAULT_PLUGIN_PRESET);
+  let pluginOverridesInput = $state<NormalizedPluginOverrides>({ enable: [], disable: [] });
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
 
@@ -185,12 +188,16 @@
         config: { path: cleanPath },
         enabled: true,
         timeFormat: timeFormatInput.trim(),
+        pluginPreset: pluginPresetInput,
+        plugins: pluginOverridesInput,
       });
       pathInput = '';
       nameInput = '';
       timeFormatTouched = false;
       timeFormatInput = kind === 'docker' ? 'auto' : '';
       timeFormatValid = true;
+      pluginPresetInput = DEFAULT_PLUGIN_PRESET;
+      pluginOverridesInput = { enable: [], disable: [] };
       showSuggest = false;
       ondone();
     } catch (err) {
@@ -314,9 +321,16 @@
       class={`${inputCls} px-3`}
     />
 
-    <SourceTimeFormatEditor
-      value={timeFormatInput}
-      onchange={(fmt, valid) => {
+    <SourcePrefilterEditor
+      preset={pluginPresetInput}
+      overrides={pluginOverridesInput}
+      timeFormat={timeFormatInput}
+      defaultAutoTimeFormat={kind === 'docker' ? 'auto' : ''}
+      onchange={(nextPreset, nextOverrides) => {
+        pluginPresetInput = nextPreset;
+        pluginOverridesInput = nextOverrides;
+      }}
+      ontimeformatchange={(fmt, valid) => {
         timeFormatTouched = true;
         timeFormatInput = fmt;
         timeFormatValid = valid;

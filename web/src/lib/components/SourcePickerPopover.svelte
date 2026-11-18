@@ -11,6 +11,7 @@
     type HighlightRange,
     type SourceKindFilter,
   } from '$lib/source-picker';
+  import FloatingPopoverShell from './pickers/FloatingPopoverShell.svelte';
   import {
     AlertTriangle,
     Check,
@@ -38,17 +39,10 @@
   let panelEl = $state<HTMLDivElement | null>(null);
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
-  let offsetX = $state<number>(0);
-  let maxPanelH = $state<number | null>(null);
-
-  // Mobile bottom-sheet drag state
-  let dragY = $state<number>(0);
-  let dragStart: number | null = null;
   let toggledOnDown: string | null = null;
 
   const s = $derived(workbench.t.scopeBar);
   const ui = $derived(workbench.t.ui);
-
   const counts = $derived(countSourcesByKind(workbench.sources));
   const fuzzyResults = $derived(
     fuzzyFilterSourcesForPicker(workbench.sources, kindFilter, searchQuery)
@@ -58,12 +52,8 @@
     const out: { id: SourceKindFilter; label: string; count: number }[] = [
       { id: 'all', label: s.kindAll, count: counts.all },
     ];
-    if (counts.dir > 0 || kindFilter === 'dir') {
-      out.push({ id: 'dir', label: s.kindDir, count: counts.dir });
-    }
-    if (counts.file > 0 || kindFilter === 'file') {
-      out.push({ id: 'file', label: s.kindFile, count: counts.file });
-    }
+    if (counts.dir > 0 || kindFilter === 'dir') out.push({ id: 'dir', label: s.kindDir, count: counts.dir });
+    if (counts.file > 0 || kindFilter === 'file') out.push({ id: 'file', label: s.kindFile, count: counts.file });
     if (counts.docker > 0 || kindFilter === 'docker') {
       out.push({ id: 'docker', label: s.kindDocker, count: counts.docker });
     }
@@ -72,30 +62,24 @@
 
   // Only show kind bar when 2+ source kinds exist (all + >= 2 distinct kinds)
   const showKindBar = $derived(kindTabs.length >= 3);
-
   const hasSourceScope = $derived(
     workbench.scope.sources.length > 0 || (workbench.scope.excludedSources?.length ?? 0) > 0
   );
   const showAllRow = $derived(
     !searchQuery.trim() && kindFilter === 'all' && workbench.sources.length > 0
   );
-
   const allFilteredSelected = $derived.by(() => {
     if (fuzzyResults.length === 0) return false;
     const selected = workbench.scope.sources;
     return fuzzyResults.every((item) => isSourceRefInList(item.source, selected));
   });
-
   const canCheckFiltered = $derived(
     (searchQuery.trim().length > 0 || kindFilter !== 'all') &&
       fuzzyResults.length > 0 &&
       !allFilteredSelected
   );
-
   const footerText = $derived.by(() => {
-    if (!hasSourceScope) {
-      return s.pickerFooterAll(workbench.enabledSourceCount);
-    }
+    if (!hasSourceScope) return s.pickerFooterAll(workbench.enabledSourceCount);
     return s.pickerSummaryCustom(
       workbench.scope.sources.length,
       workbench.scope.excludedSources?.length ?? 0
@@ -128,33 +112,6 @@
     } else if (focusedIdx > maxIdx) {
       focusedIdx = maxIdx;
     }
-  });
-
-  // Measure viewport bounds once open / resized so popover never overflows horizontally or vertically
-  $effect(() => {
-    if (workbench.isCompact) {
-      offsetX = 0;
-      maxPanelH = null;
-      return;
-    }
-    const el = panelEl;
-    if (!el) return;
-    const prevOffset = untrack(() => offsetX);
-    const rect = el.getBoundingClientRect();
-    const nextMaxPanelH = Math.max(240, Math.floor(window.innerHeight - rect.top - 12));
-    const container = (el.closest('main') as HTMLElement | null)?.getBoundingClientRect();
-    const minLeft = Math.max(8, container?.left ?? 8);
-    const maxRight = Math.min(window.innerWidth - 8, container?.right ?? window.innerWidth - 8);
-    const baseLeft = rect.left - prevOffset;
-    const baseRight = rect.right - prevOffset;
-    let nextOffset = 0;
-    if (baseRight > maxRight) {
-      nextOffset = Math.max(minLeft - baseLeft, maxRight - baseRight);
-    } else if (baseLeft < minLeft) {
-      nextOffset = minLeft - baseLeft;
-    }
-    maxPanelH = nextMaxPanelH;
-    offsetX = nextOffset;
   });
 
   function scrollFocusedIntoView(idx: number) {
@@ -195,9 +152,7 @@
     const matchedIds = new Set(fuzzyResults.map((r) => r.source.id));
     const merged = new Set(workbench.scope.sources);
     for (const id of matchedIds) merged.add(id);
-    const nextExcluded = (workbench.scope.excludedSources ?? []).filter(
-      (id) => !matchedIds.has(id)
-    );
+    const nextExcluded = (workbench.scope.excludedSources ?? []).filter((id) => !matchedIds.has(id));
     workbench.setScopeSources(Array.from(merged), nextExcluded);
   }
 
@@ -206,9 +161,7 @@
       e.preventDefault();
       e.stopPropagation();
       onClose();
-      if (!workbench.isCompact && !workbench.isTouch) {
-        onFocusMainInput?.();
-      }
+      if (!workbench.isCompact && !workbench.isTouch) onFocusMainInput?.();
       return;
     }
 
@@ -224,18 +177,17 @@
     const maxIdx = fuzzyResults.length - 1;
     const hasRows = showAllRow || fuzzyResults.length > 0;
 
-    if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       if (!hasRows) return;
       e.preventDefault();
-      focusedIdx = focusedIdx < maxIdx ? focusedIdx + 1 : minIdx;
-      scrollFocusedIntoView(focusedIdx);
-      return;
-    }
-
-    if (e.key === 'ArrowUp') {
-      if (!hasRows) return;
-      e.preventDefault();
-      focusedIdx = focusedIdx > minIdx ? focusedIdx - 1 : maxIdx;
+      focusedIdx =
+        e.key === 'ArrowDown'
+          ? focusedIdx < maxIdx
+            ? focusedIdx + 1
+            : minIdx
+          : focusedIdx > minIdx
+            ? focusedIdx - 1
+            : maxIdx;
       scrollFocusedIntoView(focusedIdx);
       return;
     }
@@ -246,9 +198,7 @@
       if (e.metaKey || e.ctrlKey) {
         onClose();
         onFocusMainInput?.();
-        if (workbench.hasExecutableQuery) {
-          workbench.submitSearch();
-        }
+        if (workbench.hasExecutableQuery) workbench.submitSearch();
         return;
       }
       if (focusedIdx === -1 && showAllRow) {
@@ -256,35 +206,25 @@
         return;
       }
       const target = fuzzyResults[focusedIdx];
-      if (target) {
-        toggleItem(target.source.id, e.altKey);
-      }
+      if (target) toggleItem(target.source.id, e.altKey);
     }
-  }
-
-  function onHandleDown(e: PointerEvent) {
-    dragStart = e.clientY;
-    dragY = 0;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-
-  function onHandleMove(e: PointerEvent) {
-    if (dragStart === null) return;
-    dragY = Math.max(0, e.clientY - dragStart);
-  }
-
-  function onHandleUp() {
-    if (dragStart === null) return;
-    const shouldClose = dragY > 80;
-    dragStart = null;
-    dragY = 0;
-    if (shouldClose) onClose();
   }
 
   function kindIconFor(src: DataSourceItem) {
     if (src.kind === 'docker') return Container;
     if (src.kind === 'file') return FileText;
     return Folder;
+  }
+
+  function optionRowClass(checked: boolean, excluded: boolean, isFocused: boolean): string {
+    const base = checked
+      ? 'bg-primary/[0.08] hover:bg-primary/[0.12]'
+      : excluded
+        ? 'bg-status/[0.08] hover:bg-status/[0.12]'
+        : isFocused
+          ? 'bg-secondary/80'
+          : 'hover:bg-secondary/55';
+    return `${base}${isFocused && checked ? ' ring-1 ring-inset ring-primary/35' : ''}`;
   }
 </script>
 
@@ -298,7 +238,42 @@
   {/each}
 {/snippet}
 
-{#snippet popoverContent()}
+{#snippet checkIndicator(checked: boolean, excluded: boolean)}
+  <span
+    aria-hidden="true"
+    class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
+      checked
+        ? 'border-primary bg-primary text-primary-foreground'
+        : excluded
+          ? 'border-status bg-status/15 text-status'
+          : 'border-border bg-background/75 group-hover:border-muted-foreground/60'
+    }`}
+  >
+    {#if checked}
+      <Check class="h-3 w-3 stroke-[2.75]" />
+    {:else if excluded}
+      <Minus class="h-3 w-3 stroke-[2.5]" />
+    {/if}
+  </span>
+{/snippet}
+
+{#snippet footer()}
+  <div class="flex h-8 shrink-0 items-center justify-between gap-2 border-t border-border/50 bg-muted/30 px-3 text-[11px] text-muted-foreground">
+    <span class="truncate font-mono tabular-nums">{footerText}</span>
+    <span class="hidden sm:inline shrink-0 text-muted-foreground/75">{s.pickerKeyHint}</span>
+  </div>
+{/snippet}
+
+<FloatingPopoverShell
+  bind:panelEl
+  isCompact={workbench.isCompact}
+  ariaLabel={s.pickerTitle}
+  desktopWidthClass="w-[352px] sm:w-[376px] max-w-[calc(100vw-1.5rem)]"
+  mobileMaxHeightClass="max-h-[80dvh]"
+  {onClose}
+  onKeydown={handleKeydown}
+  {footer}
+>
   <!-- 1. Top Fuzzy Search Input Bar -->
   <div class="flex h-10 shrink-0 items-center gap-2 border-b border-border/55 px-3">
     <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -359,19 +334,15 @@
       <div class="flex items-center gap-0.5 rounded-lg border border-border/50 bg-secondary/65 dark:bg-secondary/55 p-0.5">
         {#each kindTabs as tab (tab.id)}
           {@const active = kindFilter === tab.id}
+          {@const selectKind = () => {
+            kindFilter = tab.id;
+            focusedIdx = tab.id === 'all' && !searchQuery.trim() ? -1 : 0;
+          }}
           <button
             type="button"
             onmousedown={(e) => e.preventDefault()}
-            onpointerdown={(e) =>
-              handleOptionPointerDown(`kind:${tab.id}`, e, () => {
-                kindFilter = tab.id;
-                focusedIdx = tab.id === 'all' && !searchQuery.trim() ? -1 : 0;
-              })}
-            onclick={(e) =>
-              handleOptionClick(`kind:${tab.id}`, e, () => {
-                kindFilter = tab.id;
-                focusedIdx = tab.id === 'all' && !searchQuery.trim() ? -1 : 0;
-              })}
+            onpointerdown={(e) => handleOptionPointerDown(`kind:${tab.id}`, e, selectKind)}
+            onclick={(e) => handleOptionClick(`kind:${tab.id}`, e, selectKind)}
             class={`touch-target inline-flex h-6 flex-1 items-center justify-center gap-1 rounded-md px-2 text-[11.5px] cursor-pointer ${
               active
                 ? 'bg-background dark:bg-secondary text-foreground font-medium shadow-[0_1px_2px_hsl(0_0%_0%/0.06)] ring-1 ring-inset ring-border/70'
@@ -415,48 +386,20 @@
     {:else}
       {#if showAllRow}
         {@const allChecked = !hasSourceScope}
-        {@const allFocused = focusedIdx === -1}
+        {@const clearAll = () => workbench.clearScopeSources()}
         <button
           type="button"
           role="option"
           data-picker-idx="-1"
           aria-selected={allChecked}
           onmousedown={(e) => e.preventDefault()}
-          onpointerdown={(e) =>
-            handleOptionPointerDown('all', e, () => {
-              workbench.clearScopeSources();
-            })}
-          onclick={(e) =>
-            handleOptionClick('all', e, () => {
-              workbench.clearScopeSources();
-            })}
+          onpointerdown={(e) => handleOptionPointerDown('all', e, clearAll)}
+          onclick={(e) => handleOptionClick('all', e, clearAll)}
           onmouseenter={() => (focusedIdx = -1)}
-          class={`touch-target group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer ${
-            allChecked
-              ? 'bg-primary/[0.08] hover:bg-primary/[0.12]'
-              : allFocused
-                ? 'bg-secondary/80'
-                : 'hover:bg-secondary/55'
-          } ${allFocused && allChecked ? 'ring-1 ring-inset ring-primary/35' : ''}`}
+          class={`touch-target group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer ${optionRowClass(allChecked, false, focusedIdx === -1)}`}
         >
-          <span
-            aria-hidden="true"
-            class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
-              allChecked
-                ? 'border-primary bg-primary text-primary-foreground'
-                : 'border-border bg-background/80 group-hover:border-muted-foreground/60'
-            }`}
-          >
-            {#if allChecked}
-              <Check class="h-3 w-3 stroke-[2.75]" />
-            {/if}
-          </span>
-
-          <Database
-            class={`h-3.5 w-3.5 shrink-0 ${
-              allChecked ? 'text-primary' : 'text-muted-foreground'
-            }`}
-          />
+          {@render checkIndicator(allChecked, false)}
+          <Database class={`h-3.5 w-3.5 shrink-0 ${allChecked ? 'text-primary' : 'text-muted-foreground'}`} />
           <span class="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
             {s.allSources}
           </span>
@@ -464,90 +407,39 @@
             {workbench.enabledSourceCount}
           </span>
         </button>
-
         <div class="mx-1.5 my-1 border-t border-border/45"></div>
       {/if}
 
       {#if fuzzyResults.length === 0}
-        <div class="px-3 py-7 text-center text-xs text-muted-foreground">
-          {s.pickerNoMatch}
-        </div>
+        <div class="px-3 py-7 text-center text-xs text-muted-foreground">{s.pickerNoMatch}</div>
       {:else}
         {#each fuzzyResults as entry, idx (entry.source.id)}
           {@const src = entry.source}
           {@const checked = isSourceRefInList(src, workbench.scope.sources)}
           {@const excluded = isSourceRefInList(src, workbench.scope.excludedSources ?? [])}
-          {@const isFocused = focusedIdx === idx}
           {@const Icon = kindIconFor(src)}
           {@const subtitle = getSourceSubtitle(src)}
-          {@const invalid = !src.exists}
-
           <button
             type="button"
             role="option"
             data-picker-idx={idx}
             aria-selected={checked}
             onmousedown={(e) => e.preventDefault()}
-            onpointerdown={(e) =>
-              handleOptionPointerDown(`src:${src.id}`, e, () => {
-                toggleItem(src.id, e.altKey);
-              })}
-            onclick={(e) =>
-              handleOptionClick(`src:${src.id}`, e, () => {
-                toggleItem(src.id, e.altKey);
-              })}
+            onpointerdown={(e) => handleOptionPointerDown(`src:${src.id}`, e, () => toggleItem(src.id, e.altKey))}
+            onclick={(e) => handleOptionClick(`src:${src.id}`, e, () => toggleItem(src.id, e.altKey))}
             onmouseenter={() => (focusedIdx = idx)}
             title={s.cardClickTitle(src.name)}
-            class={`touch-target group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer ${
-              checked
-                ? 'bg-primary/[0.08] hover:bg-primary/[0.12]'
-                : excluded
-                  ? 'bg-status/[0.08] hover:bg-status/[0.12]'
-                  : isFocused
-                    ? 'bg-secondary/80'
-                    : 'hover:bg-secondary/55'
-            } ${isFocused && checked ? 'ring-1 ring-inset ring-primary/35' : ''} ${
-              !src.enabled && !checked ? 'opacity-65' : ''
-            }`}
+            class={`touch-target group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left cursor-pointer ${optionRowClass(checked, excluded, focusedIdx === idx)} ${!src.enabled && !checked ? 'opacity-65' : ''}`}
           >
-            <span
-              aria-hidden="true"
-              class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
-                checked
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : excluded
-                    ? 'border-status bg-status/15 text-status'
-                    : 'border-border bg-background/75 group-hover:border-muted-foreground/60'
-              }`}
-            >
-              {#if checked}
-                <Check class="h-3 w-3 stroke-[2.75]" />
-              {:else if excluded}
-                <Minus class="h-3 w-3 stroke-[2.5]" />
-              {/if}
-            </span>
-
-            {#if invalid}
+            {@render checkIndicator(checked, excluded)}
+            {#if !src.exists}
               <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-status" />
             {:else}
-              <Icon
-                class={`h-3.5 w-3.5 shrink-0 ${
-                  checked
-                    ? 'text-primary'
-                    : excluded
-                      ? 'text-status'
-                      : 'text-muted-foreground'
-                }`}
-              />
+              <Icon class={`h-3.5 w-3.5 shrink-0 ${checked ? 'text-primary' : excluded ? 'text-status' : 'text-muted-foreground'}`} />
             {/if}
-
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5 min-w-0">
-                <span
-                  class={`truncate font-mono text-[12.5px] font-medium ${
-                    excluded ? 'line-through text-status' : 'text-foreground'
-                  }`}
-                >
+                <span class={`truncate font-mono text-[12.5px] font-medium ${excluded ? 'line-through text-status' : 'text-foreground'}`}>
                   {@render renderHighlighted(src.name, entry.nameRanges)}
                 </span>
                 {#if !src.enabled}
@@ -565,55 +457,4 @@
       {/if}
     {/if}
   </div>
-
-  <!-- 4. Minimal Footer Bar -->
-  <div class="flex h-8 shrink-0 items-center justify-between gap-2 border-t border-border/50 bg-muted/30 px-3 text-[11px] text-muted-foreground">
-    <span class="truncate font-mono tabular-nums">{footerText}</span>
-    <span class="hidden sm:inline shrink-0 text-muted-foreground/75">{s.pickerKeyHint}</span>
-  </div>
-{/snippet}
-
-{#if workbench.isCompact}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="fixed inset-0 z-40 bg-black/50 backdrop-blur-[1px]"
-    onclick={onClose}
-    onkeydown={(e) => {
-      if (e.key === 'Escape') onClose();
-    }}
-  ></div>
-  <div
-    bind:this={panelEl}
-    role="dialog"
-    tabindex="-1"
-    aria-label={s.pickerTitle}
-    onkeydown={handleKeydown}
-    style={dragY > 0 ? `transform: translate3d(0, ${dragY}px, 0); transition: none` : undefined}
-    class="pb-safe fixed inset-x-2.5 bottom-3 z-50 mx-auto flex max-h-[80dvh] max-w-[400px] flex-col overflow-hidden rounded-2xl border border-border/85 bg-popover text-popover-foreground shadow-2xl transition-transform focus:outline-none select-none"
-  >
-    <div
-      role="presentation"
-      onpointerdown={onHandleDown}
-      onpointermove={onHandleMove}
-      onpointerup={onHandleUp}
-      onpointercancel={onHandleUp}
-      style="touch-action: none"
-      class="flex h-5 shrink-0 cursor-grab items-center justify-center touch-none active:cursor-grabbing"
-    >
-      <div class="h-1 w-9 rounded-full bg-border"></div>
-    </div>
-    {@render popoverContent()}
-  </div>
-{:else}
-  <div
-    bind:this={panelEl}
-    role="dialog"
-    tabindex="-1"
-    aria-label={s.pickerTitle}
-    onkeydown={handleKeydown}
-    style={`${offsetX !== 0 ? `transform: translateX(${offsetX}px);` : ''}${maxPanelH !== null ? ` max-height: ${maxPanelH}px;` : ''}`}
-    class="absolute left-0 top-full z-50 mt-2.5 flex w-[352px] sm:w-[376px] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-2xl border border-border/85 bg-popover text-popover-foreground shadow-2xl focus:outline-none select-none"
-  >
-    {@render popoverContent()}
-  </div>
-{/if}
+</FloatingPopoverShell>
