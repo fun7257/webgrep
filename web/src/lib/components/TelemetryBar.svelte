@@ -1,8 +1,21 @@
 <script lang="ts">
+  import { flushSync, type Component } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import { formatPrunedTelemetry } from '$lib/prefilter';
   import { formatMs } from '$lib/utils';
-  import { AlertTriangle, Filter, Hash, Loader2, Square, Timer } from 'lucide-svelte';
+  import type { ViewModePreference } from '$lib/types';
+  import { PRESENTATION_ADAPTERS, getPresentationAdapter } from './adapters/registry.ts';
+  import {
+    AlertTriangle,
+    Filter,
+    Hash,
+    Loader2,
+    Sparkles,
+    Square,
+    Timer,
+  } from 'lucide-svelte';
+
+  let modePickedOnDown: ViewModePreference | null = null;
 
   const prunedView = $derived(
     workbench.isSearching
@@ -16,13 +29,72 @@
       ? workbench.t.telemetry.prunedTooltipWithBytes(prunedView.filesText, prunedView.savedText)
       : workbench.t.telemetry.prunedTooltipFilesOnly(prunedView.filesText);
   });
+
+  const batchSummary = $derived(workbench.adapterBatchSummary);
+  const activeAutoLabel = $derived(
+    getPresentationAdapter(workbench.activeViewAdapter).meta.label(workbench.t)
+  );
+  const mixedSummaryText = $derived.by(() => {
+    if (!batchSummary.isMixed) return '';
+    return PRESENTATION_ADAPTERS.filter((a) => batchSummary.sampleCounts[a.id] > 0)
+      .map((a) => `${a.meta.label(workbench.t)} ${batchSummary.sampleCounts[a.id]}`)
+      .join(' · ');
+  });
+
+  const viewOptions = $derived<
+    Array<{
+      id: ViewModePreference;
+      icon: Component<{ class?: string }>;
+      title: string;
+      hasSample: boolean;
+    }>
+  >([
+    {
+      id: 'auto',
+      icon: Sparkles as unknown as Component<{ class?: string }>,
+      title: mixedSummaryText
+        ? `${workbench.t.logView.modeAutoTitle(activeAutoLabel)} · ${workbench.t.logView.mixedHint(mixedSummaryText)}`
+        : workbench.t.logView.modeAutoTitle(activeAutoLabel),
+      hasSample: false,
+    },
+    ...PRESENTATION_ADAPTERS.map((adapter) => {
+      const sampleCount = batchSummary.sampleCounts[adapter.id] ?? 0;
+      const baseTitle = adapter.meta.title(workbench.t);
+      return {
+        id: adapter.id as ViewModePreference,
+        icon: adapter.meta.icon,
+        title:
+          batchSummary.isMixed && sampleCount > 0
+            ? `${baseTitle} (${sampleCount}/${batchSummary.sampleCount})`
+            : baseTitle,
+        hasSample: batchSummary.isMixed && sampleCount > 0,
+      };
+    }),
+  ]);
+
+  function onViewPointerDown(mode: ViewModePreference, e: PointerEvent) {
+    if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      modePickedOnDown = mode;
+      flushSync(() => workbench.setViewMode(mode));
+    }
+  }
+
+  function onViewClick(mode: ViewModePreference, e: MouseEvent) {
+    if (modePickedOnDown === mode && e.detail > 0) {
+      modePickedOnDown = null;
+      return;
+    }
+    modePickedOnDown = null;
+    flushSync(() => workbench.setViewMode(mode));
+  }
 </script>
 
 {#if workbench.hasSearchedOnce || workbench.isSearching || workbench.errorMessage}
   <div
-    class="flex flex-wrap items-center justify-between gap-2 px-3 md:px-7 pb-1.5 pt-0.5 text-xs text-muted-foreground/65 select-none"
+    class="flex items-center justify-between gap-2 px-3 md:px-7 pb-1.5 pt-0.5 text-xs text-muted-foreground/65 select-none"
   >
-    <div class="flex h-6 items-center gap-2 min-w-0 font-mono tabular-nums text-[12px]">
+    <div class="flex h-6 flex-1 items-center gap-2 min-w-0 font-mono tabular-nums text-[12px]">
       {#if workbench.errorMessage}
         <span class="flex items-center gap-1.5 text-status font-medium truncate">
           <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
@@ -80,5 +152,37 @@
         {/if}
       {/if}
     </div>
+
+    {#if workbench.flatHits.length > 0 && !workbench.errorMessage}
+      <div
+        role="group"
+        aria-label={workbench.t.settings.viewModeLabel}
+        class="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-md border border-border/50 bg-secondary/45 p-0.5"
+      >
+        {#each viewOptions as opt (opt.id)}
+          {@const Icon = opt.icon}
+          {@const active = workbench.viewMode === opt.id}
+          <button
+            type="button"
+            title={opt.title}
+            aria-label={opt.title}
+            aria-pressed={active}
+            onmousedown={(e) => e.preventDefault()}
+            onpointerdown={(e) => onViewPointerDown(opt.id, e)}
+            onclick={(e) => onViewClick(opt.id, e)}
+            class={`touch-target relative flex h-5 w-6 items-center justify-center rounded-[4px] cursor-pointer ${
+              active
+                ? 'bg-background text-foreground ring-1 ring-inset ring-border/70 shadow-[0_1px_1px_hsl(0_0%_0%/0.05)]'
+                : 'text-muted-foreground/75 hover:text-foreground'
+            }`}
+          >
+            <Icon class="h-3 w-3" />
+            {#if opt.hasSample && !active}
+              <span class="pointer-events-none absolute right-0.5 top-0.5 h-1 w-1 rounded-full bg-primary"></span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 {/if}

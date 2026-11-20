@@ -3,15 +3,17 @@
   import {
     analyzeStructuredLine,
     buildHighlightSegments,
-    extractLeadingNanoTimestamp,
-    highlightCodeWithMatches,
     syntaxKindToClass,
     type CodeHighlightSegment,
     type HighlightSegment,
   } from '$lib/utils';
   import { Loader2 } from 'lucide-svelte';
   import InspectorHeader from './inspector/InspectorHeader.svelte';
-  import StructuredRecordView from './inspector/StructuredRecordView.svelte';
+  import { createWorkbenchAdapterHost } from './adapters/types.ts';
+  import { getPresentationAdapter } from './adapters/registry.ts';
+
+  const host = createWorkbenchAdapterHost();
+  const activeAdapter = $derived(getPresentationAdapter(workbench.activeViewAdapter));
 
   let asideEl = $state<HTMLElement | null>(null);
   let scrollContainerEl = $state<HTMLDivElement | null>(null);
@@ -51,10 +53,6 @@
   let isRegexMode = $derived(workbench.mode === 'regex');
 
   let structuredInfo = $derived(analyzeStructuredLine(activeLineText));
-  let leadingTs = $derived(extractLeadingNanoTimestamp(activeLineText));
-  let cleanPlainText = $derived(
-    leadingTs && leadingTs.restText.length > 0 ? leadingTs.restText : activeLineText
-  );
   let recordKey = $derived(`${workbench.inspectedPath ?? ''}:${targetLine}`);
 
   // Reset scroll position when switching to another hit/record.
@@ -240,14 +238,6 @@
     workbench.replaceSearchWithLiteral(selectedText);
     clearSelectionText();
   }
-
-  let hasStructuredExpansion = $derived(
-    workbench.inspectorTab === 'structured' &&
-      (structuredInfo.kind === 'json' ||
-        structuredInfo.kind === 'embedded-json' ||
-        structuredInfo.kind === 'kv' ||
-        Boolean(structuredInfo.formatBadge))
-  );
 </script>
 
 {#snippet renderCodeSegments(segments: CodeHighlightSegment[])}
@@ -291,14 +281,16 @@
     {targetLine}
     {selectedText}
     {activeLineText}
-    structuredFormattedText={structuredInfo.formattedText}
+    showStructuredToggle={activeAdapter.supportsStructuredToggle}
+    structuredFormattedText={activeAdapter.getFormattedCopyText?.(activeLineText, activeHit) ??
+      structuredInfo.formattedText}
     onAppendSelection={appendSelectedText}
     onExcludeSelection={excludeSelectedText}
     onSearchSelection={searchSelectedText}
     onClose={closeDetail}
   />
 
-  <!-- Unified Code Editor & Structured Preview Canvas -->
+  <!-- Surface-Dispatched Inspector Canvas -->
   <div
     bind:this={scrollContainerEl}
     style={`font-size: ${workbench.codeFontSize}px`}
@@ -318,37 +310,23 @@
         {workbench.t.inspector.emptyPrompt}
       </div>
     {:else}
+      {@const ActiveInspectorView = activeAdapter.InspectorView}
       <div class="rounded-xl border border-border/50 bg-card/35 overflow-hidden">
-        {#if hasStructuredExpansion}
-          <StructuredRecordView
-            {structuredInfo}
-            {highlightFormattedText}
-            {recordKey}
-            {renderCodeSegments}
-          />
-        {:else}
-          <!-- Full Untruncated Single-Record Plain / Raw View -->
-          {@const wrapCls = workbench.wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre overflow-x-auto'}
-          <div class="px-4 py-3 leading-[1.68] text-foreground font-normal">
-            {#if workbench.inspectorTab === 'structured' && leadingTs}
-              <div class="mb-1.5 inline-flex items-center gap-2 rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground select-none">
-                <span>{leadingTs.fullFormattedTime}</span>
-              </div>
-            {/if}
-            {#if workbench.inspectorTab === 'raw'}
-              <div class={wrapCls}>
-                {@render renderCodeSegments(highlightCodeWithMatches(activeLineText, rawLineSegments))}
-              </div>
-            {:else}
-              {@const plainDisplay = cleanPlainText || ' '}
-              <div class={wrapCls}>
-                {@render renderCodeSegments(
-                  highlightCodeWithMatches(plainDisplay, highlightFormattedText(plainDisplay))
-                )}
-              </div>
-            {/if}
-          </div>
-        {/if}
+        <ActiveInspectorView
+          {host}
+          {activeHit}
+          {activeLineText}
+          {targetLine}
+          inspectedPath={workbench.inspectedPath ?? ''}
+          {fileData}
+          loading={workbench.inspectorLoading}
+          inspectorTab={workbench.inspectorTab}
+          {recordKey}
+          {structuredInfo}
+          {rawLineSegments}
+          {highlightFormattedText}
+          {renderCodeSegments}
+        />
       </div>
     {/if}
   </div>

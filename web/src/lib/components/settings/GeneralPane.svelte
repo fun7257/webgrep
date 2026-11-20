@@ -1,5 +1,7 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
+  import type { ViewModePreference } from '$lib/types';
+  import { PRESENTATION_ADAPTERS } from '../adapters/registry.ts';
   import {
     MAX_CONTEXT_LINE_SETTING,
     MIN_CONTEXT_LINE_SETTING,
@@ -16,10 +18,12 @@
     ChevronsUpDown,
     Gauge,
     Languages,
+    Layers,
     ListOrdered,
     Moon,
     Rows3,
     Rows4,
+    Sparkles,
     Sun,
     SunMoon,
     UnfoldVertical,
@@ -110,6 +114,22 @@
           step={1}
           widthClass="w-10"
           onchange={(v) => display(() => (workbench.previewLines = v))}
+        />
+      </SettingRow>
+
+      <SettingRow icon={Layers} label={s.viewModeLabel} hint={s.viewModeDesc}>
+        <Segmented
+          value={workbench.viewMode}
+          options={[
+            { value: 'auto' as ViewModePreference, icon: Sparkles, label: s.viewModeAuto, title: s.viewModeAuto },
+            ...PRESENTATION_ADAPTERS.map((adapter) => ({
+              value: adapter.id as ViewModePreference,
+              icon: adapter.meta.icon,
+              label: adapter.meta.label(workbench.t),
+              title: adapter.meta.title(workbench.t),
+            })),
+          ]}
+          onchange={(v) => workbench.setViewMode(v)}
         />
       </SettingRow>
     </div>

@@ -20,6 +20,7 @@
     targetLine: number;
     selectedText: string;
     activeLineText: string;
+    showStructuredToggle?: boolean;
     structuredFormattedText?: string;
     onAppendSelection: () => void;
     onExcludeSelection: () => void;
@@ -33,6 +34,7 @@
     targetLine,
     selectedText,
     activeLineText,
+    showStructuredToggle = true,
     structuredFormattedText = '',
     onAppendSelection,
     onExcludeSelection,
@@ -174,37 +176,39 @@
       </button>
     {/if}
 
-    <!-- Formatted / Raw toggle (single icon button) -->
-    <button
-      type="button"
-      onpointerdown={(e) => {
-        if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
-          tabToggledOnDown = true;
-          toggleInspectorTab();
-        }
-      }}
-      onclick={(e) => {
-        if (tabToggledOnDown && e.detail > 0) {
+    {#if showStructuredToggle}
+      <!-- Formatted / Raw toggle (single icon button) -->
+      <button
+        type="button"
+        onpointerdown={(e) => {
+          if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            tabToggledOnDown = true;
+            toggleInspectorTab();
+          }
+        }}
+        onclick={(e) => {
+          if (tabToggledOnDown && e.detail > 0) {
+            tabToggledOnDown = false;
+            return;
+          }
           tabToggledOnDown = false;
-          return;
-        }
-        tabToggledOnDown = false;
-        toggleInspectorTab();
-      }}
-      title={workbench.inspectorTab === 'raw'
-        ? workbench.t.inspector.formattedBtn
-        : workbench.t.inspector.rawBtn}
-      aria-label={workbench.inspectorTab === 'raw'
-        ? workbench.t.inspector.formattedBtn
-        : workbench.t.inspector.rawBtn}
-      class="touch-target rounded-md p-1.5 text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
-    >
-      {#if workbench.inspectorTab === 'raw'}
-        <Braces class="h-3.5 w-3.5" />
-      {:else}
-        <FileText class="h-3.5 w-3.5" />
-      {/if}
-    </button>
+          toggleInspectorTab();
+        }}
+        title={workbench.inspectorTab === 'raw'
+          ? workbench.t.inspector.formattedBtn
+          : workbench.t.inspector.rawBtn}
+        aria-label={workbench.inspectorTab === 'raw'
+          ? workbench.t.inspector.formattedBtn
+          : workbench.t.inspector.rawBtn}
+        class="touch-target rounded-md p-1.5 text-muted-foreground/80 hover:bg-secondary/60 hover:text-foreground active:bg-secondary cursor-pointer"
+      >
+        {#if workbench.inspectorTab === 'raw'}
+          <Braces class="h-3.5 w-3.5" />
+        {:else}
+          <FileText class="h-3.5 w-3.5" />
+        {/if}
+      </button>
+    {/if}
 
     {#if activeLineText}
       <button
