@@ -14,7 +14,8 @@
   import SearchScopeTriggers from './search/SearchScopeTriggers.svelte';
   import SearchAttachedDropdown from './search/SearchAttachedDropdown.svelte';
   import ConditionChainBar from './search/ConditionChainBar.svelte';
-  import { FolderGit2, Loader2, Plus, Search, X } from 'lucide-svelte';
+  import SourcePickerContent from './pickers/SourcePickerContent.svelte';
+  import { Loader2, Plus, Search, X } from 'lucide-svelte';
 
   interface Props {
     inputEl?: HTMLInputElement | null;
@@ -453,24 +454,14 @@
 <div
   class={hero
     ? `flex flex-1 flex-col items-center px-2 sm:px-3 md:px-6 select-none ${
-        showSymbolBar ? 'justify-start pt-4' : 'justify-center pb-[14vh]'
+        showSymbolBar ? 'justify-start pt-4' : 'justify-center pb-[6vh]'
       }`
     : 'relative px-2 sm:px-3 md:px-6 pt-2 md:pt-3 pb-1.5 select-none'}
 >
   {#if hero}
     <!-- Google-Style Centered Brand Wordmark -->
-    <div class={`${showSymbolBar ? 'mb-3' : 'mb-7'} flex flex-col items-center gap-2 text-center`}>
+    <div class={`${showSymbolBar ? 'mb-3' : 'mb-6'} flex flex-col items-center gap-2 text-center`}>
       <h1 class="font-mono text-4xl font-semibold tracking-tight text-foreground">webgrep</h1>
-      {#if workbench.sourcesLoaded && workbench.sources.length === 0}
-        <button
-          type="button"
-          onclick={() => workbench.openSourcesDrawer(true)}
-          class="inline-flex items-center gap-1.5 text-xs text-status hover:underline cursor-pointer"
-        >
-          <FolderGit2 class="h-3.5 w-3.5" />
-          <span>{workbench.t.results.emptyNoSourceTitle} · {workbench.t.results.openSourceManagerBtn}</span>
-        </button>
-      {/if}
     </div>
   {/if}
 
@@ -632,6 +623,12 @@
 
     {#if workbench.steps.length > 0}
       <ConditionChainBar onFocusInput={() => inputEl?.focus()} onSyncCursor={syncCursorPos} />
+    {/if}
+
+    {#if hero && !showSymbolBar}
+      <div class="mt-4">
+        <SourcePickerContent inline onFocusMainInput={() => inputEl?.focus()} />
+      </div>
     {/if}
   </div>
 </div>
