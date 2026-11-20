@@ -1,6 +1,9 @@
 export type SearchMode = 'literal' | 'multi' | 'regex';
 export type CaseMode = 'smart' | 'sensitive' | 'insensitive';
 
+export type ViewAdapterId = 'log' | 'code' | 'plain';
+export type ViewModePreference = 'auto' | ViewAdapterId;
+
 export type BuiltinTimePreset =
   | ''
   | '5m'

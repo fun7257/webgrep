@@ -1,4 +1,7 @@
-import { detectInlineEpochHint, extractLeadingNanoTimestamp } from '../format.ts';
+import { decodeHumanEscapes, detectInlineEpochHint, extractLeadingNanoTimestamp } from '../format.ts';
+import { preserveLargeJsonIntegers } from '../adapters/log-parser.ts';
+
+export { decodeHumanEscapes };
 
 export interface StructuredAnalysis {
   kind: 'json' | 'embedded-json' | 'kv' | 'long-line';
@@ -14,32 +17,6 @@ export interface StructuredAnalysis {
 }
 
 /**
- * Decodes \uXXXX unicode escapes, URL %XX UTF-8 sequences, ANSI escapes, and literal \n / \t
- * so human eyes can read escaped Chinese/UTF-8 text and multi-line stack traces effortlessly.
- */
-export function decodeHumanEscapes(s: string): string {
-  if (!s || (!s.includes('\\') && !s.includes('%') && !s.includes('\x1b'))) {
-    return s;
-  }
-  let out = s
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\r\\n|\\n/g, '\n')
-    .replace(/\\t/g, '  ');
-
-  if (/%[0-9a-fA-F]{2}/.test(out)) {
-    out = out.replace(/(?:%[0-9a-fA-F]{2})+/g, (match) => {
-      try {
-        return decodeURIComponent(match);
-      } catch {
-        return match;
-      }
-    });
-  }
-  return out;
-}
-
-/**
  * Recursively unwraps nested JSON strings (e.g. Docker `"log":"{\"level\":\"error\"}"` or gateway `"body":"{...}"`)
  * and decodes `\uXXXX` / `%XX` inside string values.
  */
@@ -52,7 +29,7 @@ function deepHumanizeJsonValue(val: unknown, depth = 0): unknown {
       (trimmed.startsWith('[') && trimmed.endsWith(']'))
     ) {
       try {
-        const inner = JSON.parse(trimmed);
+        const inner = JSON.parse(preserveLargeJsonIntegers(trimmed));
         if (typeof inner === 'object' && inner !== null) {
           return deepHumanizeJsonValue(inner, depth + 1);
         }
@@ -209,7 +186,7 @@ function computeStructuredAnalysis(text: string): StructuredAnalysis {
     (trimmed.startsWith('[') && trimmed.endsWith(']'))
   ) {
     try {
-      const parsed = JSON.parse(trimmed);
+      const parsed = JSON.parse(preserveLargeJsonIntegers(trimmed));
       const humanized = deepHumanizeJsonValue(parsed);
       const pretty = JSON.stringify(humanized, null, 2);
       return {
@@ -233,7 +210,7 @@ function computeStructuredAnalysis(text: string): StructuredAnalysis {
   if (firstBrace !== -1 && lastBrace > firstBrace + 1) {
     const candidate = bodyText.slice(firstBrace, lastBrace + 1);
     try {
-      const parsed = JSON.parse(candidate);
+      const parsed = JSON.parse(preserveLargeJsonIntegers(candidate));
       const humanized = deepHumanizeJsonValue(parsed);
       const rawPrefix = decodeHumanEscapes(bodyText.slice(0, firstBrace).trim());
       const prefix = [tsHeader, rawPrefix].filter((p) => p.length > 0).join('  ');

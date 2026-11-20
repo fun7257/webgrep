@@ -185,6 +185,7 @@ describe('state/persistence', () => {
       codeFontSize: 4,
       wordWrap: false,
       resultDensity: 'compact',
+      viewMode: 'log',
       locale: 'en',
       mcpMaxLogs: 500,
       tenant: '  team-a  ',
@@ -199,9 +200,15 @@ describe('state/persistence', () => {
     assert.equal(norm.codeFontSize, 10);
     assert.equal(norm.wordWrap, false);
     assert.equal(norm.resultDensity, 'compact');
+    assert.equal(norm.viewMode, 'log');
     assert.equal(norm.locale, 'en');
     assert.equal(norm.mcpMaxLogs, 200);
     assert.equal(norm.tenant, 'team-a');
+
+    assert.equal(normalizeSettings({}).viewMode, 'auto');
+    assert.equal(normalizeSettings({ viewMode: 'code' }).viewMode, 'code');
+    assert.equal(normalizeSettings({ viewMode: 'plain' }).viewMode, 'plain');
+    assert.equal(normalizeSettings({ viewMode: 'invalid-mode' }).viewMode, 'auto');
 
     const storage = makeMemoryStorage();
     saveSettingsToStorage(storage, norm);
@@ -384,6 +391,10 @@ describe('state/stream-buffer', () => {
     assert.equal(
       buildFileContextCacheKey('default', 'docker/app', 12, 3, 1700),
       'default\u0000docker/app\u000012\u00003\u0000s=1700'
+    );
+    assert.equal(
+      buildFileContextCacheKey('default', 'repo/src/main.zig', 42, null, null, 12),
+      'default\u0000repo/src/main.zig\u000042\u0000c=12'
     );
 
     const existing = makeFileResponse('a.log', [10, 11, 12]).lines;

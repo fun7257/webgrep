@@ -216,3 +216,29 @@ export function detectInlineEpochHint(text: string): string | null {
 
   return formatEpochParts(ms).full;
 }
+
+/**
+ * Decodes \uXXXX unicode escapes, URL %XX UTF-8 sequences, ANSI escapes, and literal \n / \t
+ * so human eyes can read escaped Chinese/UTF-8 text and multi-line stack traces effortlessly.
+ */
+export function decodeHumanEscapes(s: string): string {
+  if (!s || (!s.includes('\\') && !s.includes('%') && !s.includes('\x1b'))) {
+    return s;
+  }
+  let out = s
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\r\\n|\\n/g, '\n')
+    .replace(/\\t/g, '  ');
+
+  if (/%[0-9a-fA-F]{2}/.test(out)) {
+    out = out.replace(/(?:%[0-9a-fA-F]{2})+/g, (match) => {
+      try {
+        return decodeURIComponent(match);
+      } catch {
+        return match;
+      }
+    });
+  }
+  return out;
+}

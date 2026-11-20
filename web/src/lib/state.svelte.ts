@@ -19,8 +19,15 @@ import type {
   SourcesResponse,
   TimePreset,
   TimePreviewResponse,
+  ViewAdapterId,
+  ViewModePreference,
   WsIncomingMessage,
 } from './types';
+import {
+  getHeadlessAdapter,
+  resolveBatchAdapterSummary,
+  type AdapterBatchSummary,
+} from './adapters/index.ts';
 import { messages, type Locale } from './i18n';
 import { DEFAULT_MCP_MAX_LOGS, clampMcpMaxLogs } from './mcp';
 import {
@@ -286,6 +293,7 @@ class WorkbenchState {
     this.sources.reduce((acc, s) => acc + (s.enabled ? 1 : 0), 0)
   );
   sourceById = $derived.by(() => new Map(this.sources.map((s) => [s.id, s])));
+  sourceByName = $derived.by(() => new Map(this.sources.map((s) => [s.name.toLowerCase(), s])));
 
   // Active Hit, Right Inspector & File Context LRU
   activeHitIndex = $state<number>(-1);
@@ -339,6 +347,21 @@ class WorkbenchState {
   contextStepLines = $state<number>(DEFAULT_CONTEXT_STEP_LINES);
   contextAutoLoadPace = $state<ContextAutoLoadPace>(DEFAULT_CONTEXT_AUTO_LOAD_PACE);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
+  viewMode = $state<ViewModePreference>('auto');
+  adapterBatchSummary = $derived<AdapterBatchSummary>(
+    resolveBatchAdapterSummary(this.flatHits, this.sourceByName, this.viewMode)
+  );
+  activeViewAdapter = $derived<ViewAdapterId>(this.adapterBatchSummary.activeAdapter);
+  activeInspectContextLines = $derived<number>(
+    getHeadlessAdapter(this.activeViewAdapter).inspectContextLines
+  );
+  collapsedFilesSet = $derived.by(() => {
+    const set = new Set<string>();
+    for (const g of this.fileGroups) {
+      if (g.collapsed) set.add(g.file);
+    }
+    return set;
+  });
   searchHistory = $state<SearchHistoryEntry[]>([]);
 
   // MCP Service State
@@ -788,6 +811,7 @@ class WorkbenchState {
       codeFontSize: this.codeFontSize,
       wordWrap: this.wordWrap,
       resultDensity: this.resultDensity,
+      viewMode: this.viewMode,
     };
   }
 
@@ -811,6 +835,27 @@ class WorkbenchState {
     this.codeFontSize = loaded.codeFontSize;
     this.wordWrap = loaded.wordWrap;
     this.resultDensity = loaded.resultDensity;
+    this.viewMode = loaded.viewMode;
+  }
+
+  setViewMode(mode: ViewModePreference) {
+    if (this.viewMode === mode) return;
+    this.viewMode = mode;
+    this.saveSettings();
+    if (this.inspectedPath && this.inspectedLine > 0) {
+      const nextCtxLines = getHeadlessAdapter(this.activeViewAdapter).inspectContextLines;
+      const loadedCount =
+        this.inspectedFile?.path === this.inspectedPath ? this.inspectedFile.lines.length : 0;
+      if (nextCtxLines > 0 && loadedCount <= 1) {
+        void this.inspectFileAtLine(
+          this.inspectedPath,
+          this.inspectedLine,
+          false,
+          this.inspectedHit?.byteOffset,
+          nextCtxLines
+        );
+      }
+    }
   }
 
   setTenant(nextTenant: string) {
@@ -845,6 +890,7 @@ class WorkbenchState {
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
+    this.viewMode = 'auto';
     this.saveSettings();
     if (this.hasSearchedOnce && this.hasExecutableQuery) {
       this.executeSearch({ forceRefresh: false });
@@ -1742,7 +1788,8 @@ class WorkbenchState {
     this.inspectedPath = hit.file;
     this.inspectedLine = hit.line;
     this.inspectorError = null;
-    if (!isPossiblyTruncatedHitText(hit.text)) {
+    const ctxLines = this.activeInspectContextLines;
+    if (ctxLines === 0 && !isPossiblyTruncatedHitText(hit.text)) {
       this.inspectAbort?.abort();
       this.inspectAbort = null;
       this.inspectSeq += 1;
@@ -1750,7 +1797,7 @@ class WorkbenchState {
       this.inspectorLoading = false;
       return;
     }
-    void this.inspectFileAtLine(hit.file, hit.line, forceOpenInspector);
+    void this.inspectFileAtLine(hit.file, hit.line, forceOpenInspector, hit.byteOffset, ctxLines);
   }
 
   selectHitByIndex(index: number, forceOpenInspector = false, deferInspector = false) {
@@ -2001,9 +2048,11 @@ class WorkbenchState {
     filePath: string,
     line = 1,
     forceOpen = true,
-    anchorByteHint?: number | null
+    anchorByteHint?: number | null,
+    contextLines?: number
   ) {
     const targetLine = Math.max(1, line);
+    const ctx = Math.max(0, Math.floor(contextLines ?? this.activeInspectContextLines));
     if (
       this.inspectedHit &&
       (this.inspectedHit.file !== filePath || this.inspectedHit.line !== targetLine)
@@ -2016,7 +2065,8 @@ class WorkbenchState {
       filePath,
       targetLine,
       isDockerVirtualPath(this.sources, filePath) ? this.searchCount : null,
-      computeDockerPreviewSinceSec(this.sources, filePath, this.displayedTimeStartMs)
+      computeDockerPreviewSinceSec(this.sources, filePath, this.displayedTimeStartMs),
+      ctx
     );
 
     if (forceOpen) {
@@ -2060,18 +2110,28 @@ class WorkbenchState {
         filePath,
         targetLine
       );
+      const win = ctx > 0 ? computeInitialFetchWindow(targetLine, ctx) : null;
       const data = await this.fetchFileWindow(
         filePath,
-        hitByte !== undefined
+        win
           ? {
-              line: targetLine,
-              context: 0,
-              startLine: targetLine,
-              endLine: targetLine,
-              anchorLine: targetLine,
+              line: win.line,
+              context: win.context,
+              startLine: win.targetStart,
+              endLine: win.targetEnd,
+              anchorLine: hitByte !== undefined ? targetLine : undefined,
               anchorByte: hitByte,
             }
-          : { line: targetLine, context: 0 },
+          : hitByte !== undefined
+            ? {
+                line: targetLine,
+                context: 0,
+                startLine: targetLine,
+                endLine: targetLine,
+                anchorLine: targetLine,
+                anchorByte: hitByte,
+              }
+            : { line: targetLine, context: 0 },
         controller.signal
       );
       if (seq !== this.inspectSeq) return;
