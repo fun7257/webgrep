@@ -281,7 +281,6 @@ class WorkbenchState {
   addSourceModalOpen = $state<boolean>(false);
   drawerPanel = $state<DrawerPanelId | null>(null);
   sourceAddOpen = $state<boolean>(false);
-  sourcePickerOpen = $state<boolean>(false);
   timePickerOpen = $state<boolean>(false);
   rightDrawerOpen = $derived<boolean>(this.drawerPanel !== null);
   settingsOpen = $derived<boolean>(this.drawerPanel === 'settings');
@@ -481,7 +480,6 @@ class WorkbenchState {
   private openDrawerPanel(panel: DrawerPanelId, expandAdd = false) {
     this.abortContextFetch();
     this.paletteOpen = false;
-    this.sourcePickerOpen = false;
     this.timePickerOpen = false;
     this.sourceAddOpen = expandAdd;
     this.drawerPanel = panel;
@@ -504,28 +502,8 @@ class WorkbenchState {
     this.openDrawerPanel('settings');
   }
 
-  openSourcePicker() {
-    this.paletteOpen = false;
-    this.timePickerOpen = false;
-    this.closeRightDrawer();
-    this.sourcePickerOpen = true;
-  }
-
-  closeSourcePicker() {
-    this.sourcePickerOpen = false;
-  }
-
-  toggleSourcePicker() {
-    if (this.sourcePickerOpen) {
-      this.closeSourcePicker();
-    } else {
-      this.openSourcePicker();
-    }
-  }
-
   openTimePicker() {
     this.paletteOpen = false;
-    this.sourcePickerOpen = false;
     this.closeRightDrawer();
     this.timePickerOpen = true;
   }
@@ -606,7 +584,6 @@ class WorkbenchState {
     }
     this.closeRightDrawer();
     this.paletteOpen = false;
-    this.sourcePickerOpen = false;
     this.timePickerOpen = false;
     this.clearSearch();
     this.wsTransport.closeForLock();
@@ -1889,7 +1866,6 @@ class WorkbenchState {
     const anchor = Math.max(1, line ?? (this.inspectedHit?.line ?? this.inspectedLine));
 
     this.paletteOpen = false;
-    this.sourcePickerOpen = false;
     this.timePickerOpen = false;
     this.sourceAddOpen = false;
     this.drawerPanel = 'context';

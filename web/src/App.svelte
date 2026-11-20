@@ -119,7 +119,6 @@
 
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyK') {
       e.preventDefault();
-      workbench.closeSourcePicker();
       workbench.closeTimePicker();
       workbench.closeRightDrawer();
       workbench.paletteOpen = !workbench.paletteOpen;
@@ -129,7 +128,6 @@
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       workbench.paletteOpen = false;
-      workbench.closeSourcePicker();
       workbench.closeTimePicker();
       if (workbench.settingsOpen) {
         workbench.closeRightDrawer();
@@ -140,16 +138,9 @@
     }
 
     if (e.key === 'Escape') {
-      // Step back one layer at a time: palette → source/time picker → right drawer → detail → cancel search
+      // Step back one layer at a time: palette → time picker → right drawer → detail → cancel search
       if (workbench.paletteOpen) {
         workbench.paletteOpen = false;
-        return;
-      }
-      if (workbench.sourcePickerOpen) {
-        workbench.closeSourcePicker();
-        if (!workbench.isCompact && !workbench.isTouch) {
-          searchInputEl?.focus();
-        }
         return;
       }
       if (workbench.timePickerOpen) {
@@ -177,7 +168,6 @@
 
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '?') {
       e.preventDefault();
-      workbench.closeSourcePicker();
       workbench.closeTimePicker();
       if (workbench.shortcutsDrawerOpen) {
         workbench.closeRightDrawer();
@@ -190,7 +180,6 @@
     if (
       workbench.paletteOpen ||
       workbench.rightDrawerOpen ||
-      workbench.sourcePickerOpen ||
       workbench.timePickerOpen
     ) {
       return;

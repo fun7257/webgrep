@@ -37,12 +37,6 @@ export function buildCommands(): Command[] {
       run: () => workbench.openSettingsDrawer(),
     },
     {
-      id: 'pick-sources',
-      icon: Database as unknown as Command['icon'],
-      title: p.pickSources,
-      run: () => workbench.openSourcePicker(),
-    },
-    {
       id: 'pick-time',
       icon: Clock as unknown as Command['icon'],
       title: p.pickTime,

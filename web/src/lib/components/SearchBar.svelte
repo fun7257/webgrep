@@ -38,7 +38,6 @@
   let pointerFocusingInput = false;
 
   let searchBoxWrapEl = $state<HTMLDivElement | null>(null);
-  let sourcePickerWrapEl = $state<HTMLDivElement | null>(null);
   let timePickerWrapEl = $state<HTMLDivElement | null>(null);
 
   function cancelScheduledVocabulary() {
@@ -180,9 +179,7 @@
     focused && dropdownOpen && (dropdownItems.length > 0 || regexTip !== null)
   );
   const hasAttachedPanel = $derived(
-    !workbench.sourcePickerOpen &&
-      !workbench.timePickerOpen &&
-      (showSymbolBar || hasOpenDropdown)
+    !workbench.timePickerOpen && (showSymbolBar || hasOpenDropdown)
   );
 
   const placeholderText = $derived.by(() => {
@@ -359,7 +356,6 @@
   }
 
   function preparePointerFocus() {
-    if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
     if (workbench.timePickerOpen) workbench.closeTimePicker();
     pointerFocusingInput = true;
     flushSync(() => {
@@ -373,7 +369,6 @@
     return !(
       target === inputEl ||
       target.closest('button') ||
-      sourcePickerWrapEl?.contains(target) ||
       timePickerWrapEl?.contains(target)
     );
   }
@@ -392,7 +387,6 @@
   }
 
   function handleFocus() {
-    if (workbench.sourcePickerOpen) workbench.closeSourcePicker();
     if (workbench.timePickerOpen) workbench.closeTimePicker();
     focused = true;
     if (pointerFocusingInput) {
@@ -412,9 +406,6 @@
 
   function handleWindowPointerDown(e: PointerEvent) {
     const target = e.target as Node;
-    if (workbench.sourcePickerOpen && sourcePickerWrapEl && !sourcePickerWrapEl.contains(target)) {
-      workbench.closeSourcePicker();
-    }
     if (workbench.timePickerOpen && timePickerWrapEl && !timePickerWrapEl.contains(target)) {
       workbench.closeTimePicker();
     }
@@ -497,7 +488,6 @@
               onmousedown={(e) => e.preventDefault()}
               onclick={() => {
                 dropdownOpen = false;
-                workbench.closeSourcePicker();
                 workbench.closeTimePicker();
                 workbench.submitSearch();
               }}
@@ -514,7 +504,6 @@
           {/if}
 
           <SearchScopeTriggers
-            bind:sourceWrapEl={sourcePickerWrapEl}
             bind:timeWrapEl={timePickerWrapEl}
             onBeforeOpenPicker={resetDropdownForPicker}
             onFocusMainInput={() => inputEl?.focus()}

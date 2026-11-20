@@ -102,7 +102,6 @@
     });
     if (inline) return;
     queueMicrotask(() => {
-      if (!workbench.sourcePickerOpen) return;
       if (!workbench.isCompact && !workbench.isTouch) {
         searchInputEl?.focus({ preventScroll: true });
       } else {
