@@ -382,16 +382,16 @@
     role="listbox"
     aria-multiselectable="true"
     aria-label={s.pickerTitle}
-    class={`min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5 space-y-0.5 ${
+    class={`min-h-0 overflow-y-auto overscroll-contain p-1.5 space-y-0.5 ${
       inline
-        ? 'max-h-[240px] sm:max-h-[268px]'
+        ? 'h-[248px] sm:h-[268px] shrink-0'
         : workbench.isCompact
-          ? ''
-          : 'max-h-[300px]'
+          ? 'flex-1 min-h-[220px]'
+          : 'h-[300px] shrink-0'
     }`}
   >
     {#if workbench.sources.length === 0}
-      <div class="flex flex-col items-center justify-center gap-2.5 px-4 py-8 text-center">
+      <div class="flex h-full flex-col items-center justify-center gap-2.5 px-4 text-center">
         <Database class="h-5 w-5 text-muted-foreground/55" />
         <span class="text-xs text-muted-foreground">{s.noSourcesHint}</span>
         <button
@@ -434,7 +434,9 @@
       {/if}
 
       {#if fuzzyResults.length === 0}
-        <div class="px-3 py-7 text-center text-xs text-muted-foreground">{s.pickerNoMatch}</div>
+        <div class="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground">
+          {s.pickerNoMatch}
+        </div>
       {:else}
         {#each fuzzyResults as entry, idx (entry.source.id)}
           {@const src = entry.source}
