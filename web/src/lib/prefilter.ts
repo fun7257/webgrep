@@ -1,6 +1,7 @@
 import type {
   DataSourceItem,
   MetaResponse,
+  PluginDomain,
   PluginMetadata,
   PluginOverrides,
   PluginPreset,
@@ -10,8 +11,10 @@ import { formatBytes } from './utils.ts';
 
 export const PLUGIN_PRESETS: readonly PluginPreset[] = ['auto', 'timeseries', 'code', 'raw'];
 export const DEFAULT_PLUGIN_PRESET: PluginPreset = 'auto';
+export const PLUGIN_DOMAINS: readonly PluginDomain[] = ['common', 'log', 'code'];
 
 const PLUGIN_PRESET_SET = new Set<string>(PLUGIN_PRESETS);
+const PLUGIN_DOMAIN_SET = new Set<string>(PLUGIN_DOMAINS);
 const PREFILTER_STAGE_SET = new Set<string>([
   'source_plan',
   'file_prune',
@@ -32,6 +35,7 @@ export interface NormalizedPresetMetadata {
 
 export interface NormalizedPluginMetadata {
   id: string;
+  domain: PluginDomain;
   nameKey: string;
   description: string;
   stages: PrefilterStage[];
@@ -41,6 +45,11 @@ export interface NormalizedPluginMetadata {
 
 export interface PrefilterCatalog {
   presets: NormalizedPresetMetadata[];
+  plugins: NormalizedPluginMetadata[];
+}
+
+export interface PluginDomainGroup {
+  domain: PluginDomain;
   plugins: NormalizedPluginMetadata[];
 }
 
@@ -70,6 +79,7 @@ export const DEFAULT_PRESET_CATALOG: readonly NormalizedPresetMetadata[] = [
 export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   {
     id: 'path_scope',
+    domain: 'common',
     nameKey: 'plugins.path_scope',
     description: 'Zero-alloc path, extension, and glob pruning before scanning',
     stages: ['source_plan', 'file_prune'],
@@ -78,6 +88,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'mtime_guard',
+    domain: 'common',
     nameKey: 'plugins.mtime_guard',
     description: 'Lower-bound mtime guard (mtime < timeStart)',
     stages: ['file_prune'],
@@ -86,6 +97,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'mtime_window',
+    domain: 'code',
     nameKey: 'plugins.mtime_window',
     description: 'Upper-bound mtime window (active in code; fallback for timestamp-less files in auto)',
     stages: ['file_prune'],
@@ -94,6 +106,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'filename_date',
+    domain: 'log',
     nameKey: 'plugins.filename_date',
     description: 'Extract rotated filename dates/hours before decompression',
     stages: ['file_prune'],
@@ -102,6 +115,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'sidecar_sketch',
+    domain: 'common',
     nameKey: 'plugins.sidecar_sketch',
     description: 'Observed timestamp bounds & ASCII trigram Bloom sketch in data_dir',
     stages: ['file_prune'],
@@ -110,6 +124,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'time_bisect',
+    domain: 'log',
     nameKey: 'plugins.time_bisect',
     description: 'Binary-search byte windows by parsed line timestamps',
     stages: ['window_narrow'],
@@ -118,6 +133,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
   },
   {
     id: 'line_time',
+    domain: 'log',
     nameKey: 'plugins.line_time',
     description: 'Line timestamp filter, stack-trace continuation binding, and KV pushdown',
     stages: ['source_plan', 'line_filter'],
@@ -133,6 +149,15 @@ const DEFAULT_PRESET_MAP = new Map<PluginPreset, NormalizedPresetMetadata>(
 const DEFAULT_PLUGIN_MAP = new Map<string, NormalizedPluginMetadata>(
   DEFAULT_PLUGIN_CATALOG.map((p) => [p.id, p])
 );
+
+export function normalizePluginDomain(
+  raw: unknown,
+  fallback: PluginDomain = 'common'
+): PluginDomain {
+  if (typeof raw !== 'string') return fallback;
+  const clean = raw.trim().toLowerCase();
+  return PLUGIN_DOMAIN_SET.has(clean) ? (clean as PluginDomain) : fallback;
+}
 
 export function normalizePluginPreset(
   raw: unknown,
@@ -295,9 +320,11 @@ export function normalizeMetaPrefilterCatalog(
           : typeof p.cost_hint === 'string' && p.cost_hint.trim()
             ? p.cost_hint.trim()
             : fallback?.costHint ?? '';
+      const domain = normalizePluginDomain(p.domain, fallback?.domain ?? 'common');
 
       plugins.push({
         id,
+        domain,
         nameKey,
         description,
         stages,
@@ -331,6 +358,68 @@ export function resolveSourcePluginOverrides(
 ): NormalizedPluginOverrides {
   const raw = src?.plugins ?? src?.config?.plugins;
   return normalizePluginOverrides(raw);
+}
+
+export function isPluginApplicableToPreset(
+  plugin: Pick<NormalizedPluginMetadata, 'domain'>,
+  preset: PluginPreset
+): boolean {
+  if (preset === 'code') {
+    return plugin.domain === 'common' || plugin.domain === 'code';
+  }
+  if (preset === 'timeseries') {
+    return plugin.domain === 'common' || plugin.domain === 'log';
+  }
+  return true;
+}
+
+export function groupPluginsForPreset(
+  plugins: readonly NormalizedPluginMetadata[],
+  preset: PluginPreset
+): PluginDomainGroup[] {
+  const order: readonly PluginDomain[] =
+    preset === 'code'
+      ? ['code', 'common']
+      : preset === 'timeseries'
+        ? ['log', 'common']
+        : ['log', 'code', 'common'];
+
+  const buckets = new Map<PluginDomain, NormalizedPluginMetadata[]>();
+  for (const d of order) {
+    buckets.set(d, []);
+  }
+  for (const plugin of plugins) {
+    if (!isPluginApplicableToPreset(plugin, preset)) continue;
+    const list = buckets.get(plugin.domain);
+    if (list) list.push(plugin);
+  }
+
+  const out: PluginDomainGroup[] = [];
+  for (const d of order) {
+    const list = buckets.get(d);
+    if (list && list.length > 0) {
+      out.push({ domain: d, plugins: list });
+    }
+  }
+  return out;
+}
+
+export function sanitizePluginOverridesForPreset(
+  plugins: readonly Pick<NormalizedPluginMetadata, 'id' | 'domain'>[],
+  preset: PluginPreset,
+  overrides: PluginOverrides | null | undefined
+): NormalizedPluginOverrides {
+  const norm = normalizePluginOverrides(overrides);
+  const byId = new Map(plugins.map((p) => [p.id, p]));
+  const keepId = (id: string) => {
+    const meta = byId.get(id);
+    if (!meta) return true;
+    return isPluginApplicableToPreset(meta, preset);
+  };
+  return {
+    enable: norm.enable.filter(keepId),
+    disable: norm.disable.filter(keepId),
+  };
 }
 
 export function isPluginDefaultEnabledForPreset(

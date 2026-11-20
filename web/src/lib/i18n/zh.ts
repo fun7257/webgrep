@@ -367,6 +367,11 @@ export const zh = {
       },
     } as Record<string, { label: string; hint: string }>,
     sourcePrefilterCustomize: '插件微调',
+    sourcePrefilterDomains: {
+      common: '通用基础',
+      log: '日志专属',
+      code: '代码专属',
+    } as Record<'common' | 'log' | 'code', string>,
     sourcePrefilterReset: '还原预设',
     sourcePrefilterCustomBadge: (enableCount: number, disableCount: number) => {
       const parts: string[] = [];
@@ -430,31 +435,10 @@ export const zh = {
   },
   logView: {
     modeAutoTitle: (detected: string) => `自动适配视图（当前：${detected}）`,
-    modeLogTitle: '日志结构化视图',
+    modeLogTitle: '行日志视图',
     modeCodeTitle: '代码库分组视图',
     modePlainTitle: '通用原文视图',
     mixedHint: (summary: string) => `当前结果含多种数据形态：${summary}`,
-    colTime: '时间',
-    colLevel: '级别',
-    colCategory: '分类',
-    colMessage: '消息',
-    levelFilterTitle: (badge: string, count: number) =>
-      `点击仅看 ${badge}（${count.toLocaleString()} 条）· Alt+点击排除`,
-    categoryFilterTitle: (cat: string, count: number) =>
-      `点击筛选 ${cat}（${count.toLocaleString()} 条）· Alt+点击排除`,
-    rowCategoryTitle: (cat: string) =>
-      `点击在当前结果中筛选 ${cat}（Alt+点击排除）`,
-    traceFollowBtn: '追踪链路',
-    traceFollowTitle: (id: string) => `搜索该 Trace 全链路 (${id})`,
-    traceAppendTitle: (id: string) => `在当前结果中追加筛选 Trace (${id})`,
-    truncatedBadge: '截断',
-    truncatedNotice: '上游日志行在固定长度处被截断，已自动恢复头部结构化字段',
-    truncatedTailLabel: '截断尾部原文',
-    fieldsSection: '事件字段',
-    payloadSection: '详细载荷',
-    httpSection: '请求摘要',
-    copyTimestampTitle: '复制完整时间戳',
-    traceFromMenuTitle: (id: string) => `追踪链路 ${id}`,
   },
   codeView: {
     modeTitle: '代码库分组视图',

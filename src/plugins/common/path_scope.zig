@@ -1,5 +1,5 @@
 const std = @import("std");
-const prefilter = @import("../prefilter.zig");
+const prefilter = @import("../../prefilter.zig");
 
 pub const Verdict = prefilter.Verdict;
 pub const FileMeta = prefilter.FileMeta;

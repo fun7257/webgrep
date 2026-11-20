@@ -22,7 +22,6 @@ import {
   analyzeStructuredLine,
   decodeHumanEscapes,
   formatContextRecordPretty,
-  universalPrettyStructure,
   type StructuredAnalysis,
 } from './structured/analyzer.ts';
 import {
@@ -181,7 +180,6 @@ function runFacadeCompatibilityTests(): void {
 
   // structured/analyzer.ts
   assertEqual(utilsFacade.decodeHumanEscapes, decodeHumanEscapes);
-  assertEqual(utilsFacade.universalPrettyStructure, universalPrettyStructure);
   assertEqual(utilsFacade.analyzeStructuredLine, analyzeStructuredLine);
   assertEqual(utilsFacade.formatContextRecordPretty, formatContextRecordPretty);
 
@@ -352,12 +350,9 @@ function runStructuredAnalyzerTests(): void {
   assertEqual(decodeHumanEscapes('a\\u4e2d%20b\\n\\t\x1b[32mok\x1b[0m'), 'a中 b\n  ok');
   assertEqual(decodeHumanEscapes('bad=%ZZ'), 'bad=%ZZ');
 
-  const html = universalPrettyStructure(
-    '<section><header><h1>Title</h1></header><div><span>Body</span></div></section>'
-  );
-  assertEqual(html.badge, 'HTML');
-  assertOk(html.formatted.includes('\n  <header>'), 'expected indented HTML');
-
+  const htmlRaw =
+    '<section><header><h1>Title</h1></header><div><span>Body</span></div></section>';
+  assertEqual(formatContextRecordPretty(htmlRaw), htmlRaw);
   assertEqual(formatContextRecordPretty('plain log line'), 'plain log line');
   assertOk(formatContextRecordPretty('{"k":1}').includes('\n'), 'expected formatted JSON');
 

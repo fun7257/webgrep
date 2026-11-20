@@ -8,14 +8,6 @@ export type {
   CodeVirtualLayout,
   FastLogProbe,
   HeadlessAdapter,
-  LogCategoryStat,
-  LogFormat,
-  LogHttpMeta,
-  LogKeyField,
-  LogLevel,
-  LogLevelStat,
-  LogStreamStats,
-  LogVirtualItem,
   LogVirtualLayout,
   ParsedLogRecord,
   ParsedPlainRecord,
@@ -31,20 +23,17 @@ export type {
 } from './types.ts';
 
 export {
+  extractLineTime,
   formatLogTimestamp,
-  normalizeLogLevel,
-  parseLogLine,
-  parseTruncatedJsonEnvelope,
   preserveLargeJsonIntegers,
   probeLogLineFast,
   type FormattedLogTimestamp,
 } from './log-parser.ts';
 
 export {
-  LOG_DATE_DIVIDER_HEIGHT,
-  buildFallbackParsedLog,
   buildLogVirtualLayout,
   logAdapter,
+  parseLineLogMeta,
   scoreLogConfidenceWithProbe,
 } from './log-adapter.ts';
 
@@ -75,10 +64,8 @@ export { indexAtY } from './virtual-math.ts';
 
 export {
   HEADLESS_ADAPTERS,
-  LogStreamStatsTracker,
   VIEW_MODE_CYCLE_ORDER,
   classifyHitBestAdapter,
-  doesTextContainActiveQuery,
   getCachedLogProbe,
   getCachedParsedLog,
   getCachedPlainMeta,

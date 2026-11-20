@@ -1,5 +1,5 @@
 const std = @import("std");
-const prefilter = @import("../prefilter.zig");
+const prefilter = @import("../../prefilter.zig");
 const line_time = @import("line_time.zig");
 
 pub const FileMeta = prefilter.FileMeta;

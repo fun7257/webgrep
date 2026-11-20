@@ -369,6 +369,11 @@ export const en: typeof zh = {
       },
     } as Record<string, { label: string; hint: string }>,
     sourcePrefilterCustomize: 'Plugins',
+    sourcePrefilterDomains: {
+      common: 'General',
+      log: 'Logs',
+      code: 'Code',
+    } as Record<'common' | 'log' | 'code', string>,
     sourcePrefilterReset: 'Reset',
     sourcePrefilterCustomBadge: (enableCount: number, disableCount: number) => {
       const parts: string[] = [];
@@ -432,31 +437,10 @@ export const en: typeof zh = {
   },
   logView: {
     modeAutoTitle: (detected: string) => `Auto-adapt view (active: ${detected})`,
-    modeLogTitle: 'Structured Log View',
+    modeLogTitle: 'Line Log View',
     modeCodeTitle: 'Codebase File-Grouped View',
     modePlainTitle: 'Plain Text View',
     mixedHint: (summary: string) => `Mixed result shapes detected: ${summary}`,
-    colTime: 'TIME',
-    colLevel: 'LVL',
-    colCategory: 'CATEGORY',
-    colMessage: 'MESSAGE',
-    levelFilterTitle: (badge: string, count: number) =>
-      `Click to filter ${badge} (${count.toLocaleString()}) · Alt+click to exclude`,
-    categoryFilterTitle: (cat: string, count: number) =>
-      `Click to filter ${cat} (${count.toLocaleString()}) · Alt+click to exclude`,
-    rowCategoryTitle: (cat: string) =>
-      `Click to filter by ${cat} (Alt+click to exclude)`,
-    traceFollowBtn: 'Trace',
-    traceFollowTitle: (id: string) => `Pivot search to full trace (${id})`,
-    traceAppendTitle: (id: string) => `Append trace filter to current results (${id})`,
-    truncatedBadge: 'TRUNC',
-    truncatedNotice: 'Log line was truncated mid-JSON upstream; recovered intact envelope fields',
-    truncatedTailLabel: 'Truncated Raw Tail',
-    fieldsSection: 'Fields',
-    payloadSection: 'Payload',
-    httpSection: 'HTTP',
-    copyTimestampTitle: 'Copy full timestamp',
-    traceFromMenuTitle: (id: string) => `Follow trace ${id}`,
   },
   codeView: {
     modeTitle: 'Codebase File-Grouped View',

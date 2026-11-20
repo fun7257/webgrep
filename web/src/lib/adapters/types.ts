@@ -2,74 +2,29 @@ import type { DataSourceItem, HitItem, ViewAdapterId, ViewModePreference } from 
 
 export type { ViewAdapterId, ViewModePreference };
 
-export type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'unknown';
-
-export type LogFormat = 'ndjson' | 'truncated-json' | 'docker-json' | 'kv' | 'text-log';
-
-export interface LogKeyField {
-  key: string;
-  label: string;
-  value: string;
-  role: 'trace' | 'identity' | 'http' | 'metric' | 'error' | 'extra';
-  filterToken: string;
-}
-
-export interface LogHttpMeta {
-  method?: string;
-  route?: string;
-  uri?: string;
-  status?: number;
-  latencyText?: string;
-  sizeText?: string;
-  ip?: string;
-  host?: string;
-}
-
 export interface FastLogProbe {
   isLog: boolean;
+  hasTime: boolean;
+  isJson: boolean;
+  isKv: boolean;
   dateKey: string;
-  level: LogLevel;
-  levelFilterToken: string;
-  category: string;
-  categoryFilterToken: string;
-  estimatedSummaryCols: number;
-  hasLongPayload: boolean;
+  timeShort: string;
+  timeLabel: string;
+  timeFull: string;
+  timeRaw: string;
+  bodyStart: number;
 }
 
 export interface ParsedLogRecord {
   kind: 'log';
-  format: LogFormat;
-  /** Fixed-width HH:MM:SS.mmm (padded to 3 fractional digits for tabular-nums alignment). */
-  timeShort: string;
-  /** YYYY-MM-DD (or MM-DD) for date-change display & tooltips. */
-  timeDate: string;
-  /** Full human timestamp e.g. "2026-09-11 08:00:00.010 +08:00". */
+  srcName: string;
+  dirLabel: string;
+  fileName: string;
+  timeLabel: string;
   timeFull: string;
   timeRaw: string;
-  level: LogLevel;
-  /** FTL | ERR | WRN | INF | DBG | TRC | '' */
-  levelBadge: string;
-  /** Exact literal token for backend libwebgrep filtering e.g. `"l":"error"` or `level=error`. */
-  levelFilterToken: string;
-  category: string;
-  categoryFilterToken: string;
-  /** Primary readable headline (message / error / HTTP method+route / clean KV summary). */
-  summary: string;
-  /** Distinct error text if present alongside message or standalone error detail. */
-  errorText: string;
-  http?: LogHttpMeta;
-  traceId: string;
-  traceKey: string;
-  traceFilterToken: string;
-  /** High-signal non-empty compact fields (excluding empty strings). */
-  keyFields: LogKeyField[];
-  /** True for hard-truncated JSON lines (e.g. 4984B lines in test.log). */
-  truncated: boolean;
-  truncatedTail?: string;
-  structuredData?: Record<string, unknown>;
-  remainingFields?: Record<string, unknown>;
-  /** Underlying text used for fallback match-centered excerpt if match lives outside summary. */
-  rawRestText: string;
+  dateKey: string;
+  bodyText: string;
 }
 
 export interface PlainRowProbe {
@@ -135,49 +90,10 @@ export interface AdapterBatchSummary {
   sampleCounts: Record<ViewAdapterId, number>;
 }
 
-export interface LogLevelStat {
-  level: LogLevel;
-  badge: string;
-  count: number;
-  filterToken: string;
-}
-
-export interface LogCategoryStat {
-  category: string;
-  count: number;
-  filterToken: string;
-}
-
-export interface LogStreamStats {
-  totalScanned: number;
-  logCount: number;
-  levels: LogLevelStat[];
-  topCategories: LogCategoryStat[];
-}
-
-export type LogVirtualItem =
-  | {
-      kind: 'date';
-      key: string;
-      dateKey: string;
-      height: number;
-    }
-  | {
-      kind: 'hit';
-      key: string;
-      hitIdx: number;
-      item: HitItem;
-      isNativeLog: boolean;
-      lines: number;
-      height: number;
-    };
-
 export interface LogVirtualLayout {
-  items: LogVirtualItem[];
   offsets: Float64Array;
-  hitIdxToVirtualIdx: Int32Array;
+  lines: Uint8Array;
   totalHeight: number;
-  denseLogMode: boolean;
 }
 
 export interface CodeLanguageInfo {

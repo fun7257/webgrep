@@ -1,13 +1,48 @@
 const std = @import("std");
 
-pub const path_scope = @import("plugins/path_scope.zig");
-pub const mtime_guard = @import("plugins/mtime_guard.zig");
-pub const filename_date = @import("plugins/filename_date.zig");
-pub const sidecar_sketch = @import("plugins/sidecar_sketch.zig");
-pub const time_bisect = @import("plugins/time_bisect.zig");
-pub const line_time = @import("plugins/line_time.zig");
+pub const path_scope = @import("plugins/common/path_scope.zig");
+pub const mtime_guard = @import("plugins/common/mtime_guard.zig");
+pub const sidecar_sketch = @import("plugins/common/sidecar_sketch.zig");
+pub const mtime_window = @import("plugins/code/mtime_window.zig");
+pub const filename_date = @import("plugins/log/filename_date.zig");
+pub const time_bisect = @import("plugins/log/time_bisect.zig");
+pub const line_time = @import("plugins/log/line_time.zig");
 
 pub const MAX_PLUGINS: usize = 16;
+
+pub const Domain = enum {
+    common,
+    log,
+    code,
+
+    pub fn asStr(self: Domain) []const u8 {
+        return switch (self) {
+            .common => "common",
+            .log => "log",
+            .code => "code",
+        };
+    }
+
+    pub fn parse(raw: []const u8) ?Domain {
+        const s = std.mem.trim(u8, raw, " \t\r\n");
+        if (std.ascii.eqlIgnoreCase(s, "common")) return .common;
+        if (std.ascii.eqlIgnoreCase(s, "log")) return .log;
+        if (std.ascii.eqlIgnoreCase(s, "code")) return .code;
+        return null;
+    }
+
+    /// Returns whether a plugin in this domain is eligible for `preset`:
+    /// - `code` sources allow only `common` + `code` plugins (no log timestamp plugins)
+    /// - `timeseries` sources allow only `common` + `log` plugins (no code mtime-window plugin)
+    /// - `auto` / `raw` allow all domains (mixed folders or explicit overrides)
+    pub fn allowsInPreset(self: Domain, preset: Preset) bool {
+        return switch (preset) {
+            .code => self == .common or self == .code,
+            .timeseries => self == .common or self == .log,
+            .auto, .raw => true,
+        };
+    }
+};
 
 pub const PluginId = enum(u4) {
     path_scope = 0,
@@ -27,6 +62,14 @@ pub const PluginId = enum(u4) {
             .sidecar_sketch => "sidecar_sketch",
             .time_bisect => "time_bisect",
             .line_time => "line_time",
+        };
+    }
+
+    pub fn domain(self: PluginId) Domain {
+        return switch (self) {
+            .path_scope, .mtime_guard, .sidecar_sketch => .common,
+            .mtime_window => .code,
+            .filename_date, .time_bisect, .line_time => .log,
         };
     }
 
@@ -374,6 +417,7 @@ pub const TimeHooks = struct {
 pub const PluginMetadata = struct {
     id: PluginId,
     id_str: []const u8,
+    domain: Domain,
     name_key: []const u8,
     description: []const u8,
     stages: []const Stage,
@@ -394,6 +438,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .path_scope,
         .id_str = "path_scope",
+        .domain = .common,
         .name_key = "plugins.path_scope",
         .description = "Zero-alloc path, extension, and glob pruning before scanning",
         .stages = &.{ .source_plan, .file_prune },
@@ -404,6 +449,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .mtime_guard,
         .id_str = "mtime_guard",
+        .domain = .common,
         .name_key = "plugins.mtime_guard",
         .description = "Lower-bound mtime guard (mtime < timeStart)",
         .stages = &.{.file_prune},
@@ -414,6 +460,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .mtime_window,
         .id_str = "mtime_window",
+        .domain = .code,
         .name_key = "plugins.mtime_window",
         .description = "Upper-bound mtime window (active in code; fallback for timestamp-less files in auto)",
         .stages = &.{.file_prune},
@@ -424,6 +471,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .filename_date,
         .id_str = "filename_date",
+        .domain = .log,
         .name_key = "plugins.filename_date",
         .description = "Extract rotated filename dates/hours before decompression",
         .stages = &.{.file_prune},
@@ -434,6 +482,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .sidecar_sketch,
         .id_str = "sidecar_sketch",
+        .domain = .common,
         .name_key = "plugins.sidecar_sketch",
         .description = "Observed timestamp bounds & ASCII trigram Bloom sketch in data_dir",
         .stages = &.{.file_prune},
@@ -444,6 +493,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .time_bisect,
         .id_str = "time_bisect",
+        .domain = .log,
         .name_key = "plugins.time_bisect",
         .description = "Binary-search byte windows by parsed line timestamps",
         .stages = &.{.window_narrow},
@@ -454,6 +504,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
     .{
         .id = .line_time,
         .id_str = "line_time",
+        .domain = .log,
         .name_key = "plugins.line_time",
         .description = "Line timestamp filter, stack-trace continuation binding, and KV pushdown",
         .stages = &.{ .source_plan, .line_filter },
@@ -554,6 +605,7 @@ pub fn resolvePluginChain(
 
     if (enabled_overrides_opt) |en| {
         for (en) |pid| {
+            if (!pid.domain().allowsInPreset(preset)) continue;
             mask |= pid.bit();
             if (pid == .mtime_window and preset == .auto) {
                 allow_fallback = true;
@@ -577,6 +629,7 @@ pub fn resolvePluginChain(
     };
 
     for (PLUGIN_CATALOG) |entry| {
+        if (!entry.domain.allowsInPreset(preset)) continue;
         if ((mask & entry.id.bit()) != 0 and chain.len < MAX_PLUGINS) {
             chain.plugins[chain.len] = entry.id;
             chain.len += 1;
@@ -712,7 +765,7 @@ pub fn pruneFile(
                 }
             },
             .mtime_window => {
-                if (mtime_guard.evalWindow(meta, preds) == .skip) {
+                if (mtime_window.evalWindow(meta, preds) == .skip) {
                     return .{ .verdict = .skip, .pruned_by = .mtime_window };
                 }
             },
@@ -754,7 +807,7 @@ pub fn narrowSliceWindow(
         preds.allow_mtime_fallback_on_no_ts and
         preds.hasTimeRange())
     {
-        if (mtime_guard.evalWindow(meta, preds) == .skip or
+        if (mtime_window.evalWindow(meta, preds) == .skip or
             mtime_guard.evalGuard(meta, preds) == .skip)
         {
             win.start_byte = 0;
@@ -785,7 +838,7 @@ pub fn narrowReaderWindow(
         preds.allow_mtime_fallback_on_no_ts and
         preds.hasTimeRange())
     {
-        if (mtime_guard.evalWindow(meta, preds) == .skip or
+        if (mtime_window.evalWindow(meta, preds) == .skip or
             mtime_guard.evalGuard(meta, preds) == .skip)
         {
             win.start_byte = 0;
@@ -825,6 +878,7 @@ pub fn filterLine(
 test {
     _ = path_scope;
     _ = mtime_guard;
+    _ = mtime_window;
     _ = filename_date;
     _ = sidecar_sketch;
     _ = time_bisect;
@@ -835,10 +889,22 @@ test "prefilter: catalog, presets, deterministic ordering, and cache signature i
     const catalog = getCatalog();
     try std.testing.expectEqual(@as(usize, 7), catalog.len);
     for (catalog, 1..) |entry, idx| {
+        try std.testing.expectEqual(entry.id.domain(), entry.domain);
         if (idx < catalog.len) {
             try std.testing.expect(entry.priority < catalog[idx].priority);
         }
     }
+
+    // Domain isolation guard: code preset ignores log-domain enable overrides; timeseries ignores code-domain enable overrides
+    const c_code_isolated = resolvePluginChain(.code, &.{ .filename_date, .time_bisect, .line_time }, null);
+    try std.testing.expect(!c_code_isolated.has(.filename_date));
+    try std.testing.expect(!c_code_isolated.has(.time_bisect));
+    try std.testing.expect(!c_code_isolated.has(.line_time));
+    try std.testing.expect(c_code_isolated.has(.mtime_window));
+
+    const c_ts_isolated = resolvePluginChain(.timeseries, &.{.mtime_window}, null);
+    try std.testing.expect(!c_ts_isolated.has(.mtime_window));
+    try std.testing.expect(c_ts_isolated.has(.time_bisect));
 
     const c_auto = resolvePluginChain(.auto, null, null);
     const c_ts = resolvePluginChain(.timeseries, null, null);

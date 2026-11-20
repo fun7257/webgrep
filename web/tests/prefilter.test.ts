@@ -4,17 +4,22 @@ import {
   DEFAULT_PLUGIN_CATALOG,
   DEFAULT_PLUGIN_PRESET,
   DEFAULT_PRESET_CATALOG,
+  PLUGIN_DOMAINS,
   PLUGIN_PRESETS,
   computeEnabledSourcesSyncSig,
   computeSourcePluginsSig,
   formatPrunedTelemetry,
+  groupPluginsForPreset,
   hasPluginOverrides,
+  isPluginApplicableToPreset,
   isPluginEffectiveEnabled,
   normalizeMetaPrefilterCatalog,
+  normalizePluginDomain,
   normalizePluginOverrides,
   normalizePluginPreset,
   resolveSourcePluginOverrides,
   resolveSourcePluginPreset,
+  sanitizePluginOverridesForPreset,
   togglePluginOverride,
 } from '../src/lib/prefilter.ts';
 import { L0StepCache } from '../src/lib/l0-cache.ts';
@@ -81,6 +86,7 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
       plugins: [
         {
           id: 'filename_date',
+          domain: 'log',
           name_key: 'plugin.filename_date',
           stages: ['file_prune'],
           default_presets: ['auto', 'timeseries'],
@@ -88,6 +94,7 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
         },
         {
           id: 'custom_bloom',
+          domain: 'common',
           description: 'Custom server-supplied prefilter',
           stages: ['file_prune', 'window_narrow'],
           defaultPresets: ['timeseries'],
@@ -102,10 +109,66 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     assert.equal(serverMeta.presets[1].nameKey, 'preset.ts');
     assert.equal(serverMeta.presets[1].description, 'Time-series preset');
     assert.equal(serverMeta.plugins.length, 2);
+    assert.equal(serverMeta.plugins[0].domain, 'log');
     assert.deepEqual(serverMeta.plugins[0].defaultPresets, ['auto', 'timeseries']);
     assert.equal(serverMeta.plugins[1].id, 'custom_bloom');
+    assert.equal(serverMeta.plugins[1].domain, 'common');
     assert.deepEqual(serverMeta.plugins[1].stages, ['file_prune', 'window_narrow']);
     assert.deepEqual(serverMeta.plugins[1].defaultPresets, ['timeseries']);
+  });
+
+  it('partitions plugins strictly by domain across log (timeseries) vs code vs auto presets', () => {
+    assert.deepEqual([...PLUGIN_DOMAINS], ['common', 'log', 'code']);
+    assert.equal(normalizePluginDomain('LOG'), 'log');
+    assert.equal(normalizePluginDomain('code'), 'code');
+    assert.equal(normalizePluginDomain('unknown', 'common'), 'common');
+
+    // Code preset: strictly code + common plugins (no log timestamp plugins)
+    const codeGroups = groupPluginsForPreset(DEFAULT_PLUGIN_CATALOG, 'code');
+    assert.deepEqual(
+      codeGroups.map((g) => g.domain),
+      ['code', 'common']
+    );
+    assert.deepEqual(
+      codeGroups[0].plugins.map((p) => p.id),
+      ['mtime_window']
+    );
+    assert.deepEqual(
+      codeGroups[1].plugins.map((p) => p.id),
+      ['path_scope', 'mtime_guard', 'sidecar_sketch']
+    );
+
+    // Timeseries (log) preset: strictly log + common plugins (no code mtime_window)
+    const logGroups = groupPluginsForPreset(DEFAULT_PLUGIN_CATALOG, 'timeseries');
+    assert.deepEqual(
+      logGroups.map((g) => g.domain),
+      ['log', 'common']
+    );
+    assert.deepEqual(
+      logGroups[0].plugins.map((p) => p.id),
+      ['filename_date', 'time_bisect', 'line_time']
+    );
+
+    // Auto preset: exposes all three domains separately
+    const autoGroups = groupPluginsForPreset(DEFAULT_PLUGIN_CATALOG, 'auto');
+    assert.deepEqual(
+      autoGroups.map((g) => g.domain),
+      ['log', 'code', 'common']
+    );
+
+    // Applicability checks & override sanitization prevent stale cross-domain overrides
+    const timeBisect = DEFAULT_PLUGIN_CATALOG.find((p) => p.id === 'time_bisect')!;
+    const mtimeWindow = DEFAULT_PLUGIN_CATALOG.find((p) => p.id === 'mtime_window')!;
+    assert.equal(isPluginApplicableToPreset(timeBisect, 'code'), false);
+    assert.equal(isPluginApplicableToPreset(mtimeWindow, 'timeseries'), false);
+
+    assert.deepEqual(
+      sanitizePluginOverridesForPreset(DEFAULT_PLUGIN_CATALOG, 'code', {
+        enable: ['time_bisect', 'path_scope'],
+        disable: ['filename_date', 'mtime_window'],
+      }),
+      { enable: ['path_scope'], disable: ['mtime_window'] }
+    );
   });
 
   it('normalizes plugin overrides conservatively and toggles cleanly around preset defaults', () => {

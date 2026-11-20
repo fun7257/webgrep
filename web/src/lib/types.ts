@@ -54,6 +54,7 @@ export interface ScopeFilter {
 }
 
 export type PluginPreset = 'auto' | 'timeseries' | 'code' | 'raw';
+export type PluginDomain = 'common' | 'log' | 'code';
 export type PrefilterStage = 'source_plan' | 'file_prune' | 'window_narrow' | 'line_filter';
 
 export interface PluginOverrides {
@@ -64,6 +65,7 @@ export interface PluginOverrides {
 export interface PluginMetadata {
   id?: string;
   id_str?: string;
+  domain?: PluginDomain | string;
   nameKey?: string;
   name_key?: string;
   description?: string;

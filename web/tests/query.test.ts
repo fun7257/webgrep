@@ -41,7 +41,6 @@ import {
   highlightCodeWithMatches,
   skipLeadingNanoTimestampOffset,
   syntaxKindToClass,
-  universalPrettyStructure,
 } from '../src/lib/utils.ts';
 import {
   buildFrameProfileForHz,
@@ -635,17 +634,26 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     assert.equal(kvInfo.kvPairs?.length, 3);
   });
 
-  it('indents compressed single-line HTML and arbitrary brace/bracket structures', () => {
+  it('renders plain/HTML/struct text directly without special HTML/STRUCT adaptation', () => {
     const htmlLine = '<div class="card"><span class="title">Payment Failed</span><p>Retry in 5s</p></div>';
     const htmlInfo = analyzeStructuredLine(htmlLine);
-    assert.equal(htmlInfo.formatBadge, 'HTML');
-    assert.ok(htmlInfo.bodyFormattedText?.includes('\n  <span class="title">'));
+    assert.equal(htmlInfo.kind, 'long-line');
+    assert.equal(htmlInfo.formatBadge, undefined);
+    assert.equal(htmlInfo.bodyFormattedText, htmlLine);
+    assert.equal(formatContextRecordPretty(htmlLine), htmlLine);
 
     const structLine =
       'OrderEvent{id: 9012, customer: "alice", items: [sku_1001, sku_1002], meta: {region: ap-east, retry: 3, gateway: edge-01}}';
-    const pretty = universalPrettyStructure(structLine);
-    assert.equal(pretty.badge, 'STRUCT');
-    assert.ok(pretty.formatted.includes('\n  id: 9012,'));
+    const structInfo = analyzeStructuredLine(structLine);
+    assert.equal(structInfo.kind, 'long-line');
+    assert.equal(structInfo.formatBadge, undefined);
+    assert.equal(structInfo.bodyFormattedText, structLine);
+
+    const plainTsLine = '2026-09-11 08:00:00.123 upstream ready';
+    const tsInfo = analyzeStructuredLine(plainTsLine);
+    assert.equal(tsInfo.kind, 'long-line');
+    assert.equal(tsInfo.bodyFormattedText, plainTsLine);
+    assert.equal(tsInfo.timeHint, '2026-09-11 08:00:00.123');
   });
 
   it('tokenizes code syntax (keywords, builtins, types, strings, comments) while preserving search match highlights', () => {

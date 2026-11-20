@@ -26,7 +26,6 @@ export {
   analyzeStructuredLine,
   decodeHumanEscapes,
   formatContextRecordPretty,
-  universalPrettyStructure,
   type StructuredAnalysis,
 } from './structured/analyzer.ts';
 

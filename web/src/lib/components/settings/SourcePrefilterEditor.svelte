@@ -1,11 +1,14 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
   import {
+    groupPluginsForPreset,
     hasPluginOverrides,
+    isPluginApplicableToPreset,
     isPluginDefaultEnabledForPreset,
     isPluginEffectiveEnabled,
     normalizePluginOverrides,
     normalizePluginPreset,
+    sanitizePluginOverridesForPreset,
     togglePluginOverride,
     type NormalizedPluginMetadata,
     type NormalizedPluginOverrides,
@@ -45,8 +48,17 @@
   let formatExpanded = $state(false);
 
   const normalizedPreset = $derived(normalizePluginPreset(preset));
-  const normOverrides = $derived(normalizePluginOverrides(overrides));
+  const normOverrides = $derived(
+    sanitizePluginOverridesForPreset(catalog.plugins, normalizedPreset, overrides)
+  );
   const customized = $derived(hasPluginOverrides(normOverrides));
+
+  const pluginGroups = $derived(
+    groupPluginsForPreset(catalog.plugins, normalizedPreset)
+  );
+  const applicablePlugins = $derived(
+    catalog.plugins.filter((p) => isPluginApplicableToPreset(p, normalizedPreset))
+  );
 
   const trimmedFormat = $derived(timeFormat.trim());
   const hasCustomFormat = $derived(
@@ -80,7 +92,7 @@
   );
 
   const activePluginCount = $derived(
-    catalog.plugins.reduce(
+    applicablePlugins.reduce(
       (acc, plugin) =>
         acc + (isPluginEffectiveEnabled(plugin, normalizedPreset, normOverrides) ? 1 : 0),
       0
@@ -212,41 +224,51 @@
           {/if}
         {:else}
           <span class="font-mono text-[10.5px] tabular-nums text-muted-foreground/75">
-            {activePluginCount}/{catalog.plugins.length}
+            {activePluginCount}/{applicablePlugins.length}
           </span>
         {/if}
       </div>
     </div>
 
     {#if expanded}
-      <div class="mt-1.5 divide-y divide-border/35 rounded-md border border-border/50 bg-background/75 px-2.5">
-        {#each catalog.plugins as plugin (plugin.id)}
-          {@const checked = isPluginEffectiveEnabled(plugin, normalizedPreset, normOverrides)}
-          {@const defaultOn = isPluginDefaultEnabledForPreset(plugin, normalizedPreset)}
-          {@const overridden = checked !== defaultOn}
-          {@const text = t.sourcePrefilterPlugins[plugin.id]}
-          {@const label = text?.label ?? plugin.id}
-          {@const desc = [text?.desc || plugin.description || plugin.id, plugin.stages.join(' · '), plugin.costHint]
-            .filter(Boolean)
-            .join(' · ')}
-          <div class="flex min-h-9 items-center justify-between gap-2 py-1" title={desc}>
-            <div class="flex min-w-0 items-center gap-1.5">
-              {#if overridden}
-                <span
-                  class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
-                  title={t.sourcePrefilterOverriddenTitle}
-                ></span>
-              {/if}
-              <span class="truncate text-[11.5px] text-foreground/90">{label}</span>
-              <code class="hidden sm:inline shrink-0 font-mono text-[10px] text-muted-foreground/70">
-                {plugin.id}
-              </code>
+      <div class="mt-1.5 space-y-1.5">
+        {#each pluginGroups as group (group.domain)}
+          <div class="rounded-md border border-border/50 bg-background/75 px-2.5">
+            <div class="flex items-center justify-between border-b border-border/35 py-1 text-[10px] font-medium text-muted-foreground/75 select-none">
+              <span>{t.sourcePrefilterDomains[group.domain]}</span>
+              <span class="font-mono tabular-nums">{group.plugins.length}</span>
             </div>
-            <Switch
-              {checked}
-              title={desc}
-              onchange={(next) => handleTogglePlugin(plugin, next)}
-            />
+            <div class="divide-y divide-border/35">
+              {#each group.plugins as plugin (plugin.id)}
+                {@const checked = isPluginEffectiveEnabled(plugin, normalizedPreset, normOverrides)}
+                {@const defaultOn = isPluginDefaultEnabledForPreset(plugin, normalizedPreset)}
+                {@const overridden = checked !== defaultOn}
+                {@const text = t.sourcePrefilterPlugins[plugin.id]}
+                {@const label = text?.label ?? plugin.id}
+                {@const desc = [text?.desc || plugin.description || plugin.id, plugin.stages.join(' · '), plugin.costHint]
+                  .filter(Boolean)
+                  .join(' · ')}
+                <div class="flex min-h-9 items-center justify-between gap-2 py-1" title={desc}>
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    {#if overridden}
+                      <span
+                        class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+                        title={t.sourcePrefilterOverriddenTitle}
+                      ></span>
+                    {/if}
+                    <span class="truncate text-[11.5px] text-foreground/90">{label}</span>
+                    <code class="hidden sm:inline shrink-0 font-mono text-[10px] text-muted-foreground/70">
+                      {plugin.id}
+                    </code>
+                  </div>
+                  <Switch
+                    {checked}
+                    title={desc}
+                    onchange={(next) => handleTogglePlugin(plugin, next)}
+                  />
+                </div>
+              {/each}
+            </div>
           </div>
         {/each}
       </div>

@@ -248,6 +248,7 @@ pub fn sanitizeUtf8Truncated(arena: std.mem.Allocator, input: []const u8, max_by
 
 pub const PluginMetaDto = struct {
     id: []const u8,
+    domain: []const u8,
     nameKey: []const u8,
     description: []const u8,
     stages: []const []const u8,
@@ -294,6 +295,7 @@ pub const builtin_plugins: [prefilter.PLUGIN_CATALOG.len]PluginMetaDto = blk: {
     for (prefilter.PLUGIN_CATALOG, 0..) |entry, i| {
         out[i] = .{
             .id = entry.id_str,
+            .domain = entry.domain.asStr(),
             .nameKey = entry.name_key,
             .description = entry.description,
             .stages = comptimeStageStrs(entry.stages),
@@ -1540,6 +1542,9 @@ test "file_api: buildMetaJson exposes prefilter plugins and presets catalogs" {
     try std.testing.expectEqual(@as(usize, prefilter.PLUGIN_CATALOG.len), parsed.value.plugins.len);
     try std.testing.expectEqual(@as(usize, prefilter.PRESET_CATALOG.len), parsed.value.presets.len);
     try std.testing.expectEqualStrings("path_scope", parsed.value.plugins[0].id);
+    try std.testing.expectEqualStrings("common", parsed.value.plugins[0].domain);
+    try std.testing.expectEqualStrings("code", parsed.value.plugins[2].domain);
+    try std.testing.expectEqualStrings("log", parsed.value.plugins[3].domain);
     try std.testing.expectEqualStrings("auto", parsed.value.presets[0].id);
     try std.testing.expect(parsed.value.presets[0].defaultPlugins.len > 0);
 }
