@@ -325,7 +325,8 @@ class WorkbenchState {
   // UI Layout, Theme & Client Preferences
   locale = $state<Locale>('zh');
   darkMode = $state<boolean>(true);
-  leftSidebarOpen = $state<boolean>(true);
+  leftSidebarOpen = $state<boolean>(false);
+  railFlyout = $state<'time' | 'sources' | null>(null);
   rightInspectorOpen = $state<boolean>(true);
   leftSidebarWidth = $state<number>(260);
   rightInspectorWidth = $state<number>(520);
@@ -486,6 +487,7 @@ class WorkbenchState {
     this.abortContextFetch();
     this.paletteOpen = false;
     this.mobileScopeOpen = false;
+    this.railFlyout = null;
     this.sourceAddOpen = expandAdd;
     this.drawerPanel = panel;
   }
@@ -515,8 +517,23 @@ class WorkbenchState {
         this.closeRightDrawer();
       }
     } else {
+      this.railFlyout = null;
       this.leftSidebarOpen = !this.leftSidebarOpen;
     }
+  }
+
+  toggleRailFlyout(panel: 'time' | 'sources') {
+    if (this.railFlyout === panel) {
+      this.railFlyout = null;
+      return;
+    }
+    this.paletteOpen = false;
+    this.closeRightDrawer();
+    this.railFlyout = panel;
+  }
+
+  closeRailFlyout() {
+    this.railFlyout = null;
   }
 
   closeMobileScope() {
@@ -528,13 +545,14 @@ class WorkbenchState {
     this.closeRightDrawer();
     if (this.isCompact) {
       this.mobileScopeOpen = true;
-    } else {
-      this.leftSidebarOpen = true;
+    } else if (!this.leftSidebarOpen) {
+      this.railFlyout = 'time';
     }
   }
 
   closeTimePicker() {
     this.mobileScopeOpen = false;
+    this.railFlyout = null;
   }
 
   closeSettings() {
@@ -602,6 +620,7 @@ class WorkbenchState {
     this.closeRightDrawer();
     this.paletteOpen = false;
     this.mobileScopeOpen = false;
+    this.railFlyout = null;
     this.clearSearch();
     this.wsTransport.closeForLock();
     this.invalidateCaches();
@@ -1123,6 +1142,7 @@ class WorkbenchState {
   }
 
   submitSearch() {
+    this.railFlyout = null;
     const plan = this.buildPlan(Date.now());
     if (!plan) return;
     const isRepeat =
@@ -1831,6 +1851,7 @@ class WorkbenchState {
 
     this.paletteOpen = false;
     this.mobileScopeOpen = false;
+    this.railFlyout = null;
     this.sourceAddOpen = false;
     this.drawerPanel = 'context';
 

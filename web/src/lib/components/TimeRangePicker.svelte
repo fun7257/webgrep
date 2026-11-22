@@ -12,17 +12,27 @@
     type DateTimeParts,
   } from '$lib/time-range';
   import DateTimeRangeSlots from './pickers/DateTimeRangeSlots.svelte';
-  import { Clock, Infinity as InfinityIcon, RotateCcw, X } from 'lucide-svelte';
+  import { Clock, Infinity as InfinityIcon, Pin, PinOff, RotateCcw, X } from 'lucide-svelte';
 
   interface Props {
     value: TimePreset;
     showClose?: boolean;
+    pinned?: boolean;
+    onPin?: () => void;
     onClose?: () => void;
     onApply: (spec: TimePreset) => void;
     onFocusMainInput?: () => void;
   }
 
-  let { value, showClose = false, onClose, onApply, onFocusMainInput }: Props = $props();
+  let {
+    value,
+    showClose = false,
+    pinned = false,
+    onPin,
+    onClose,
+    onApply,
+    onFocusMainInput,
+  }: Props = $props();
 
   const initialSynced = untrack(() => resolveSyncedDateTimeParts(value));
 
@@ -98,10 +108,11 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && onFocusMainInput) {
+    if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      onFocusMainInput();
+      if (showClose && onClose) onClose();
+      onFocusMainInput?.();
     }
   }
 </script>
@@ -153,6 +164,27 @@
           class="touch-target flex h-5 w-5 items-center justify-center rounded text-muted-foreground/75 hover:bg-secondary hover:text-foreground cursor-pointer"
         >
           <RotateCcw class="h-3 w-3" />
+        </button>
+      {/if}
+      {#if onPin}
+        <button
+          type="button"
+          onmousedown={(e) => e.preventDefault()}
+          onclick={onPin}
+          title={pinned ? s.unpinSidebar : s.pinSidebar}
+          aria-label={pinned ? s.unpinSidebar : s.pinSidebar}
+          aria-pressed={pinned}
+          class={`touch-target flex h-6 w-6 items-center justify-center rounded cursor-pointer ${
+            pinned
+              ? 'text-primary hover:bg-secondary'
+              : 'text-muted-foreground/75 hover:bg-secondary hover:text-foreground'
+          }`}
+        >
+          {#if pinned}
+            <PinOff class="h-3.5 w-3.5" />
+          {:else}
+            <Pin class="h-3.5 w-3.5" />
+          {/if}
         </button>
       {/if}
       {#if showClose && onClose}

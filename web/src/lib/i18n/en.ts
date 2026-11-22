@@ -47,6 +47,10 @@ export const en: typeof zh = {
   },
   scopeBar: {
     sidebarTitle: 'Scope Filters',
+    pinSidebar: 'Pin sidebar',
+    unpinSidebar: 'Collapse to icon rail',
+    clearAllScope: 'Reset time & sources',
+    customTimeShort: 'Range',
     timeSectionTitle: 'Time Range',
     sourcesSectionTitle: 'Data Sources',
     allSources: 'All Sources',

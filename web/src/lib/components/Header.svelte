@@ -17,6 +17,13 @@
       (workbench.sources.length === 0 ||
         workbench.sources.some((s) => s.enabled && !s.exists))
   );
+  const sidebarTitle = $derived(
+    workbench.isCompact
+      ? workbench.t.header.toggleSidebar
+      : workbench.leftSidebarOpen
+        ? workbench.t.scopeBar.unpinSidebar
+        : workbench.t.scopeBar.pinSidebar
+  );
 
   const iconBtn =
     'touch-target relative flex h-8 w-8 items-center justify-center rounded-md active:bg-secondary/80 cursor-pointer';
@@ -61,21 +68,21 @@
 </script>
 
 <header
-  class="pt-safe flex shrink-0 items-center justify-between bg-background px-3 md:px-6 select-none"
+  class="pt-safe flex shrink-0 items-center justify-between bg-background pl-2 pr-3 md:pl-2 md:pr-6 select-none"
 >
   <div class="flex h-11 items-center w-full justify-between">
-    <!-- Left: scope sidebar toggle -->
+    <!-- Left: scope sidebar toggle (aligned over the 48px icon rail on desktop) -->
     <button
       type="button"
-      title={workbench.t.header.toggleSidebar}
-      aria-label={workbench.t.header.toggleSidebar}
+      title={sidebarTitle}
+      aria-label={sidebarTitle}
       aria-expanded={workbench.scopeSidebarOpen}
       onpointerdown={(e) => onBtnPointerDown('sidebar', e)}
       onclick={(e) => onBtnClick('sidebar', e)}
       class={`${iconBtn} ${workbench.scopeSidebarOpen ? activeBtn : idleBtn}`}
     >
       <PanelLeft class="h-3.5 w-3.5" />
-      {#if !workbench.scopeSidebarOpen && workbench.hasActiveScope}
+      {#if workbench.isCompact && !workbench.scopeSidebarOpen && workbench.hasActiveScope}
         <span class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary"></span>
       {/if}
     </button>

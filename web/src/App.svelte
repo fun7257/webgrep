@@ -139,9 +139,14 @@
     }
 
     if (e.key === 'Escape') {
-      // Step back one layer at a time: palette → mobile scope drawer → right drawer → detail → cancel search
+      // Step back one layer at a time: palette → rail flyout → mobile scope drawer → right drawer → detail → cancel search
       if (workbench.paletteOpen) {
         workbench.paletteOpen = false;
+        return;
+      }
+      if (!workbench.isCompact && workbench.railFlyout !== null) {
+        workbench.closeRailFlyout();
+        searchInputEl?.focus();
         return;
       }
       if (workbench.isCompact && workbench.mobileScopeOpen) {
@@ -178,6 +183,7 @@
     if (
       workbench.paletteOpen ||
       workbench.rightDrawerOpen ||
+      (!workbench.isCompact && workbench.railFlyout !== null) ||
       (workbench.isCompact && workbench.mobileScopeOpen)
     ) {
       return;

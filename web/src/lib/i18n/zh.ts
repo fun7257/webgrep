@@ -45,6 +45,10 @@ export const zh = {
   },
   scopeBar: {
     sidebarTitle: '筛选范围',
+    pinSidebar: '固定侧边栏',
+    unpinSidebar: '收起为图标轨',
+    clearAllScope: '重置时间与数据源',
+    customTimeShort: '自定',
     timeSectionTitle: '时间范围',
     sourcesSectionTitle: '数据源',
     allSources: '全部数据源',
