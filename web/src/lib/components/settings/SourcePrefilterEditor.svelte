@@ -1,27 +1,17 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
   import {
-    groupPluginsForPreset,
-    hasPluginOverrides,
-    isPluginApplicableToPreset,
-    isPluginDefaultEnabledForPreset,
-    isPluginEffectiveEnabled,
-    normalizePluginOverrides,
     normalizePluginPreset,
-    sanitizePluginOverridesForPreset,
-    togglePluginOverride,
-    type NormalizedPluginMetadata,
     type NormalizedPluginOverrides,
   } from '$lib/prefilter';
   import type { PluginOverrides, PluginPreset } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
-  import Switch from '../ui/Switch.svelte';
   import SourceTimeFormatEditor from './SourceTimeFormatEditor.svelte';
-  import { ChevronDown, ChevronRight, Clock, Code2, Filter, RotateCcw, ScrollText } from 'lucide-svelte';
+  import { ChevronDown, ChevronRight, Clock, Code2, Layers, ScrollText } from 'lucide-svelte';
 
   interface Props {
     preset: PluginPreset;
-    overrides: PluginOverrides;
+    overrides?: PluginOverrides;
     onchange: (nextPreset: PluginPreset, nextOverrides: NormalizedPluginOverrides) => void;
     timeFormat?: string;
     defaultAutoTimeFormat?: string;
@@ -32,7 +22,7 @@
 
   let {
     preset,
-    overrides,
+    overrides: _overrides,
     onchange,
     timeFormat = '',
     defaultAutoTimeFormat = '',
@@ -44,22 +34,9 @@
   const t = $derived(workbench.t.ui);
   const catalog = $derived(workbench.prefilterCatalog);
 
-  let expanded = $state(false);
   let formatExpanded = $state(false);
 
   const normalizedPreset = $derived(normalizePluginPreset(preset));
-  const normOverrides = $derived(
-    sanitizePluginOverridesForPreset(catalog.plugins, normalizedPreset, overrides)
-  );
-  const customized = $derived(hasPluginOverrides(normOverrides));
-
-  const pluginGroups = $derived(
-    groupPluginsForPreset(catalog.plugins, normalizedPreset)
-  );
-  const applicablePlugins = $derived(
-    catalog.plugins.filter((p) => isPluginApplicableToPreset(p, normalizedPreset))
-  );
-
   const trimmedFormat = $derived(timeFormat.trim());
   const hasCustomFormat = $derived(
     Boolean(trimmedFormat) && trimmedFormat.toLowerCase() !== 'auto'
@@ -92,14 +69,6 @@
       ''
   );
 
-  const activePluginCount = $derived(
-    applicablePlugins.reduce(
-      (acc, plugin) =>
-        acc + (isPluginEffectiveEnabled(plugin, normalizedPreset, normOverrides) ? 1 : 0),
-      0
-    )
-  );
-
   function handlePresetChange(nextPreset: PluginPreset) {
     if (nextPreset === 'code') {
       formatExpanded = false;
@@ -107,25 +76,16 @@
     } else if (normalizedPreset === 'code' && !hasCustomFormat) {
       ontimeformatchange?.(defaultAutoTimeFormat, true);
     }
-    if (nextPreset === normalizedPreset && !customized) return;
+    if (nextPreset === normalizedPreset) return;
     onchange(nextPreset, { enable: [], disable: [] });
-  }
-
-  function handleTogglePlugin(plugin: NormalizedPluginMetadata, nextEnabled: boolean) {
-    const nextOverrides = togglePluginOverride(plugin, normalizedPreset, normOverrides, nextEnabled);
-    onchange(normalizedPreset, nextOverrides);
-  }
-
-  function handleResetOverrides() {
-    if (!customized) return;
-    onchange(normalizedPreset, { enable: [], disable: [] });
   }
 </script>
 
-<div class="space-y-1.5 rounded-lg border border-border/70 bg-secondary/15 p-2.5">
-  <div class="flex flex-wrap items-center justify-between gap-2" title={activePresetHint}>
-    <span class="text-[11px] font-medium text-muted-foreground">
-      {t.sourcePrefilterPresetLabel}
+<div class="space-y-2 rounded-lg border border-border/65 bg-secondary/15 p-2.5">
+  <div class="flex items-center justify-between gap-2" title={activePresetHint}>
+    <span class="inline-flex min-w-0 items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
+      <Layers class="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" />
+      <span class="truncate">{t.sourcePrefilterPresetLabel}</span>
     </span>
     <Segmented
       options={presetOptions}
@@ -134,45 +94,38 @@
     />
   </div>
 
-  <p class="text-[11px] leading-relaxed text-muted-foreground/85">
-    {activePresetHint}
-  </p>
-
   {#if showTimeFormatSection}
-    <div class="border-t border-border/45 pt-1.5">
-      <div class="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          aria-expanded={formatExpanded}
-          onclick={() => (formatExpanded = !formatExpanded)}
-          title={hasCustomFormat ? trimmedFormat : t.sourceTimeAutoHint}
-          class="touch-target inline-flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-muted-foreground hover:text-foreground cursor-pointer"
-        >
+    <div class="border-t border-border/45 pt-2">
+      <button
+        type="button"
+        aria-expanded={formatExpanded}
+        onclick={() => (formatExpanded = !formatExpanded)}
+        title={hasCustomFormat ? `${t.sourceTimeFormatLabel}: ${trimmedFormat}` : t.sourceTimeAutoHint}
+        class="touch-target flex w-full items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[11.5px] text-muted-foreground hover:text-foreground cursor-pointer"
+      >
+        <span class="inline-flex min-w-0 items-center gap-1.5">
           {#if formatExpanded}
-            <ChevronDown class="h-3 w-3 shrink-0" />
+            <ChevronDown class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
           {:else}
-            <ChevronRight class="h-3 w-3 shrink-0" />
+            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
           {/if}
-          <Clock class="h-3 w-3 shrink-0" />
+          <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" />
           <span class="truncate">{t.sourceTimeFormatLabel}</span>
-        </button>
+        </span>
 
-        <button
-          type="button"
-          onclick={() => (formatExpanded = !formatExpanded)}
-          title={hasCustomFormat ? trimmedFormat : t.sourceTimeAutoHint}
-          class={`rounded px-1.5 py-0.5 font-mono text-[10px] cursor-pointer ${
+        <span
+          class={`max-w-[55%] shrink-0 truncate rounded px-1.5 py-0.5 font-mono text-[10.5px] ${
             hasCustomFormat
               ? 'bg-primary/10 font-medium text-primary ring-1 ring-inset ring-primary/20'
-              : 'bg-secondary/75 text-muted-foreground hover:text-foreground'
+              : 'bg-secondary/75 text-muted-foreground'
           }`}
         >
-          {hasCustomFormat ? trimmedFormat : 'auto'}
-        </button>
-      </div>
+          {hasCustomFormat ? trimmedFormat : t.sourceBadgeAuto}
+        </span>
+      </button>
 
       {#if formatExpanded}
-        <div class="mt-1.5">
+        <div class="mt-2">
           <SourceTimeFormatEditor
             value={timeFormat}
             defaultAutoValue={defaultAutoTimeFormat}
@@ -184,95 +137,4 @@
       {/if}
     </div>
   {/if}
-
-  <div class="border-t border-border/45 pt-1.5">
-    <div class="flex items-center justify-between gap-2">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onclick={() => (expanded = !expanded)}
-        title={activePresetHint}
-        class="touch-target inline-flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-muted-foreground hover:text-foreground cursor-pointer"
-      >
-        {#if expanded}
-          <ChevronDown class="h-3 w-3 shrink-0" />
-        {:else}
-          <ChevronRight class="h-3 w-3 shrink-0" />
-        {/if}
-        <Filter class="h-3 w-3 shrink-0" />
-        <span class="truncate">{t.sourcePrefilterCustomize}</span>
-      </button>
-
-      <div class="flex shrink-0 items-center gap-1.5">
-        {#if customized}
-          <span
-            class="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums text-primary ring-1 ring-inset ring-primary/20"
-            title={t.sourcePrefilterOverriddenTitle}
-          >
-            {t.sourcePrefilterCustomBadge(normOverrides.enable.length, normOverrides.disable.length)}
-          </span>
-          {#if expanded}
-            <button
-              type="button"
-              onclick={handleResetOverrides}
-              title={t.sourcePrefilterReset}
-              aria-label={t.sourcePrefilterReset}
-              class="touch-target inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
-            >
-              <RotateCcw class="h-2.5 w-2.5" />
-              <span>{t.sourcePrefilterReset}</span>
-            </button>
-          {/if}
-        {:else}
-          <span class="font-mono text-[10.5px] tabular-nums text-muted-foreground/75">
-            {activePluginCount}/{applicablePlugins.length}
-          </span>
-        {/if}
-      </div>
-    </div>
-
-    {#if expanded}
-      <div class="mt-1.5 space-y-1.5">
-        {#each pluginGroups as group (group.domain)}
-          <div class="rounded-md border border-border/50 bg-background/75 px-2.5">
-            <div class="flex items-center justify-between border-b border-border/35 py-1 text-[10px] font-medium text-muted-foreground/75 select-none">
-              <span>{t.sourcePrefilterDomains[group.domain]}</span>
-              <span class="font-mono tabular-nums">{group.plugins.length}</span>
-            </div>
-            <div class="divide-y divide-border/35">
-              {#each group.plugins as plugin (plugin.id)}
-                {@const checked = isPluginEffectiveEnabled(plugin, normalizedPreset, normOverrides)}
-                {@const defaultOn = isPluginDefaultEnabledForPreset(plugin, normalizedPreset)}
-                {@const overridden = checked !== defaultOn}
-                {@const text = t.sourcePrefilterPlugins[plugin.id]}
-                {@const label = text?.label ?? plugin.id}
-                {@const desc = [text?.desc || plugin.description || plugin.id, plugin.stages.join(' · '), plugin.costHint]
-                  .filter(Boolean)
-                  .join(' · ')}
-                <div class="flex min-h-9 items-center justify-between gap-2 py-1" title={desc}>
-                  <div class="flex min-w-0 items-center gap-1.5">
-                    {#if overridden}
-                      <span
-                        class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
-                        title={t.sourcePrefilterOverriddenTitle}
-                      ></span>
-                    {/if}
-                    <span class="truncate text-[11.5px] text-foreground/90">{label}</span>
-                    <code class="hidden sm:inline shrink-0 font-mono text-[10px] text-muted-foreground/70">
-                      {plugin.id}
-                    </code>
-                  </div>
-                  <Switch
-                    {checked}
-                    title={desc}
-                    onchange={(next) => handleTogglePlugin(plugin, next)}
-                  />
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
 </div>

@@ -7,6 +7,7 @@
   import SourcePrefilterEditor from './SourcePrefilterEditor.svelte';
   import {
     AlertTriangle,
+    AtSign,
     ChevronRight,
     FileText,
     Folder,
@@ -179,73 +180,91 @@
   </div>
 
   <div class="relative">
-      {#if kind === 'file'}
-        <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      {:else}
-        <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      {/if}
-      <input
-        bind:this={pathEl}
-        type="text"
-        value={pathInput}
-        oninput={(e) => {
-          pathInput = (e.currentTarget as HTMLInputElement).value;
-          queueSuggest(pathInput);
+    {#if kind === 'file'}
+      <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
+    {:else}
+      <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
+    {/if}
+    <input
+      bind:this={pathEl}
+      type="text"
+      value={pathInput}
+      oninput={(e) => {
+        pathInput = (e.currentTarget as HTMLInputElement).value;
+        queueSuggest(pathInput);
+      }}
+      onfocus={() => queueSuggest(pathInput)}
+      onkeydown={onPathKeydown}
+      title={kind === 'file' ? t.filePath : t.dirPath}
+      aria-label={kind === 'file' ? t.filePath : t.dirPath}
+      placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
+      spellcheck="false"
+      autocomplete="off"
+      class={`${inputCls} pl-9 ${pathInput ? 'pr-8' : 'pr-3'}`}
+    />
+    {#if pathInput}
+      <button
+        type="button"
+        onclick={() => {
+          pathInput = '';
+          showSuggest = false;
+          pathEl?.focus({ preventScroll: true });
         }}
-        onfocus={() => queueSuggest(pathInput)}
-        onkeydown={onPathKeydown}
-        title={kind === 'file' ? t.filePath : t.dirPath}
-        placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
-        spellcheck="false"
-        autocomplete="off"
-        class={`${inputCls} pl-9 pr-3`}
-      />
+        title={workbench.t.searchBar.clearDraftTitle}
+        aria-label={workbench.t.searchBar.clearDraftTitle}
+        class="touch-target absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
+      >
+        <X class="h-3 w-3" />
+      </button>
+    {/if}
 
-      {#if showSuggest && suggestions.length > 0}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          onclick={(e) => e.stopPropagation()}
-          onkeydown={() => {}}
-          class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
-        >
-          {#each suggestions as entry, idx (entry.path)}
-            {@const isDir = entry.isDir === true}
-            <div
-              class={`flex items-center rounded-lg ${
-                idx === selectedIdx ? 'bg-secondary' : 'hover:bg-secondary/50'
-              }`}
+    {#if showSuggest && suggestions.length > 0}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={() => {}}
+        class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
+      >
+        {#each suggestions as entry, idx (entry.path)}
+          {@const isDir = entry.isDir === true}
+          <div
+            class={`flex items-center rounded-lg ${
+              idx === selectedIdx ? 'bg-secondary' : 'hover:bg-secondary/50'
+            }`}
+          >
+            <button
+              type="button"
+              onmouseenter={() => (selectedIdx = idx)}
+              onclick={() => apply(entry, false)}
+              class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs cursor-pointer"
             >
+              {#if isDir}
+                <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              {:else}
+                <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              {/if}
+              <span class="truncate font-mono font-medium text-foreground">{entry.name}</span>
+              <span class="ml-auto max-w-[45%] truncate font-mono text-[10.5px] text-muted-foreground">{entry.path}</span>
+            </button>
+            {#if isDir}
               <button
                 type="button"
-                onmouseenter={() => (selectedIdx = idx)}
-                onclick={() => apply(entry, false)}
-                class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs"
+                onclick={() => apply(entry, true)}
+                aria-label={t.pickDrill}
+                title={t.pickDrill}
+                class="touch-target flex h-10 w-9 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground cursor-pointer"
               >
-                {#if isDir}
-                  <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                {:else}
-                  <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                {/if}
-                <span class="truncate font-mono font-medium text-foreground">{entry.name}</span>
-                <span class="ml-auto max-w-[45%] truncate font-mono text-[10.5px] text-muted-foreground">{entry.path}</span>
+                <ChevronRight class="h-4 w-4" />
               </button>
-              {#if isDir}
-                <button
-                  type="button"
-                  onclick={() => apply(entry, true)}
-                  aria-label={t.pickDrill}
-                  title={t.pickDrill}
-                  class="touch-target flex h-10 w-9 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
-                >
-                  <ChevronRight class="h-4 w-4" />
-                </button>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
 
+  <div class="relative">
+    <AtSign class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/75" />
     <input
       type="text"
       bind:value={nameInput}
@@ -256,30 +275,32 @@
         }
       }}
       title={t.nameOptional}
+      aria-label={t.nameOptional}
       placeholder={derivedName
         ? `${t.defaultNamePrefix}${derivedName}`
         : kind === 'file'
           ? t.defaultFileName
           : t.defaultDirName}
       spellcheck="false"
-      class={`${inputCls} px-3`}
+      class={`${inputCls} pl-9 pr-3`}
     />
+  </div>
 
-    <SourcePrefilterEditor
-      preset={pluginPresetInput}
-      overrides={pluginOverridesInput}
-      timeFormat={timeFormatInput}
-      defaultAutoTimeFormat=""
-      onchange={(nextPreset, nextOverrides) => {
-        pluginPresetInput = nextPreset;
-        pluginOverridesInput = nextOverrides;
-      }}
-      ontimeformatchange={(fmt, valid) => {
-        timeFormatInput = fmt;
-        timeFormatValid = valid;
-      }}
-      onsubmit={() => void submit()}
-    />
+  <SourcePrefilterEditor
+    preset={pluginPresetInput}
+    overrides={pluginOverridesInput}
+    timeFormat={timeFormatInput}
+    defaultAutoTimeFormat=""
+    onchange={(nextPreset, nextOverrides) => {
+      pluginPresetInput = nextPreset;
+      pluginOverridesInput = nextOverrides;
+    }}
+    ontimeformatchange={(fmt, valid) => {
+      timeFormatInput = fmt;
+      timeFormatValid = valid;
+    }}
+    onsubmit={() => void submit()}
+  />
 
   {#if submitError}
     <div class="flex items-center justify-between gap-2 rounded-lg bg-status/10 px-2.5 py-2 text-xs text-status">
@@ -287,7 +308,7 @@
         <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
         <span class="truncate">{submitError}</span>
       </div>
-      <button type="button" onclick={() => (submitError = null)} class="shrink-0 text-status/70 hover:text-status" aria-label={workbench.t.settings.closeTitle}>
+      <button type="button" onclick={() => (submitError = null)} class="shrink-0 text-status/70 hover:text-status cursor-pointer" aria-label={workbench.t.settings.closeTitle}>
         <X class="h-3 w-3" />
       </button>
     </div>
@@ -299,12 +320,12 @@
     onclick={submit}
     title={t.addSource}
     aria-label={t.addSource}
-    class="flex h-10 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
+    class="touch-target flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
   >
     {#if submitting}
-      <Loader2 class="h-4 w-4 animate-spin" />
+      <Loader2 class="h-3.5 w-3.5 animate-spin" />
     {:else}
-      <Plus class="h-4 w-4" />
+      <Plus class="h-3.5 w-3.5" />
     {/if}
     <span>{t.addSource}</span>
   </button>

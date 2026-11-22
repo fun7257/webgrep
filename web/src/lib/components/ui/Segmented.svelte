@@ -46,14 +46,14 @@
         pickedOnDown = null;
         onchange(opt.value);
       }}
-      class={`touch-target flex h-6 min-w-8 items-center justify-center gap-1 rounded-md px-2 text-xs cursor-pointer ${
+      class={`touch-target flex h-6 min-w-8 items-center justify-center gap-1 rounded-md px-2 text-xs cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50 ${
         value === opt.value
           ? 'bg-background text-foreground font-medium shadow-[0_1px_2px_hsl(0_0%_0%/0.06)] ring-1 ring-inset ring-border/70 dark:bg-accent dark:ring-border/90'
           : 'text-muted-foreground hover:text-foreground active:bg-background/50'
       }`}
     >
-      {#if Icon}<Icon class="h-3.5 w-3.5" />{/if}
-      {#if opt.label}<span>{opt.label}</span>{/if}
+      {#if Icon}<Icon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />{/if}
+      {#if opt.label}<span class="whitespace-nowrap leading-none">{opt.label}</span>{/if}
     </button>
   {/each}
 </div>

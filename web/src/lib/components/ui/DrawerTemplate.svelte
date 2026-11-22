@@ -8,6 +8,7 @@
     icon: typeof SlidersHorizontal;
     title: string;
     badge?: string;
+    badgeTitle?: string;
     headerActions?: Snippet;
     footer?: Snippet;
     children: Snippet;
@@ -20,6 +21,7 @@
     icon: Icon,
     title,
     badge = '',
+    badgeTitle = '',
     headerActions,
     footer,
     children,
@@ -35,11 +37,17 @@
       <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-secondary/70 text-foreground/80">
         <Icon class="h-3.5 w-3.5" />
       </span>
-      <h2 class="truncate text-[13.5px] font-semibold tracking-[-0.01em] text-foreground">
+      <h2
+        title={title}
+        class="truncate text-[13.5px] font-semibold tracking-[-0.01em] text-foreground"
+      >
         {title}
       </h2>
       {#if badge}
-        <span class="shrink-0 rounded-full bg-secondary/75 px-2 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+        <span
+          title={badgeTitle || undefined}
+          class="shrink-0 rounded-full bg-secondary/75 px-2 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground"
+        >
           {badge}
         </span>
       {/if}

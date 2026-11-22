@@ -22,22 +22,22 @@
     icon={Database}
     title={workbench.t.settings.panelSourcesTitle}
     badge={`${workbench.enabledSourceCount}/${workbench.sources.length}`}
+    badgeTitle={workbench.t.ui.sourcesCount}
   >
     {#snippet headerActions()}
       <button
         type="button"
         onclick={() => (workbench.sourceAddOpen = !workbench.sourceAddOpen)}
-        title={workbench.t.ui.addSource}
-        aria-label={workbench.t.ui.addSource}
+        title={workbench.sourceAddOpen ? workbench.t.ui.cancel : workbench.t.ui.addSource}
+        aria-label={workbench.sourceAddOpen ? workbench.t.ui.cancel : workbench.t.ui.addSource}
         aria-pressed={workbench.sourceAddOpen}
-        class={`touch-target inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs font-medium cursor-pointer ${
+        class={`touch-target flex h-7 w-7 items-center justify-center rounded-md cursor-pointer ${
           workbench.sourceAddOpen
-            ? 'border-border bg-secondary text-foreground'
-            : 'border-border/65 bg-card/80 text-foreground hover:bg-secondary/75 active:bg-secondary'
+            ? 'bg-secondary text-foreground'
+            : 'text-muted-foreground/75 hover:bg-secondary/70 hover:text-foreground active:bg-secondary'
         }`}
       >
         <Plus class={`h-3.5 w-3.5 transition-transform ${workbench.sourceAddOpen ? 'rotate-45' : ''}`} />
-        <span>{workbench.t.ui.addSource}</span>
       </button>
     {/snippet}
 

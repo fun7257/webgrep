@@ -3,7 +3,6 @@
   import { filterSourcesForPicker } from '$lib/source-picker';
   import {
     DEFAULT_PLUGIN_PRESET,
-    hasPluginOverrides,
     resolveSourcePluginOverrides,
     resolveSourcePluginPreset,
     type NormalizedPluginOverrides,
@@ -15,9 +14,12 @@
   import {
     AlertTriangle,
     Check,
+    Clock,
+    Code2,
     FileText,
     Folder,
     Plus,
+    ScrollText,
     Search,
     SlidersHorizontal,
     Trash2,
@@ -151,24 +153,22 @@
       <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3">
         {#each displayedSources as src (src.id)}
         {@const effectiveFormat = resolveEffectiveTimeFormat(src)}
-        {@const hasCustomFormat = Boolean(effectiveFormat) && effectiveFormat.toLowerCase() !== 'auto'}
         {@const effectivePreset = resolveSourcePluginPreset(src)}
-        {@const effectiveOverrides = resolveSourcePluginOverrides(src)}
-        {@const customOverrides = hasPluginOverrides(effectiveOverrides)}
+        {@const hasCustomFormat =
+          effectivePreset !== 'code' &&
+          Boolean(effectiveFormat) &&
+          effectiveFormat.toLowerCase() !== 'auto'}
         {@const presetMeta = t.sourcePrefilterPresets[effectivePreset]}
-        {@const overrideBadge = customOverrides
-          ? t.sourcePrefilterCustomBadge(
-              effectiveOverrides.enable.length,
-              effectiveOverrides.disable.length
-            )
-          : ''}
+        {@const modeTitle = presetMeta
+          ? `${presetMeta.label} · ${presetMeta.hint}`
+          : effectivePreset}
         <div class="py-1.5">
           <div class={`flex min-h-12 items-center gap-3 ${src.enabled ? '' : 'opacity-60'}`}>
             <span
               class={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-secondary/65 ${
                 src.exists ? 'text-muted-foreground' : 'text-status'
               }`}
-              title={src.exists ? '' : t.missingPath}
+              title={src.exists ? (src.kind === 'file' ? t.kindFileDesc : t.kindDirDesc) : t.missingPath}
             >
               {#if !src.exists}
                 <AlertTriangle class="h-3.5 w-3.5" />
@@ -183,21 +183,27 @@
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="truncate font-medium text-foreground/95">@{src.name}</span>
                 <span
-                  class={`shrink-0 truncate rounded px-1.5 py-0.5 font-mono text-[10px] ring-1 ring-inset ${
+                  class={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded ring-1 ring-inset ${
                     effectivePreset === 'code'
-                      ? 'bg-primary/10 text-primary ring-primary/25'
-                      : 'bg-secondary/75 text-muted-foreground ring-border/60'
+                      ? 'bg-primary/10 text-primary ring-primary/20'
+                      : 'bg-secondary/75 text-muted-foreground ring-border/55'
                   }`}
-                  title={presetMeta?.hint ?? effectivePreset}
+                  title={modeTitle}
+                  aria-label={presetMeta?.label ?? effectivePreset}
                 >
-                  {presetMeta?.label ?? effectivePreset}{overrideBadge ? ` ${overrideBadge}` : ''}
+                  {#if effectivePreset === 'code'}
+                    <Code2 class="h-3 w-3" />
+                  {:else}
+                    <ScrollText class="h-3 w-3" />
+                  {/if}
                 </span>
                 {#if hasCustomFormat}
                   <span
-                    class="max-w-[140px] shrink-0 truncate rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10.5px] text-primary ring-1 ring-inset ring-primary/20"
-                    title={effectiveFormat}
+                    class="inline-flex h-5 max-w-[104px] shrink-0 items-center gap-1 rounded bg-primary/10 px-1.5 font-mono text-[10px] text-primary ring-1 ring-inset ring-primary/20"
+                    title={`${t.sourceTimeFormatLabel}: ${effectiveFormat}`}
                   >
-                    {effectiveFormat}
+                    <Clock class="h-2.5 w-2.5 shrink-0" />
+                    <span class="truncate">{effectiveFormat}</span>
                   </span>
                 {/if}
               </div>
@@ -215,7 +221,7 @@
               class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg cursor-pointer active:bg-secondary/80 ${
                 editingFormatId === src.id
                   ? 'bg-secondary text-foreground'
-                  : hasCustomFormat || customOverrides
+                  : hasCustomFormat
                     ? 'text-primary hover:bg-secondary/70'
                     : 'text-muted-foreground/70 hover:bg-secondary/70 hover:text-foreground'
               }`}
@@ -248,7 +254,7 @@
           </div>
 
           {#if editingFormatId === src.id}
-            <div class="mb-2.5 mt-1.5 space-y-2 rounded-lg border border-border/55 bg-background/85 p-2.5">
+            <div class="mb-2 mt-1.5 space-y-2 rounded-lg border border-border/55 bg-background/85 p-2.5">
               <SourcePrefilterEditor
                 preset={presetDraft}
                 overrides={pluginsDraft}
@@ -283,17 +289,23 @@
                     editingFormatId = null;
                     formatError = null;
                   }}
-                  class="touch-target rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary/80 cursor-pointer"
+                  title={t.cancel}
+                  aria-label={t.cancel}
+                  class="touch-target inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary/80 cursor-pointer"
                 >
-                  {t.cancel}
+                  <X class="h-3.5 w-3.5" />
+                  <span>{t.cancel}</span>
                 </button>
                 <button
                   type="button"
                   disabled={savingFormat || !formatValid}
                   onclick={() => saveSourceFormat(src)}
-                  class="touch-target rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
+                  title={t.save}
+                  aria-label={t.save}
+                  class="touch-target inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
                 >
-                  {t.save}
+                  <Check class="h-3.5 w-3.5" />
+                  <span>{t.save}</span>
                 </button>
               </div>
             </div>

@@ -13,16 +13,22 @@
   import SettingRow from '../ui/SettingRow.svelte';
   import Switch from '../ui/Switch.svelte';
   import {
+    Activity,
     Braces,
     Check,
     ChevronDown,
     ChevronRight,
     Copy,
+    Database,
+    FileText,
     KeyRound,
     Link,
     ListOrdered,
     Plug,
+    ScrollText,
+    Search,
     Trash2,
+    Wrench,
   } from 'lucide-svelte';
 
   const m = $derived(workbench.t.mcp);
@@ -31,6 +37,31 @@
     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787';
     return buildMcpEndpointUrl(origin, workbench.mcpEndpointPath);
   });
+
+  const statusSummaryTitle = $derived.by(() => {
+    const stateLabel = workbench.mcpEnabled ? m.statusRunning : m.statusStopped;
+    const total = workbench.mcpStats.totalCalls;
+    const errors = workbench.mcpStats.errorCalls;
+    if (total <= 0) return stateLabel;
+    return errors > 0
+      ? `${stateLabel} · ${total.toLocaleString()} (${errors} ${m.fieldError})`
+      : `${stateLabel} · ${total.toLocaleString()}`;
+  });
+
+  function getToolIcon(name: string): typeof Wrench {
+    switch (name) {
+      case 'webgrep_search':
+        return Search;
+      case 'webgrep_get_context':
+        return FileText;
+      case 'webgrep_list_sources':
+        return Database;
+      case 'webgrep_status':
+        return Activity;
+      default:
+        return Wrench;
+    }
+  }
 
   let copiedWhich = $state<'url' | 'config' | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -62,10 +93,14 @@
 </script>
 
 <div class="space-y-4">
-  <!-- Section 1: Service Config (Minimalist rows mirroring GeneralPane) -->
+  <!-- Section 1: Service -->
   <div>
-    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
-      {m.sectionStatus}
+    <div
+      class="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground"
+      title={m.enableDesc}
+    >
+      <Plug class="h-3.5 w-3.5 text-muted-foreground/75" />
+      <span>{m.sectionStatus}</span>
     </div>
 
     <div
@@ -73,33 +108,32 @@
     >
       <SettingRow icon={Plug} label={m.enableLabel} hint={m.enableDesc}>
         <div class="flex items-center gap-2.5">
-          <span class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span
+            title={statusSummaryTitle}
+            aria-label={statusSummaryTitle}
+            class="inline-flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-muted-foreground"
+          >
             <span
-              class={`h-1.5 w-1.5 rounded-full ${
+              class={`h-2 w-2 rounded-full ${
                 workbench.mcpEnabled ? 'bg-primary' : 'bg-muted-foreground/45'
               }`}
             ></span>
-            <span>{workbench.mcpEnabled ? m.statusRunning : m.statusStopped}</span>
             {#if workbench.mcpStats.totalCalls > 0}
-              <span class="font-mono text-[11px] tabular-nums text-muted-foreground/75">
-                · {workbench.mcpStats.totalCalls.toLocaleString()}
-              </span>
+              <span>{workbench.mcpStats.totalCalls.toLocaleString()}</span>
               {#if workbench.mcpStats.errorCalls > 0}
-                <span class="font-mono text-[11px] tabular-nums text-status">
-                  ({workbench.mcpStats.errorCalls})
-                </span>
+                <span class="text-status">/{workbench.mcpStats.errorCalls}</span>
               {/if}
             {/if}
           </span>
           <Switch
             checked={workbench.mcpEnabled}
-            title={m.enableLabel}
+            title={workbench.mcpEnabled ? m.statusRunning : m.statusStopped}
             onchange={(v) => void workbench.setMcpEnabled(v)}
           />
         </div>
       </SettingRow>
 
-      <div class="flex min-h-11 items-center gap-3 py-1.5">
+      <div class="flex min-h-11 items-center gap-2.5 py-1.5">
         <Link class="h-4 w-4 shrink-0 text-muted-foreground/80" />
         <code
           class="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/90 select-all"
@@ -110,10 +144,10 @@
         {#if workbench.mcpTokenRequired}
           <span
             title={m.tokenRequiredHint}
-            class="inline-flex shrink-0 items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground"
+            aria-label={m.tokenRequiredBadge}
+            class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-secondary/75 text-muted-foreground"
           >
-            <KeyRound class="h-3 w-3" />
-            <span class="hidden sm:inline">{m.tokenRequiredBadge}</span>
+            <KeyRound class="h-3.5 w-3.5" />
           </span>
         {/if}
         <div class="flex shrink-0 items-center gap-0.5">
@@ -160,10 +194,16 @@
     </div>
   </div>
 
-  <!-- Section 2: Capabilities List (Compact single-line rows, expand on click) -->
+  <!-- Section 2: Capabilities (Icon-led single-line rows, expand params on demand) -->
   <div>
-    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
-      {m.sectionCapabilities}
+    <div class="mb-1.5 flex items-center justify-between px-0.5">
+      <span class="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
+        <Wrench class="h-3.5 w-3.5 text-muted-foreground/75" />
+        <span>{m.sectionCapabilities}</span>
+      </span>
+      <span class="rounded-full bg-secondary/75 px-1.5 py-0.5 font-mono text-[10.5px] tabular-nums text-muted-foreground">
+        {workbench.mcpCapabilities.length}
+      </span>
     </div>
 
     <div
@@ -172,6 +212,7 @@
       {#each workbench.mcpCapabilities as cap (cap.name)}
         {@const localized = m.toolLabels[cap.name]}
         {@const isOpen = expandedTool === cap.name}
+        {@const ToolIcon = getToolIcon(cap.name)}
         <div>
           <button
             type="button"
@@ -181,33 +222,38 @@
             class="touch-target flex min-h-10 w-full items-center justify-between gap-2 py-1.5 text-left cursor-pointer group"
           >
             <div class="flex min-w-0 items-center gap-2">
-              <span class="shrink-0 text-muted-foreground/60 group-hover:text-foreground">
-                {#if isOpen}
-                  <ChevronDown class="h-3 w-3" />
-                {:else}
-                  <ChevronRight class="h-3 w-3" />
-                {/if}
-              </span>
-              <code class="truncate font-mono text-[12.5px] font-medium text-foreground/95">
+              <ToolIcon class="h-3.5 w-3.5 shrink-0 text-muted-foreground/80 group-hover:text-foreground" />
+              <code class="truncate font-mono text-[12px] font-medium text-foreground/95">
                 {cap.name}
               </code>
             </div>
-            {#if localized?.title}
-              <span class="shrink-0 text-xs text-muted-foreground">{localized.title}</span>
-            {/if}
+            <div class="flex shrink-0 items-center gap-1.5">
+              {#if localized?.title}
+                <span class="text-xs text-muted-foreground">{localized.title}</span>
+              {/if}
+              <span class="text-muted-foreground/55 group-hover:text-foreground">
+                {#if isOpen}
+                  <ChevronDown class="h-3.5 w-3.5" />
+                {:else}
+                  <ChevronRight class="h-3.5 w-3.5" />
+                {/if}
+              </span>
+            </div>
           </button>
 
           {#if isOpen}
-            <div class="space-y-1.5 pb-2.5 pl-5 select-text">
+            <div class="space-y-1.5 pb-2.5 pl-[22px] select-text">
               <p class="text-[11.5px] leading-relaxed text-muted-foreground">
                 {localized?.desc ?? cap.description}
               </p>
               {#if cap.params.length > 0}
-                <div class="flex flex-wrap gap-x-2 gap-y-1 font-mono text-[11px] text-muted-foreground/85">
+                <div class="flex flex-wrap gap-1.5 font-mono text-[11px] text-muted-foreground/85">
                   {#each cap.params as param (param.name)}
                     <span
                       title={`${param.name}: ${param.type}${param.required ? ` (${m.requiredParamTitle})` : ''} — ${param.description}`}
-                      class={param.required ? 'text-foreground/90 font-medium' : ''}
+                      class={`rounded bg-secondary/70 px-1.5 py-0.5 ${
+                        param.required ? 'text-foreground/95 font-medium' : ''
+                      }`}
                     >
                       {param.name}{param.required ? '*' : ''}
                     </span>
@@ -224,12 +270,13 @@
   <!-- Section 3: Real-Time Call Logs -->
   <div>
     <div class="mb-1.5 flex items-center justify-between px-0.5">
-      <span class="text-[11.5px] font-medium text-muted-foreground">
-        {m.sectionLogs}
+      <span class="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
+        <ScrollText class="h-3.5 w-3.5 text-muted-foreground/75" />
+        <span>{m.sectionLogs}</span>
       </span>
 
       <div class="flex items-center gap-1">
-        <span class="font-mono text-[11px] tabular-nums text-muted-foreground/80">
+        <span class="rounded-full bg-secondary/75 px-1.5 py-0.5 font-mono text-[10.5px] tabular-nums text-muted-foreground">
           {workbench.mcpLogs.length}/{workbench.mcpMaxLogs}
         </span>
         <button
@@ -247,17 +294,20 @@
 
     <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 overflow-hidden">
       {#if workbench.mcpLogs.length === 0}
-        <div class="py-7 text-center text-xs text-muted-foreground">
-          {m.emptyLogsTitle}
+        <div class="flex flex-col items-center justify-center gap-1.5 py-6 text-xs text-muted-foreground">
+          <Activity class="h-4 w-4 text-muted-foreground/50" />
+          <span>{m.emptyLogsTitle}</span>
         </div>
       {:else}
         <div class="max-h-[320px] overflow-y-auto divide-y divide-border/40 px-3.5">
           {#each workbench.mcpLogs as entry (entry.seq)}
             {@const isExpanded = expandedSeq === entry.seq}
+            {@const LogIcon = getToolIcon(entry.toolName || entry.method)}
             <div class="py-2">
               <button
                 type="button"
                 aria-expanded={isExpanded}
+                title={`${formatMcpTimestamp(entry.timestampMs)} · ${entry.toolName || entry.method} · ${formatMs(entry.durationMs)}ms`}
                 onclick={() => toggleLog(entry.seq)}
                 class="flex w-full items-center gap-2 text-left cursor-pointer group"
               >
@@ -266,6 +316,8 @@
                     entry.ok ? 'bg-primary' : 'bg-status'
                   }`}
                 ></span>
+
+                <LogIcon class="h-3 w-3 shrink-0 text-muted-foreground/70" />
 
                 <span class="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/95">
                   {entry.toolName || entry.method}
@@ -279,16 +331,23 @@
                 </span>
 
                 <span class="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/80">
-                  {formatMs(entry.durationMs)}ms · {formatMcpTimestamp(entry.timestampMs)}
+                  {formatMs(entry.durationMs)}ms
+                </span>
+                <span class="shrink-0 text-muted-foreground/55 group-hover:text-foreground">
+                  {#if isExpanded}
+                    <ChevronDown class="h-3 w-3" />
+                  {:else}
+                    <ChevronRight class="h-3 w-3" />
+                  {/if}
                 </span>
               </button>
 
               {#if isExpanded}
                 <div class="mt-1.5 ml-3.5 space-y-1 border-l border-border/50 pl-2.5 font-mono text-[11px] text-muted-foreground select-text">
                   <div class="flex items-center justify-between gap-2">
-                    <span>#{entry.seq} · {entry.method}</span>
+                    <span>#{entry.seq} · {formatMcpTimestamp(entry.timestampMs)} · {entry.method}</span>
                     {#if entry.clientInfo}
-                      <span class="truncate max-w-[180px]" title={entry.clientInfo}>
+                      <span class="truncate max-w-[160px]" title={entry.clientInfo}>
                         {m.fieldClient}: {entry.clientInfo}
                       </span>
                     {/if}

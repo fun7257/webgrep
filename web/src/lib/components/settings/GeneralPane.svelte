@@ -11,18 +11,25 @@
   import SettingRow from '../ui/SettingRow.svelte';
   import Switch from '../ui/Switch.svelte';
   import {
-    AlignLeft,
     ALargeSmall,
     ChevronsUpDown,
+    Cpu,
+    FoldVertical,
     Gauge,
     Languages,
     ListOrdered,
     Moon,
+    Palette,
+    PanelRight,
     Rows3,
     Rows4,
     Sun,
     SunMoon,
+    TextWrap,
+    Timer,
+    Turtle,
     UnfoldVertical,
+    Zap,
   } from 'lucide-svelte';
 
   const s = $derived(workbench.t.settings);
@@ -45,8 +52,12 @@
 
 <div class="space-y-4">
   <div>
-    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
-      {s.sectionAppearance}
+    <div
+      class="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground"
+      title={s.sectionAppearance}
+    >
+      <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" aria-hidden="true" />
+      <span>{s.sectionAppearance}</span>
     </div>
     <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
       <SettingRow icon={Languages} label={workbench.t.ui.language} hint={workbench.t.ui.languageDesc}>
@@ -60,7 +71,11 @@
         />
       </SettingRow>
 
-      <SettingRow icon={SunMoon} label={s.themeLabel}>
+      <SettingRow
+        icon={SunMoon}
+        label={s.themeLabel}
+        hint={`${workbench.t.header.lightMode} / ${workbench.t.header.darkMode}`}
+      >
         <Segmented
           value={workbench.darkMode}
           options={[
@@ -83,10 +98,10 @@
         />
       </SettingRow>
 
-      <SettingRow icon={AlignLeft} label={s.wordWrapLabel} hint={s.wordWrapDesc}>
+      <SettingRow icon={TextWrap} label={s.wordWrapLabel} hint={s.wordWrapDesc}>
         <Switch
           checked={workbench.wordWrap}
-          title={s.wordWrapLabel}
+          title={s.wordWrapDesc}
           onchange={(v) => display(() => (workbench.wordWrap = v))}
         />
       </SettingRow>
@@ -116,12 +131,16 @@
   </div>
 
   <div>
-    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
-      {s.sectionContext}
+    <div
+      class="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground"
+      title={s.sectionContext}
+    >
+      <PanelRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" aria-hidden="true" />
+      <span>{s.sectionContext}</span>
     </div>
     <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
       <SettingRow
-        icon={UnfoldVertical}
+        icon={FoldVertical}
         label={s.contextInitialLinesLabel}
         hint={s.contextInitialLinesDesc}
       >
@@ -153,16 +172,16 @@
       </SettingRow>
 
       <SettingRow
-        icon={Gauge}
+        icon={Timer}
         label={s.contextAutoLoadPaceLabel}
         hint={s.contextAutoLoadPaceDesc}
       >
         <Segmented
           value={workbench.contextAutoLoadPace}
           options={[
-            { value: 'slow', label: s.paceSlow, title: `${s.paceSlow} (480ms)` },
-            { value: 'normal', label: s.paceNormal, title: `${s.paceNormal} (240ms)` },
-            { value: 'fast', label: s.paceFast, title: `${s.paceFast} (90ms)` },
+            { value: 'slow', icon: Turtle, title: `${s.paceSlow} (480ms)` },
+            { value: 'normal', icon: Gauge, title: `${s.paceNormal} (240ms)` },
+            { value: 'fast', icon: Zap, title: `${s.paceFast} (90ms)` },
           ]}
           onchange={(v) =>
             display(() => (workbench.contextAutoLoadPace = normalizeContextAutoLoadPace(v)))}
@@ -172,8 +191,12 @@
   </div>
 
   <div>
-    <div class="mb-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground">
-      {s.sectionEngine}
+    <div
+      class="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground"
+      title={s.sectionEngine}
+    >
+      <Cpu class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" aria-hidden="true" />
+      <span>{s.sectionEngine}</span>
     </div>
     <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
       <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
