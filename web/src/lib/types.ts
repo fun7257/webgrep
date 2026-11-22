@@ -1,8 +1,7 @@
 export type SearchMode = 'literal' | 'multi' | 'regex';
 export type CaseMode = 'smart' | 'sensitive' | 'insensitive';
 
-export type ViewAdapterId = 'log' | 'code' | 'plain';
-export type ViewModePreference = 'auto' | ViewAdapterId;
+export type ViewAdapterId = 'log' | 'code';
 
 export type BuiltinTimePreset =
   | ''
@@ -53,7 +52,7 @@ export interface ScopeFilter {
   timeFormat?: string;
 }
 
-export type PluginPreset = 'auto' | 'timeseries' | 'code' | 'raw';
+export type PluginPreset = 'timeseries' | 'code';
 export type PluginDomain = 'common' | 'log' | 'code';
 export type PrefilterStage = 'source_plan' | 'file_prune' | 'window_narrow' | 'line_filter';
 
@@ -130,7 +129,7 @@ export interface HitItem {
   spans: HitSpan[];
 }
 
-export type SourceKind = 'dir' | 'file' | 'docker' | (string & {});
+export type SourceKind = 'dir' | 'file' | (string & {});
 
 export interface SourceKindMeta {
   kind: SourceKind;
@@ -139,7 +138,6 @@ export interface SourceKindMeta {
 
 export interface SourceConfig {
   path: string;
-  endpoint?: string | null;
   timeFormat?: string | null;
   pluginPreset?: PluginPreset | string | null;
   plugins?: PluginOverrides | null;

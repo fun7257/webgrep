@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   buildQueryCacheKeys,
   compileSearchQuery,
-  computeDockerPreviewSinceSec,
   createQueryStep,
   encodeStepToWire,
   formatHistoryLabel,
@@ -768,24 +767,6 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     assert.ok(longRendered.includes('target_token_here'));
     assert.ok(longRendered.includes(' … '));
     assert.ok(longRendered.length < 900);
-  });
-
-  it('computeDockerPreviewSinceSec aligns Docker preview since= strictly with auto content-time search pushdown', () => {
-    const sources = [
-      { kind: 'docker', name: 'docker-auto', config: { path: 'auto', timeFormat: 'auto' } },
-      { kind: 'docker', name: 'docker-default', config: { path: 'auto' } },
-      { kind: 'docker', name: 'docker-mtime', config: { path: 'auto', timeFormat: '' } },
-      { kind: 'docker', name: 'docker-custom', config: { path: 'auto', timeFormat: 'json:ts' } },
-      { kind: 'dir', name: 'app-logs', config: { path: '/tmp/logs', timeFormat: 'auto' } },
-    ];
-    const startMs = 1794650640123; // 1794650640s -> since = 1794650638
-    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-auto/gateway', startMs), 1794650638);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'Docker-Default/api', startMs), 1794650638);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-mtime/gateway', startMs), null);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-custom/gateway', startMs), null);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'app-logs/gateway.log', startMs), null);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'gateway', startMs), null);
-    assert.equal(computeDockerPreviewSinceSec(sources, 'docker-auto/gateway', 0), null);
   });
 });
 

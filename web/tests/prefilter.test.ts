@@ -46,17 +46,20 @@ function makeSource(
 }
 
 describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry', () => {
-  it('normalizes plugin presets with safe auto fallback', () => {
-    assert.deepEqual([...PLUGIN_PRESETS], ['auto', 'timeseries', 'code', 'raw']);
-    assert.equal(DEFAULT_PLUGIN_PRESET, 'auto');
+  it('normalizes plugin presets strictly to timeseries (log) or code with safe timeseries fallback', () => {
+    assert.deepEqual([...PLUGIN_PRESETS], ['timeseries', 'code']);
+    assert.equal(DEFAULT_PLUGIN_PRESET, 'timeseries');
 
-    assert.equal(normalizePluginPreset(undefined), 'auto');
-    assert.equal(normalizePluginPreset(null), 'auto');
-    assert.equal(normalizePluginPreset(''), 'auto');
+    assert.equal(normalizePluginPreset(undefined), 'timeseries');
+    assert.equal(normalizePluginPreset(null), 'timeseries');
+    assert.equal(normalizePluginPreset(''), 'timeseries');
     assert.equal(normalizePluginPreset('  TIMESERIES  '), 'timeseries');
+    assert.equal(normalizePluginPreset('log'), 'timeseries');
     assert.equal(normalizePluginPreset('Code'), 'code');
-    assert.equal(normalizePluginPreset('raw'), 'raw');
-    assert.equal(normalizePluginPreset('unknown_mode'), 'auto');
+    // Legacy auto/raw presets migrate cleanly to timeseries
+    assert.equal(normalizePluginPreset('auto'), 'timeseries');
+    assert.equal(normalizePluginPreset('raw'), 'timeseries');
+    assert.equal(normalizePluginPreset('unknown_mode'), 'timeseries');
     assert.equal(normalizePluginPreset('unknown_mode', 'code'), 'code');
   });
 
@@ -72,14 +75,14 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     );
 
     const partial = normalizeMetaPrefilterCatalog({ presets: [], plugins: [] });
-    assert.equal(partial.presets.length, 4);
+    assert.equal(partial.presets.length, 2);
     assert.equal(partial.plugins.length, DEFAULT_PLUGIN_CATALOG.length);
 
     const serverMeta = normalizeMetaPrefilterCatalog({
       presets: [
-        'auto',
         { id: 'timeseries', name_key: 'preset.ts', description: 'Time-series preset' },
         'code',
+        'auto',
         'raw',
         'invalid_ignored',
       ],
@@ -89,7 +92,7 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
           domain: 'log',
           name_key: 'plugin.filename_date',
           stages: ['file_prune'],
-          default_presets: ['auto', 'timeseries'],
+          default_presets: ['timeseries'],
           cost_hint: 'o1',
         },
         {
@@ -104,20 +107,20 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     });
     assert.deepEqual(
       serverMeta.presets.map((p) => p.id),
-      ['auto', 'timeseries', 'code', 'raw']
+      ['timeseries', 'code']
     );
-    assert.equal(serverMeta.presets[1].nameKey, 'preset.ts');
-    assert.equal(serverMeta.presets[1].description, 'Time-series preset');
+    assert.equal(serverMeta.presets[0].nameKey, 'preset.ts');
+    assert.equal(serverMeta.presets[0].description, 'Time-series preset');
     assert.equal(serverMeta.plugins.length, 2);
     assert.equal(serverMeta.plugins[0].domain, 'log');
-    assert.deepEqual(serverMeta.plugins[0].defaultPresets, ['auto', 'timeseries']);
+    assert.deepEqual(serverMeta.plugins[0].defaultPresets, ['timeseries']);
     assert.equal(serverMeta.plugins[1].id, 'custom_bloom');
     assert.equal(serverMeta.plugins[1].domain, 'common');
     assert.deepEqual(serverMeta.plugins[1].stages, ['file_prune', 'window_narrow']);
     assert.deepEqual(serverMeta.plugins[1].defaultPresets, ['timeseries']);
   });
 
-  it('partitions plugins strictly by domain across log (timeseries) vs code vs auto presets', () => {
+  it('partitions plugins strictly by domain across log (timeseries) vs code presets', () => {
     assert.deepEqual([...PLUGIN_DOMAINS], ['common', 'log', 'code']);
     assert.equal(normalizePluginDomain('LOG'), 'log');
     assert.equal(normalizePluginDomain('code'), 'code');
@@ -147,13 +150,6 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     assert.deepEqual(
       logGroups[0].plugins.map((p) => p.id),
       ['filename_date', 'time_bisect', 'line_time']
-    );
-
-    // Auto preset: exposes all three domains separately
-    const autoGroups = groupPluginsForPreset(DEFAULT_PLUGIN_CATALOG, 'auto');
-    assert.deepEqual(
-      autoGroups.map((g) => g.domain),
-      ['log', 'code', 'common']
     );
 
     // Applicability checks & override sanitization prevent stale cross-domain overrides
@@ -188,19 +184,20 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     assert.equal(hasPluginOverrides({ enable: [], disable: [] }), false);
 
     const mtimeWindow = DEFAULT_PLUGIN_CATALOG.find((p) => p.id === 'mtime_window')!;
-    assert.equal(isPluginEffectiveEnabled(mtimeWindow, 'auto', { enable: [], disable: [] }), false);
+    const timeBisect = DEFAULT_PLUGIN_CATALOG.find((p) => p.id === 'time_bisect')!;
     assert.equal(isPluginEffectiveEnabled(mtimeWindow, 'timeseries', { enable: [], disable: [] }), false);
     assert.equal(isPluginEffectiveEnabled(mtimeWindow, 'code', { enable: [], disable: [] }), true);
-    assert.equal(isPluginEffectiveEnabled(mtimeWindow, 'raw', { enable: [], disable: [] }), false);
+    assert.equal(isPluginEffectiveEnabled(timeBisect, 'timeseries', { enable: [], disable: [] }), true);
+    assert.equal(isPluginEffectiveEnabled(timeBisect, 'code', { enable: [], disable: [] }), false);
 
-    // Turning on mtime_window on `auto` records it in `enable`
-    const onInAuto = togglePluginOverride(mtimeWindow, 'auto', { enable: [], disable: [] }, true);
-    assert.deepEqual(onInAuto, { enable: ['mtime_window'], disable: [] });
-    assert.equal(isPluginEffectiveEnabled(mtimeWindow, 'auto', onInAuto), true);
+    // Disabling time_bisect on `timeseries` records it in `disable`
+    const offInLogs = togglePluginOverride(timeBisect, 'timeseries', { enable: [], disable: [] }, false);
+    assert.deepEqual(offInLogs, { enable: [], disable: ['time_bisect'] });
+    assert.equal(isPluginEffectiveEnabled(timeBisect, 'timeseries', offInLogs), false);
 
-    // Turning it back off matches `auto` default and removes the override entry cleanly
-    const backOffInAuto = togglePluginOverride(mtimeWindow, 'auto', onInAuto, false);
-    assert.deepEqual(backOffInAuto, { enable: [], disable: [] });
+    // Turning it back on matches `timeseries` default and removes the override entry cleanly
+    const backOnInLogs = togglePluginOverride(timeBisect, 'timeseries', offInLogs, true);
+    assert.deepEqual(backOnInLogs, { enable: [], disable: [] });
 
     // Disabling mtime_window on `code` (on by default) puts it in `disable`
     const offInCode = togglePluginOverride(mtimeWindow, 'code', { enable: [], disable: [] }, false);
@@ -209,17 +206,17 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
 
     // Also verifies `id_str` backend struct serialization compatibility
     const withIdStr = normalizeMetaPrefilterCatalog({
-      presets: [{ id_str: 'auto', name_key: 'presets.auto' }, { id_str: 'code', name_key: 'presets.code' }],
-      plugins: [{ id_str: 'time_bisect', name_key: 'plugins.time_bisect', stages: ['window_narrow'], default_presets: ['auto', 'timeseries'], cost_hint: 'O(log N) pread' }],
+      presets: [{ id_str: 'timeseries', name_key: 'presets.timeseries' }, { id_str: 'code', name_key: 'presets.code' }],
+      plugins: [{ id_str: 'time_bisect', name_key: 'plugins.time_bisect', stages: ['window_narrow'], default_presets: ['timeseries'], cost_hint: 'O(log N) pread' }],
     });
-    assert.deepEqual(withIdStr.presets.map((p) => p.id), ['auto', 'code']);
+    assert.deepEqual(withIdStr.presets.map((p) => p.id), ['timeseries', 'code']);
     assert.equal(withIdStr.plugins[0].id, 'time_bisect');
     assert.equal(withIdStr.plugins[0].costHint, 'O(log N) pread');
   });
 
   it('resolves top-level and config-nested source presets and overrides cleanly', () => {
     const legacySource = makeSource('s-legacy');
-    assert.equal(resolveSourcePluginPreset(legacySource), 'auto');
+    assert.equal(resolveSourcePluginPreset(legacySource), 'timeseries');
     assert.deepEqual(resolveSourcePluginOverrides(legacySource), { enable: [], disable: [] });
 
     const topLevelSource = makeSource('s-top', {
@@ -247,27 +244,27 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
   });
 
   it('computes deterministic sourcePluginsSig and isolates L0 cache keys on preset/plugin changes', () => {
-    const s1Auto = makeSource('s1', { pluginPreset: 'auto' });
+    const s1Logs = makeSource('s1', { pluginPreset: 'timeseries' });
     const s1Code = makeSource('s1', { pluginPreset: 'code' });
     const s1CustomA = makeSource('s1', {
-      pluginPreset: 'auto',
+      pluginPreset: 'timeseries',
       plugins: { enable: ['b', 'a'], disable: ['c'] },
     });
     const s1CustomB = makeSource('s1', {
-      pluginPreset: 'auto',
+      pluginPreset: 'timeseries',
       plugins: { enable: ['a', 'b'], disable: ['c'] },
     });
     const s2 = makeSource('s2', { pluginPreset: 'timeseries' });
 
-    const sigAuto = computeSourcePluginsSig([s1Auto, s2]);
-    const sigAutoReordered = computeSourcePluginsSig([s2, s1Auto]);
+    const sigLogs = computeSourcePluginsSig([s1Logs, s2]);
+    const sigLogsReordered = computeSourcePluginsSig([s2, s1Logs]);
     const sigCode = computeSourcePluginsSig([s1Code, s2]);
     const sigCustomA = computeSourcePluginsSig([s1CustomA, s2]);
     const sigCustomB = computeSourcePluginsSig([s1CustomB, s2]);
 
-    assert.equal(sigAuto, sigAutoReordered);
-    assert.notEqual(sigAuto, sigCode);
-    assert.notEqual(sigAuto, sigCustomA);
+    assert.equal(sigLogs, sigLogsReordered);
+    assert.notEqual(sigLogs, sigCode);
+    assert.notEqual(sigLogs, sigCustomA);
     assert.equal(sigCustomA, sigCustomB);
 
     const fixedNow = new Date(2026, 10, 17, 12, 0, 0).getTime();
@@ -288,24 +285,24 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
       nowMs: fixedNow,
     };
 
-    const kAuto = buildQueryCacheKeys({ ...baseParams, sourcePluginsSig: sigAuto });
+    const kLogs = buildQueryCacheKeys({ ...baseParams, sourcePluginsSig: sigLogs });
     const kCode = buildQueryCacheKeys({ ...baseParams, sourcePluginsSig: sigCode });
     const kCustom = buildQueryCacheKeys({ ...baseParams, sourcePluginsSig: sigCustomA });
 
-    assert.notEqual(kAuto.baseKey, kCode.baseKey);
-    assert.notEqual(kAuto.exactKey, kCode.exactKey);
-    assert.notEqual(kAuto.baseKey, kCustom.baseKey);
-    assert.notEqual(kAuto.exactKey, kCustom.exactKey);
-    assert.equal(kAuto.historyId, kCode.historyId);
+    assert.notEqual(kLogs.baseKey, kCode.baseKey);
+    assert.notEqual(kLogs.exactKey, kCode.exactKey);
+    assert.notEqual(kLogs.baseKey, kCustom.baseKey);
+    assert.notEqual(kLogs.exactKey, kCustom.exactKey);
+    assert.equal(kLogs.historyId, kCode.historyId);
   });
 
   it('invalidates L0StepCache on preset switch and preserves pruning telemetry across L0 hits', () => {
     const fixedNow = 1794880800000;
     const l0 = new L0StepCache();
-    const initialSources = [makeSource('logs', { pluginPreset: 'auto' })];
+    const initialSources = [makeSource('logs', { pluginPreset: 'timeseries' })];
     const initialSyncSig = computeEnabledSourcesSyncSig(initialSources);
 
-    const keysAuto = buildQueryCacheKeys({
+    const keysLogs = buildQueryCacheKeys({
       tenant: 'default',
       effectiveSources: ['logs'],
       excludedSources: [],
@@ -321,8 +318,8 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
 
     l0.put(
       {
-        exactKey: keysAuto.exactKey,
-        baseKey: keysAuto.baseKey,
+        exactKey: keysLogs.exactKey,
+        baseKey: keysLogs.baseKey,
         sourceRevision: l0.sourceRevision,
         hadDraft: true,
         maxResults: 20000,
@@ -343,12 +340,12 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
       fixedNow
     );
 
-    const hit = l0.findValid(keysAuto.exactKey, keysAuto.baseKey, 20000, fixedNow + 500);
+    const hit = l0.findValid(keysLogs.exactKey, keysLogs.baseKey, 20000, fixedNow + 500);
     assert.ok(hit !== null);
     assert.equal(hit.filesPruned, 19);
     assert.equal(hit.bytesSaved, 64 * 1024 * 1024);
 
-    // Switching source preset from `auto` to `code` both misses via `sourcePluginsSig`
+    // Switching source preset from `timeseries` to `code` both misses via `sourcePluginsSig`
     // AND invalidates `L0StepCache` via `computeEnabledSourcesSyncSig`.
     const switchedSources = [makeSource('logs', { pluginPreset: 'code' })];
     const switchedSyncSig = computeEnabledSourcesSyncSig(switchedSources);
@@ -369,10 +366,10 @@ describe('Prefilter plugin catalog, presets, overrides, cache keys & telemetry',
     });
     assert.equal(l0.findValid(keysCode.exactKey, keysCode.baseKey, 20000, fixedNow + 500), null);
 
-    // Server-side source sync invalidation clears all prior L0 entries including old `keysAuto`
+    // Server-side source sync invalidation clears all prior L0 entries including old `keysLogs`
     l0.invalidate();
     assert.equal(l0.sourceRevision, 2);
-    assert.equal(l0.findValid(keysAuto.exactKey, keysAuto.baseKey, 20000, fixedNow + 500), null);
+    assert.equal(l0.findValid(keysLogs.exactKey, keysLogs.baseKey, 20000, fixedNow + 500), null);
   });
 
   it('formats done frame pruning telemetry and zh/en tooltips cleanly', () => {

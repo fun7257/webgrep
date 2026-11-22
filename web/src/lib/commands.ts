@@ -6,7 +6,6 @@ import {
   FolderPlus,
   Keyboard,
   Languages,
-  Layers,
   Lock,
   PanelRight,
   SlidersHorizontal,
@@ -14,7 +13,6 @@ import {
   UnfoldVertical,
 } from 'lucide-svelte';
 import { workbench } from './state.svelte';
-import { VIEW_MODE_CYCLE_ORDER } from './adapters/index.ts';
 
 export interface Command {
   id: string;
@@ -84,16 +82,6 @@ export function buildCommands(): Command[] {
       icon: PanelRight as unknown as Command['icon'],
       title: p.inspector,
       run: () => workbench.toggleInspectorPane(),
-    },
-    {
-      id: 'cycle-view-mode',
-      icon: Layers as unknown as Command['icon'],
-      title: p.cycleViewMode,
-      run: () => {
-        const order = VIEW_MODE_CYCLE_ORDER;
-        const next = order[(order.indexOf(workbench.viewMode) + 1) % order.length];
-        workbench.setViewMode(next);
-      },
     },
     ...(workbench.inspectedPath
       ? [

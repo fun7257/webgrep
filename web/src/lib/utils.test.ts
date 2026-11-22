@@ -368,6 +368,28 @@ function runStructuredAnalyzerTests(): void {
   assertEqual(analyzeStructuredLine(kept), keptRes, 'kept remains in 128-entry LRU');
   assertNotEqual(analyzeStructuredLine(evicted), evictedRes, 'oldest entry evicted');
 
+  // Truncated JSON log lines (mid-string, mid-escape, trailing comma/colon, embedded)
+  const truncLine =
+    '{"t":"2026-09-11T10:27:42.615+08:00","l":"info","data":{"etf":"ETF权限设置","logout":"退\ufffd';
+  const truncRes = analyzeStructuredLine(truncLine);
+  assertEqual(truncRes.kind, 'json', 'truncated JSON recognized as json');
+  assertEqual(truncRes.formatBadge, 'JSON (truncated)', 'truncated JSON badge');
+  assertOk(truncRes.formattedText.includes('"etf": "ETF权限设置"'), 'truncated JSON prettified');
+  assertOk(truncRes.formattedText.includes('"logout": "退\ufffd"'), 'truncated tail preserved');
+
+  const truncComma = '{"a":1,"arr":[1,2,"cut\\u4e';
+  const truncCommaRes = analyzeStructuredLine(truncComma);
+  assertEqual(truncCommaRes.kind, 'json', 'truncated mid-escape JSON');
+  assertOk(truncCommaRes.formattedText.includes('"cut"'), 'dangling \\u4e stripped cleanly');
+
+  const truncEmbedded = '2026-09-11 10:27:42 INFO {"k1":"v1","k2":tru';
+  const truncEmbRes = analyzeStructuredLine(truncEmbedded);
+  assertEqual(truncEmbRes.kind, 'embedded-json', 'embedded truncated JSON');
+  assertOk(truncEmbRes.formattedText.includes('"k2": true'), 'truncated boolean completed');
+
+  const notJson = '{not a json object at all';
+  assertEqual(analyzeStructuredLine(notJson).kind, 'long-line', 'non-JSON stays plain');
+
   // > 256KB bypasses LRU cache cleanly
   const hugeLine = 'x'.repeat(262_145);
   const huge1 = analyzeStructuredLine(hugeLine);

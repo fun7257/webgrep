@@ -1,6 +1,6 @@
-import type { DataSourceItem, HitItem, ViewAdapterId, ViewModePreference } from '../types.ts';
+import type { HitItem, ViewAdapterId } from '../types.ts';
 
-export type { ViewAdapterId, ViewModePreference };
+export type { ViewAdapterId };
 
 export interface FastLogProbe {
   isLog: boolean;
@@ -27,21 +27,18 @@ export interface ParsedLogRecord {
   bodyText: string;
 }
 
-export interface PlainRowProbe {
+export interface LineRowProbe {
   cols: number;
   budget: number;
 }
 
-export interface ParsedPlainRecord {
-  kind: 'plain';
+export interface ParsedLineMeta {
   srcName: string;
   dirLabel: string;
   fileName: string;
   timeLabel: string;
   timeNs: string;
 }
-
-export type ParsedRecord = ParsedLogRecord | ParsedPlainRecord;
 
 export interface RowMeasureContext {
   fontPx: number;
@@ -60,8 +57,8 @@ export interface RowLayoutMetrics {
 }
 
 /**
- * Pure headless adapter descriptor (zero Svelte/DOM imports) powering routing,
- * inspector context behavior, and surface-level selection.
+ * Pure headless adapter descriptor (zero Svelte/DOM imports) bound 1:1 to a DataSource mode
+ * (`'log'` for timeseries/log sources, `'code'` for codebase sources).
  */
 export interface HeadlessAdapter {
   readonly id: ViewAdapterId;
@@ -70,24 +67,7 @@ export interface HeadlessAdapter {
   readonly inspectContextLines: number;
   /** Whether InspectorHeader displays the Structured/Raw toggle button. */
   readonly supportsStructuredToggle: boolean;
-  classifyHit(item: HitItem, source?: DataSourceItem): number;
   getFormattedCopyText?(lineText: string, hit: HitItem | null): string | null;
-}
-
-export interface ViewAdapter<TProbe = unknown, TRecord extends ParsedRecord = ParsedRecord>
-  extends HeadlessAdapter {
-  detectConfidence(item: HitItem, source?: DataSourceItem): number;
-  probeFast(item: HitItem, source?: DataSourceItem): TProbe;
-  parse(item: HitItem, source?: DataSourceItem): TRecord;
-  measureRow(probe: TProbe, item: HitItem, ctx: RowMeasureContext): RowLayoutMetrics;
-}
-
-export interface AdapterBatchSummary {
-  activeAdapter: ViewAdapterId;
-  detectedDominant: ViewAdapterId;
-  isMixed: boolean;
-  sampleCount: number;
-  sampleCounts: Record<ViewAdapterId, number>;
 }
 
 export interface LogVirtualLayout {

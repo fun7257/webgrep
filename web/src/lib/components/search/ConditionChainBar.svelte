@@ -9,30 +9,10 @@
   }
 
   let { onFocusInput, onSyncCursor }: Props = $props();
-
-  let toggledStepOnDown: number | null = null;
-
-  function handleExcludePointerDown(idx: number, e: PointerEvent) {
-    if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      toggledStepOnDown = idx;
-      flushSync(() => workbench.toggleStepExclude(idx));
-    }
-  }
-
-  function handleExcludeClick(idx: number, e: MouseEvent) {
-    if (toggledStepOnDown === idx && e.detail > 0) {
-      toggledStepOnDown = null;
-      return;
-    }
-    toggledStepOnDown = null;
-    workbench.toggleStepExclude(idx);
-  }
 </script>
 
 <div class="mt-2 flex flex-wrap items-center gap-1.5 px-1">
   {#each workbench.steps as step, idx (`${idx}:${step.text}`)}
-    {@const canToggle = workbench.canToggleStepExclude(idx)}
     {#if idx > 0}
       <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground/45" />
     {/if}
@@ -44,27 +24,11 @@
       }`}
     >
       <span class="text-[10px] text-muted-foreground/65 select-none">#{idx + 1}</span>
-      <button
-        type="button"
-        disabled={!canToggle}
-        onmousedown={(e) => e.preventDefault()}
-        onpointerdown={(e) => {
-          if (canToggle) handleExcludePointerDown(idx, e);
-        }}
-        onclick={(e) => {
-          if (canToggle) handleExcludeClick(idx, e);
-          onFocusInput();
-        }}
-        title={canToggle ? workbench.t.searchBar.toggleExcludeTitle(step.exclude) : `#${idx + 1}`}
-        aria-label={canToggle
-          ? workbench.t.searchBar.toggleExcludeTitle(step.exclude)
-          : `#${idx + 1}`}
-        class={`touch-target inline-flex h-4 min-w-[16px] items-center justify-center rounded px-1 font-mono text-[11px] font-semibold ${
-          step.exclude ? 'bg-status/15 text-status' : 'bg-primary/12 text-primary'
-        } ${canToggle ? 'hover:opacity-80 cursor-pointer' : 'cursor-default'}`}
-      >
-        {step.exclude ? '-' : '+'}
-      </button>
+      {#if step.exclude}
+        <span class="inline-flex h-4 min-w-[16px] items-center justify-center rounded bg-status/15 px-1 font-mono text-[11px] font-semibold text-status select-none">
+          -
+        </span>
+      {/if}
 
       <button
         type="button"

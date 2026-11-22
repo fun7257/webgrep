@@ -3,7 +3,6 @@ import type {
   QueryStep,
   SearchHistoryEntry,
   TimePreset,
-  ViewModePreference,
 } from '../types.ts';
 import type { Locale } from '../i18n.ts';
 import {
@@ -44,7 +43,6 @@ export interface PersistedSettings {
   codeFontSize: number;
   wordWrap: boolean;
   resultDensity: 'compact' | 'comfortable';
-  viewMode: ViewModePreference;
 }
 
 export const DEFAULT_PERSISTED_SETTINGS: Readonly<PersistedSettings> = {
@@ -61,7 +59,6 @@ export const DEFAULT_PERSISTED_SETTINGS: Readonly<PersistedSettings> = {
   codeFontSize: 13.5,
   wordWrap: true,
   resultDensity: 'comfortable',
-  viewMode: 'auto',
 };
 
 export function getBrowserLocalStorage(): StorageLike | null {
@@ -182,14 +179,6 @@ export function normalizeSettings(
   if (typeof s.wordWrap === 'boolean') base.wordWrap = s.wordWrap;
   if (s.resultDensity === 'compact' || s.resultDensity === 'comfortable') {
     base.resultDensity = s.resultDensity;
-  }
-  if (
-    s.viewMode === 'auto' ||
-    s.viewMode === 'log' ||
-    s.viewMode === 'code' ||
-    s.viewMode === 'plain'
-  ) {
-    base.viewMode = s.viewMode;
   }
   if (s.locale === 'zh' || s.locale === 'en') {
     base.locale = s.locale;

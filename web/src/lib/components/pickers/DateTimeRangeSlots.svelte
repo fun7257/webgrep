@@ -1,6 +1,7 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
+  import { Check, Radio } from 'lucide-svelte';
   import {
     DATETIME_SLOTS,
     clampDateTimeParts,
@@ -16,6 +17,7 @@
   type BoundSide = 'start' | 'end';
 
   interface Props {
+    compact?: boolean;
     startParts: DateTimeParts;
     endParts: DateTimeParts;
     endIsNow: boolean;
@@ -30,6 +32,7 @@
   }
 
   let {
+    compact = false,
     startParts = $bindable(),
     endParts = $bindable(),
     endIsNow = $bindable(),
@@ -329,7 +332,7 @@
   }
 
   const slotInputCls =
-    'relative z-10 h-6 [@media(any-pointer:coarse)]:h-7 rounded bg-secondary/55 px-0.5 text-center font-mono text-xs tabular-nums hover:bg-secondary focus:bg-primary/20 focus:text-primary focus:ring-1 focus:ring-inset focus:ring-primary/45 focus:outline-none';
+    'relative z-10 h-5 [@media(any-pointer:coarse)]:h-7 rounded bg-transparent px-0.5 text-center font-mono text-[11.5px] tabular-nums hover:bg-secondary/80 focus:bg-primary/20 focus:text-primary focus:ring-1 focus:ring-inset focus:ring-primary/45 focus:outline-none';
 </script>
 
 {#snippet renderSlotInput(
@@ -362,66 +365,97 @@
 {#snippet renderBoundRow(bound: BoundSide)}
   {@const isEnd = bound === 'end'}
   {@const mutedDigits = isEnd && effectiveEndIsNow}
-  <div class="grid grid-cols-[auto_1fr] items-center gap-2">
-    <span class="text-[11.5px] text-muted-foreground select-none">
-      {isEnd ? tp.endLabel : tp.startLabel}
-    </span>
-    <div class="flex h-9 [@media(any-pointer:coarse)]:h-10 min-w-0 items-center rounded-lg border border-border/75 bg-background/85 px-2 focus-within:border-primary/60">
+  <div class="flex items-center gap-1.5 min-w-0">
+    <!-- Visual timeline node (○ start → ● end) -->
+    <span
+      aria-hidden="true"
+      title={isEnd ? tp.endLabel : tp.startLabel}
+      class={`relative z-10 h-2 w-2 shrink-0 rounded-full ${
+        isEnd
+          ? effectiveEndIsNow
+            ? 'bg-primary ring-2 ring-primary/25'
+            : 'bg-muted-foreground/75'
+          : 'border-[1.5px] border-muted-foreground/75 bg-background'
+      }`}
+    ></span>
+
+    <div
+      class="flex h-7 [@media(any-pointer:coarse)]:h-9 min-w-0 flex-1 items-center rounded-md border border-border/60 bg-background/75 px-1.5 focus-within:border-primary/60"
+    >
       <div class="flex items-center">
-        {@render renderSlotInput(bound, 'year', 'w-[42px] [@media(any-pointer:coarse)]:w-[48px]', tp.yearLabel, mutedDigits)}
-        <span class="px-0.5 text-[11px] text-muted-foreground/65 select-none">{tp.yearUnit}</span>
-        {@render renderSlotInput(bound, 'month', 'w-[26px] [@media(any-pointer:coarse)]:w-[30px]', tp.monthLabel, mutedDigits)}
-        <span class="px-0.5 text-[11px] text-muted-foreground/65 select-none">{tp.monthUnit}</span>
-        {@render renderSlotInput(bound, 'day', 'w-[26px] [@media(any-pointer:coarse)]:w-[30px]', tp.dayLabel, mutedDigits)}
-        {#if tp.dayUnit}
-          <span class="pl-0.5 text-[11px] text-muted-foreground/65 select-none">{tp.dayUnit}</span>
-        {/if}
+        {@render renderSlotInput(bound, 'year', 'w-[34px] [@media(any-pointer:coarse)]:w-[42px]', tp.yearLabel, mutedDigits)}
+        <span class="font-mono text-[10px] text-muted-foreground/45 select-none">-</span>
+        {@render renderSlotInput(bound, 'month', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.monthLabel, mutedDigits)}
+        <span class="font-mono text-[10px] text-muted-foreground/45 select-none">-</span>
+        {@render renderSlotInput(bound, 'day', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.dayLabel, mutedDigits)}
       </div>
 
-      <span class="mx-1.5 h-3.5 w-px shrink-0 bg-border/60"></span>
+      <span class="mx-1 h-3 w-px shrink-0 bg-border/55"></span>
 
       <div class="flex items-center">
-        {@render renderSlotInput(bound, 'hour', 'w-[26px] [@media(any-pointer:coarse)]:w-[30px]', tp.hourLabel, mutedDigits)}
-        <span class="px-[1px] font-mono text-[11px] text-muted-foreground/65 select-none">:</span>
-        {@render renderSlotInput(bound, 'minute', 'w-[26px] [@media(any-pointer:coarse)]:w-[30px]', tp.minuteLabel, mutedDigits)}
-        <span class="px-[1px] font-mono text-[11px] text-muted-foreground/65 select-none">:</span>
-        {@render renderSlotInput(bound, 'second', 'w-[26px] [@media(any-pointer:coarse)]:w-[30px]', tp.secondLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'hour', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.hourLabel, mutedDigits)}
+        <span class="font-mono text-[10px] text-muted-foreground/45 select-none">:</span>
+        {@render renderSlotInput(bound, 'minute', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.minuteLabel, mutedDigits)}
+        <span class="font-mono text-[10px] text-muted-foreground/45 select-none">:</span>
+        {@render renderSlotInput(bound, 'second', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.secondLabel, mutedDigits)}
       </div>
 
       {#if isEnd}
-        <button
-          type="button"
-          onmousedown={(e) => e.preventDefault()}
-          onpointerdown={(e) => {
-            if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
-              e.preventDefault();
-              nowToggledOnDown = true;
-              flushSync(toggleEndNow);
-            }
-          }}
-          onclick={(e) => {
-            if (nowToggledOnDown && e.detail > 0) {
+        <div class="ml-auto flex items-center gap-0.5 pl-1">
+          <button
+            type="button"
+            onmousedown={(e) => e.preventDefault()}
+            onpointerdown={(e) => {
+              if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                nowToggledOnDown = true;
+                flushSync(toggleEndNow);
+              }
+            }}
+            onclick={(e) => {
+              if (nowToggledOnDown && e.detail > 0) {
+                nowToggledOnDown = false;
+                return;
+              }
               nowToggledOnDown = false;
-              return;
-            }
-            nowToggledOnDown = false;
-            toggleEndNow();
-          }}
-          title={tp.nowTitle}
-          class={`touch-target ml-auto inline-flex h-6 shrink-0 items-center rounded-md px-1.5 text-[11px] cursor-pointer ${
-            effectiveEndIsNow
-              ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/30 font-medium'
-              : 'text-muted-foreground/80 hover:bg-secondary hover:text-foreground active:bg-secondary'
-          }`}
-        >
-          {tp.nowBtn}
-        </button>
+              toggleEndNow();
+            }}
+            title={tp.nowTitle}
+            aria-label={tp.nowBtn}
+            aria-pressed={effectiveEndIsNow}
+            class={`touch-target inline-flex h-5 w-5 shrink-0 items-center justify-center rounded cursor-pointer ${
+              effectiveEndIsNow
+                ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35'
+                : 'text-muted-foreground/65 hover:bg-secondary hover:text-foreground active:bg-secondary'
+            }`}
+          >
+            <Radio class="h-3 w-3" />
+          </button>
+
+          {#if customDirty}
+            <button
+              type="button"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={onSubmit}
+              title={tp.apply}
+              aria-label={tp.apply}
+              class="touch-target inline-flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary text-primary-foreground hover:opacity-90 active:opacity-80 cursor-pointer"
+            >
+              <Check class="h-3 w-3 stroke-[2.5]" />
+            </button>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>
 {/snippet}
 
-<div class="space-y-1.5">
+<div class="relative space-y-1.5" title={tp.inputHint}>
+  <!-- Vertical timeline rail connecting start dot to end dot -->
+  <span
+    aria-hidden="true"
+    class="pointer-events-none absolute left-[3.5px] top-[18px] bottom-[18px] w-px bg-border/80"
+  ></span>
   {@render renderBoundRow('start')}
   {@render renderBoundRow('end')}
 </div>

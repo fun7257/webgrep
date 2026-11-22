@@ -2,7 +2,7 @@
   import { flushSync } from 'svelte';
   import type { HitItem } from '$lib/types';
   import {
-    PLAIN_BREADCRUMB_H,
+    LINE_BREADCRUMB_H,
     buildLogVirtualLayout,
     getCachedParsedLog,
     getCachedPlainProbe,
@@ -62,7 +62,7 @@
       hits: host.hits,
       ctx,
       budget: previewCharBudget,
-      getPlainProbe: getCachedPlainProbe,
+      getLineProbe: getCachedPlainProbe,
     });
     return { ...layout, lineHeight };
   });
@@ -344,7 +344,7 @@
                 : 'hover:bg-secondary/40 active:bg-secondary/60'
           }`}
         >
-          <div class="flex shrink-0 items-center justify-between gap-3 select-none" style={`height: ${PLAIN_BREADCRUMB_H - 4}px`}>
+          <div class="flex shrink-0 items-center justify-between gap-3 select-none" style={`height: ${LINE_BREADCRUMB_H - 4}px`}>
             <div class="flex items-center gap-1.5 min-w-0 font-mono text-[11px] leading-none">
               {@render renderSourceScopeChip(row)}
               {#if row.fileChanged}

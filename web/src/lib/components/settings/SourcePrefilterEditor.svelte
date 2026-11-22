@@ -17,7 +17,7 @@
   import Segmented from '../ui/Segmented.svelte';
   import Switch from '../ui/Switch.svelte';
   import SourceTimeFormatEditor from './SourceTimeFormatEditor.svelte';
-  import { ChevronDown, ChevronRight, Clock, Filter, RotateCcw } from 'lucide-svelte';
+  import { ChevronDown, ChevronRight, Clock, Code2, Filter, RotateCcw, ScrollText } from 'lucide-svelte';
 
   interface Props {
     preset: PluginPreset;
@@ -80,6 +80,7 @@
       return {
         value: p.id,
         label: text?.label ?? p.id,
+        icon: p.id === 'code' ? Code2 : ScrollText,
         title: text?.hint ?? p.description,
       };
     })

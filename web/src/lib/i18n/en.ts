@@ -2,6 +2,7 @@ import type { zh } from './zh.ts';
 
 export const en: typeof zh = {
   header: {
+    toggleSidebar: 'Toggle Scope Sidebar',
     sourcesTriggerTitle: 'Open Data Source Manager',
     sourcesCount: (enabled: number, total: number) =>
       total === 0 ? 'No sources configured · Click to add' : `${enabled}/${total} sources`,
@@ -10,9 +11,6 @@ export const en: typeof zh = {
     mcpTitle: 'MCP Capabilities, Status & Real-Time Call Logs',
     shortcutsBtn: 'Keyboard Shortcuts',
     settingsBtn: 'Settings',
-    connected: 'Connected to search engine',
-    reconnectTitle: 'Click to reconnect WebSocket',
-    reconnect: 'Reconnect',
     switchLangTitle: '切换为中文 (Switch to Chinese)',
     langBadge: 'EN',
     shortcutsTitle: 'Keyboard Shortcuts (?)',
@@ -40,10 +38,6 @@ export const en: typeof zh = {
     clearAllSteps: 'Clear steps',
     acceptGhost: '→ or Tab to complete',
     editStepTitle: 'Click to load this condition back into the search box',
-    toggleExcludeTitle: (isExclude: boolean): string =>
-      isExclude ? 'Mode: Exclude (-), click to switch to Include (+)' : 'Mode: Include (+), click to switch to Exclude (-)',
-    draftExcludeTitle: (isExclude: boolean): string =>
-      isExclude ? 'Current step: Exclude (-), click to switch to Include (+)' : 'Current step: Include (+), click to switch to Exclude (-)',
     removeStepTitle: (v: string) => `Remove condition ${v}`,
     enableRegexAction: 'Enable .* regex',
     historyHasSourceBadge: 'Source',
@@ -52,6 +46,9 @@ export const en: typeof zh = {
     historyHasTimeTitle: 'Scoped to specific time range',
   },
   scopeBar: {
+    sidebarTitle: 'Scope Filters',
+    timeSectionTitle: 'Time Range',
+    sourcesSectionTitle: 'Data Sources',
     allSources: 'All Sources',
     allSourcesTitle: 'Search all enabled data sources',
     allSourcesSub: 'Search across all enabled data sources',
@@ -73,7 +70,6 @@ export const en: typeof zh = {
     kindAll: 'All',
     kindDir: 'Dirs',
     kindFile: 'Files',
-    kindDocker: 'Docker',
     multiModeBtn: 'Multi-select',
     singleModeHint: 'Click to switch · checkbox for multi',
     selectFiltered: 'Select all',
@@ -198,7 +194,7 @@ export const en: typeof zh = {
     noMatchesSub: (files: string, ms: string) => `Scanned ${files} files in ${ms} ms`,
     resetFiltersBtn: 'Reset active filters & scope',
     emptyNoSourceTitle: 'No Data Sources Configured',
-    emptyNoSourceSub: 'Add a local directory, single file, or Docker container logs source in Settings (zero disk writes).',
+    emptyNoSourceSub: 'Add a local directory or single file source in Settings (zero disk writes).',
     openSourceManagerBtn: 'Open Data Source Manager',
     emptyTitlePrefix: 'Search across ',
     emptyTitleSuffix: '',
@@ -265,12 +261,6 @@ export const en: typeof zh = {
     densityDesc: 'Row spacing across result cards',
     densityCompact: 'Compact',
     densityComfortable: 'Comfortable',
-    viewModeLabel: 'Display View',
-    viewModeDesc: 'Adapt result layout to data shape, or lock Log / Code / Plain view',
-    viewModeAuto: 'Auto',
-    viewModeLog: 'Log',
-    viewModeCode: 'Code',
-    viewModePlain: 'Plain',
     sectionContext: 'Context Drawer',
     contextInitialLinesLabel: 'Initial Context Lines',
     contextInitialLinesDesc: 'Lines loaded above & below the target line on open (1 – 100)',
@@ -304,16 +294,12 @@ export const en: typeof zh = {
     sourceType: 'Source Type',
     kindFileDesc: 'Single file',
     kindDirDesc: 'Directory',
-    kindDockerDesc: 'Auto-discover & stream all Docker container logs (zero disk writes)',
     dir: 'Dir',
     file: 'File',
-    docker: 'Docker',
     filePath: 'File Path',
     dirPath: 'Directory Path',
-    dockerEndpoint: 'Docker Socket / Endpoint or Container (blank = auto-detect all)',
     filePlaceholder: '/var/log/app.log',
     dirPlaceholder: '/var/log or ~/code',
-    dockerPlaceholder: 'Leave blank for all containers, or auto::name / unix://…',
     nameOptional: 'Name (Optional)',
     addSource: 'Add Source',
     copyContent: 'Copy content',
@@ -321,7 +307,6 @@ export const en: typeof zh = {
     enabled: 'Enabled',
     disabled: 'Disabled',
     missingPath: 'Path not found',
-    missingDocker: 'Docker unavailable or container not found',
     confirmDelete: 'Tap again to delete',
     pathRequiredFile: 'Enter a server-side file path',
     pathRequiredDir: 'Enter a server-side directory path',
@@ -329,7 +314,6 @@ export const en: typeof zh = {
     defaultNamePrefix: 'Default: ',
     defaultFileName: 'Defaults to file name',
     defaultDirName: 'Defaults to directory name',
-    defaultDockerName: 'Defaults to docker',
     pickDrill: 'Open directory',
     sourcesCount: 'Enabled / total',
     finishedIn: (ms: string) => `Finished in ${ms} ms`,
@@ -351,21 +335,13 @@ export const en: typeof zh = {
     editSourceConfig: 'Configure time format & prefilter rules',
     sourcePrefilterPresetLabel: 'Source Mode',
     sourcePrefilterPresets: {
-      auto: {
-        label: 'Auto',
-        hint: 'Auto-detect timestamps with filename/sketch pruning; falls back to mtime only for timestamp-less files',
-      },
       timeseries: {
         label: 'Logs',
-        hint: 'For append logs & time-series: timestamp bisect + filtering + filename/sketch pruning (ignores mtime upper bound)',
+        hint: 'Log mode: line-log view (JSON/KV formatting & timestamps) with content-time bisect & filtering',
       },
       code: {
-        label: 'Code',
-        hint: 'For source trees & static docs: filter by file mtime window + path scope + sketch without timestamp parsing',
-      },
-      raw: {
-        label: 'Raw',
-        hint: 'Bypass heuristic prefilters for full raw scan',
+        label: 'Codebase',
+        hint: 'Codebase mode: file-grouped syntax view & ±12-line preview with file mtime filtering',
       },
     } as Record<string, { label: string; hint: string }>,
     sourcePrefilterCustomize: 'Plugins',
@@ -432,15 +408,11 @@ export const en: typeof zh = {
     shortcuts: 'Shortcut Help',
     inspector: 'Toggle Preview Pane',
     contextDrawer: 'View Surrounding Lines',
-    cycleViewMode: 'Cycle Display View (Auto / Log / Code / Plain)',
     lock: 'Lock Workspace',
   },
   logView: {
-    modeAutoTitle: (detected: string) => `Auto-adapt view (active: ${detected})`,
     modeLogTitle: 'Line Log View',
     modeCodeTitle: 'Codebase File-Grouped View',
-    modePlainTitle: 'Plain Text View',
-    mixedHint: (summary: string) => `Mixed result shapes detected: ${summary}`,
   },
   codeView: {
     modeTitle: 'Codebase File-Grouped View',
@@ -495,15 +467,15 @@ export const en: typeof zh = {
     toolLabels: {
       webgrep_search: {
         title: 'Search',
-        desc: 'Search directories, files, archives, and Docker logs via libwebgrep with same-line AND/NOT terms and time filtering.',
+        desc: 'Search directories, files, and archives via libwebgrep with same-line AND/NOT terms and time filtering.',
       },
       webgrep_get_context: {
         title: 'Read Context',
-        desc: 'Read lines around a matched path & line/byte offset across plain files, compressed logs, archives, and Docker streams.',
+        desc: 'Read lines around a matched path & line/byte offset across plain files, compressed logs, and archives.',
       },
       webgrep_list_sources: {
         title: 'List Sources',
-        desc: 'Inspect registered data sources (IDs, kinds dir/file/docker, paths, readiness, and line-time config).',
+        desc: 'Inspect registered data sources (IDs, kinds dir/file, paths, readiness, and line-time config).',
       },
       webgrep_status: {
         title: 'Status',

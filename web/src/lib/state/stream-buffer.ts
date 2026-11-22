@@ -205,14 +205,10 @@ export function buildFileContextCacheKey(
   tenant: string,
   filePath: string,
   targetLine: number,
-  dockerEpoch: number | null,
-  dockerSinceSec: number | null,
   contextLines = 0
 ): string {
-  const epochPart = dockerEpoch !== null ? `\u0000${dockerEpoch}` : '';
-  const sincePart = dockerSinceSec !== null ? `\u0000s=${dockerSinceSec}` : '';
   const ctxPart = contextLines > 0 ? `\u0000c=${contextLines}` : '';
-  return `${tenant}\u0000${filePath}\u0000${targetLine}${epochPart}${sincePart}${ctxPart}`;
+  return `${tenant}\u0000${filePath}\u0000${targetLine}${ctxPart}`;
 }
 
 export interface FileContextCacheEntry {

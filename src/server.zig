@@ -429,8 +429,6 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                         error.FileNotFound => respondErrorJson(&request, .bad_request, "服务端单文件不存在或无访问权限"),
                         error.ExpectedDirFoundFile => respondErrorJson(&request, .bad_request, "当前选择的是「目录」类型，但输入路径是一个文件"),
                         error.ExpectedFileFoundDir => respondErrorJson(&request, .bad_request, "当前选择的是「单文件」类型，但输入路径是一个目录"),
-                        error.DockerUnavailable => respondErrorJson(&request, .bad_request, "未检测到可用的 Docker 守护进程或目标容器（请确认 Docker / OrbStack / Colima 已启动且 Socket 可访问）"),
-                        error.InvalidDockerEndpoint => respondErrorJson(&request, .bad_request, "无效的 Docker 连接地址（支持留空自动识别、unix://、tcp:// 或容器目录路径）"),
                         error.InvalidPluginPreset => respondErrorJson(&request, .bad_request, "无效的预过滤预设 (pluginPreset)"),
                         error.InvalidPluginId => respondErrorJson(&request, .bad_request, "包含未知的预过滤插件 ID"),
                         else => respondErrorJson(&request, .internal_server_error, @errorName(err)),
@@ -563,7 +561,6 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
             const rel_path = (file_api.getQueryParamAlloc(req_arena, query_part, "path") catch null) orelse "";
             const line_str = (file_api.getQueryParamAlloc(req_arena, query_part, "line") catch null) orelse "1";
             const ctx_str = (file_api.getQueryParamAlloc(req_arena, query_part, "context") catch null) orelse "60";
-            const since_str_opt = file_api.getQueryParamAlloc(req_arena, query_part, "since") catch null;
 
             const line_num = std.fmt.parseInt(u64, line_str, 10) catch 1;
             const ctx_num = std.fmt.parseInt(u64, ctx_str, 10) catch 60;
@@ -575,14 +572,6 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                     return std.fmt.parseInt(u64, trimmed, 10) catch null;
                 }
             }.get;
-            const since_sec: ?u64 = blk_since: {
-                const parsed_s = if (since_str_opt) |ss| blk_inner: {
-                    const trimmed_ss = std.mem.trim(u8, ss, " \t\r\n");
-                    if (trimmed_ss.len == 0) break :blk_inner null;
-                    break :blk_inner std.fmt.parseInt(u64, trimmed_ss, 10) catch null;
-                } else null;
-                break :blk_since if (parsed_s) |ps| if (ps > 0) ps else null else null;
-            };
 
             const win_query = file_api.FileWindowQuery{
                 .line = line_num,
@@ -598,7 +587,6 @@ pub fn handleConnection(ctx: *const ServerContext, stream: std.Io.net.Stream) !v
                 ctx.io,
                 rel_path,
                 win_query,
-                since_sec,
             ) catch |err| {
                 switch (err) {
                     error.InvalidPath => respondErrorJson(&request, .bad_request, "invalid path"),

@@ -76,7 +76,7 @@ describe('Source picker pure logic', () => {
     const sources: DataSourceItem[] = [
       makeSource('1', 'app-a', 'dir', true),
       makeSource('2', '1000w.log', 'file', true),
-      makeSource('3', 'docker', 'docker', true),
+      makeSource('3', 'events.log', 'file', true),
     ];
 
     assert.deepEqual(resolveScopeSourceSummary(sources, [], []), {
@@ -122,16 +122,16 @@ describe('Source picker pure logic', () => {
     });
   });
 
-  it('counts and filters sources by kind, search query, name/path/endpoint, with enabled first', () => {
+  it('counts and filters sources by kind, search query, name/path, with enabled first', () => {
     const sources: DataSourceItem[] = [
       makeSource('1', 'disabled-api', 'dir', false, '/srv/disabled-api'),
       makeSource('2', 'webgrep', 'dir', true, '/Users/fun/code/webgrep'),
       makeSource('3', '1000w.log', 'file', true, '/var/log/1000w.log'),
-      makeSource('4', 'nginx-ctr', 'docker', true, 'unix:///var/run/docker.sock::nginx', 'auto::nginx'),
+      makeSource('4', 'nginx.log', 'file', true, '/var/log/nginx/access.log'),
     ];
 
     assert.equal(normalizeSourceKind('custom'), 'dir');
-    assert.deepEqual(countSourcesByKind(sources), { all: 4, dir: 2, file: 1, docker: 1 });
+    assert.deepEqual(countSourcesByKind(sources), { all: 4, dir: 2, file: 2 });
 
     // Enabled sources come first while disabled goes after
     const allFiltered = filterSourcesForPicker(sources, 'all', '');
@@ -140,14 +140,14 @@ describe('Source picker pure logic', () => {
       ['2', '3', '4', '1']
     );
 
-    // Kind + query matching summary/endpoint/path
+    // Kind + query matching name/path
     assert.deepEqual(
-      filterSourcesForPicker(sources, 'docker', 'NGINX').map((x) => x.id),
+      filterSourcesForPicker(sources, 'file', 'NGINX').map((x) => x.id),
       ['4']
     );
     assert.deepEqual(
       filterSourcesForPicker(sources, 'file', '/var/log').map((x) => x.id),
-      ['3']
+      ['3', '4']
     );
     assert.deepEqual(
       filterSourcesForPicker(sources, 'dir', 'disabled').map((x) => x.id),
@@ -160,7 +160,7 @@ describe('Source picker pure logic', () => {
     const sources: DataSourceItem[] = [
       makeSource('1', 'Sample Logs', 'dir', true, '/var/log/sample-logs'),
       makeSource('2', 'webgrep', 'dir', true, '/Users/fun/code/webgrep'),
-      makeSource('3', 'nginx-ctr', 'docker', true, 'unix:///var/run/docker.sock::nginx', 'auto::nginx-ctr'),
+      makeSource('3', 'nginx-ctr', 'file', true, '/var/log/nginx/nginx-ctr.log'),
       makeSource('4', 'app-router', 'dir', true, '/var/log/app.log'),
       makeSource('5', 'disabled-web', 'dir', false, '/tmp/disabled-web'),
     ];
@@ -205,8 +205,8 @@ describe('Source picker pure logic', () => {
       ['name-prefix', 'path-hit', 'disabled-prefix']
     );
 
-    // Whitespace-separated multi-token query matches across name and endpoint/summary/path
-    const multiTok = fuzzyFilterSourcesForPicker(sources, 'all', 'auto ngc');
+    // Whitespace-separated multi-token query matches across name and summary/path
+    const multiTok = fuzzyFilterSourcesForPicker(sources, 'all', 'var ngc');
     assert.deepEqual(
       multiTok.map((r) => r.source.id),
       ['3']

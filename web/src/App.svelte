@@ -4,6 +4,7 @@
   import { copyTextToClipboard } from '$lib/utils';
   import Header from '$lib/components/Header.svelte';
   import LoginView from '$lib/components/LoginView.svelte';
+  import LeftScopeSidebar from '$lib/components/LeftScopeSidebar.svelte';
   import SearchBar from '$lib/components/SearchBar.svelte';
   import TelemetryBar from '$lib/components/TelemetryBar.svelte';
   import ResultList from '$lib/components/ResultList.svelte';
@@ -138,16 +139,13 @@
     }
 
     if (e.key === 'Escape') {
-      // Step back one layer at a time: palette → time picker → right drawer → detail → cancel search
+      // Step back one layer at a time: palette → mobile scope drawer → right drawer → detail → cancel search
       if (workbench.paletteOpen) {
         workbench.paletteOpen = false;
         return;
       }
-      if (workbench.timePickerOpen) {
-        workbench.closeTimePicker();
-        if (!workbench.isCompact && !workbench.isTouch) {
-          searchInputEl?.focus();
-        }
+      if (workbench.isCompact && workbench.mobileScopeOpen) {
+        workbench.closeMobileScope();
         return;
       }
       if (workbench.rightDrawerOpen) {
@@ -180,7 +178,7 @@
     if (
       workbench.paletteOpen ||
       workbench.rightDrawerOpen ||
-      workbench.timePickerOpen
+      (workbench.isCompact && workbench.mobileScopeOpen)
     ) {
       return;
     }
@@ -295,6 +293,8 @@
       <Header />
 
       <div class="relative flex flex-1 min-h-0 overflow-clip">
+        <LeftScopeSidebar onFocusMainInput={() => searchInputEl?.focus()} />
+
         <main class="flex flex-1 flex-col min-w-0 min-h-0 overflow-clip">
           <SearchBar bind:inputEl={searchInputEl} hero={isHomeView} />
           {#if !isHomeView}

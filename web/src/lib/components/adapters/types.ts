@@ -1,17 +1,8 @@
 import type { Component, Snippet } from 'svelte';
 import { workbench } from '$lib/state.svelte';
 import type { LocaleMessages } from '$lib/i18n';
-import type {
-  AdapterBatchSummary,
-  HeadlessAdapter,
-  ViewAdapterId,
-} from '$lib/adapters/index.ts';
-import type {
-  DataSourceItem,
-  FileResponse,
-  HitItem,
-  ViewModePreference,
-} from '$lib/types';
+import type { HeadlessAdapter, ViewAdapterId } from '$lib/adapters/index.ts';
+import type { DataSourceItem, FileResponse, HitItem } from '$lib/types';
 import type {
   CodeHighlightSegment,
   HighlightSegment,
@@ -25,8 +16,6 @@ export interface AdapterHost {
   readonly activeHitIndex: number;
   readonly sourceByName: ReadonlyMap<string, DataSourceItem>;
   readonly collapsedFiles: ReadonlySet<string>;
-  readonly viewMode: ViewModePreference;
-  readonly batchSummary: AdapterBatchSummary;
   readonly currentSearchId: number;
   readonly scrollToActiveTick: number;
   readonly isSearching: boolean;
@@ -79,12 +68,6 @@ export function createWorkbenchAdapterHost(): AdapterHost {
     },
     get collapsedFiles() {
       return workbench.collapsedFilesSet;
-    },
-    get viewMode() {
-      return workbench.viewMode;
-    },
-    get batchSummary() {
-      return workbench.adapterBatchSummary;
     },
     get currentSearchId() {
       return workbench.currentSearchId;

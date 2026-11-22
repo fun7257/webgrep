@@ -1,9 +1,8 @@
 import type { DataSourceItem, ScopeFilter, SourceKind } from './types.ts';
 
-export type SourceKindFilter = 'all' | 'dir' | 'file' | 'docker';
+export type SourceKindFilter = 'all' | 'dir' | 'file';
 
 export function normalizeSourceKind(kind: SourceKind): Exclude<SourceKindFilter, 'all'> {
-  if (kind === 'docker') return 'docker';
   if (kind === 'file') return 'file';
   return 'dir';
 }
@@ -97,7 +96,6 @@ export function countSourcesByKind(
     all: sources.length,
     dir: 0,
     file: 0,
-    docker: 0,
   };
   for (const s of sources) {
     counts[normalizeSourceKind(s.kind)] += 1;
@@ -123,7 +121,7 @@ export interface FuzzyFilteredSource {
 }
 
 export function getSourceSubtitle(src: DataSourceItem): string {
-  return src.summary || src.config?.endpoint || src.path;
+  return src.summary || src.path;
 }
 
 function isWordBoundary(text: string, idx: number): boolean {

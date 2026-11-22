@@ -33,13 +33,11 @@ pub const Domain = enum {
 
     /// Returns whether a plugin in this domain is eligible for `preset`:
     /// - `code` sources allow only `common` + `code` plugins (no log timestamp plugins)
-    /// - `timeseries` sources allow only `common` + `log` plugins (no code mtime-window plugin)
-    /// - `auto` / `raw` allow all domains (mixed folders or explicit overrides)
+    /// - `timeseries` (log) sources allow only `common` + `log` plugins (no code mtime-window plugin)
     pub fn allowsInPreset(self: Domain, preset: Preset) bool {
         return switch (preset) {
             .code => self == .common or self == .code,
             .timeseries => self == .common or self == .log,
-            .auto, .raw => true,
         };
     }
 };
@@ -113,30 +111,26 @@ pub const Verdict = enum {
 };
 
 pub const Preset = enum {
-    auto,
     timeseries,
     code,
-    raw,
 
     pub fn parse(raw_str: []const u8) Preset {
-        return parseStrict(raw_str) orelse .auto;
+        return parseStrict(raw_str) orelse .timeseries;
     }
 
     pub fn parseStrict(raw_str: []const u8) ?Preset {
         const s = std.mem.trim(u8, raw_str, " \t\r\n");
-        if (s.len == 0 or std.ascii.eqlIgnoreCase(s, "auto")) return .auto;
-        if (std.ascii.eqlIgnoreCase(s, "timeseries")) return .timeseries;
+        if (s.len == 0 or std.ascii.eqlIgnoreCase(s, "timeseries") or std.ascii.eqlIgnoreCase(s, "log")) {
+            return .timeseries;
+        }
         if (std.ascii.eqlIgnoreCase(s, "code")) return .code;
-        if (std.ascii.eqlIgnoreCase(s, "raw")) return .raw;
         return null;
     }
 
     pub fn asStr(self: Preset) []const u8 {
         return switch (self) {
-            .auto => "auto",
             .timeseries => "timeseries",
             .code => "code",
-            .raw => "raw",
         };
     }
 };
@@ -144,7 +138,6 @@ pub const Preset = enum {
 pub const SourceKind = enum {
     dir,
     file,
-    docker,
     archive,
     unknown,
 
@@ -152,7 +145,6 @@ pub const SourceKind = enum {
         const s = std.mem.trim(u8, raw_str, " \t\r\n");
         if (std.ascii.eqlIgnoreCase(s, "dir")) return .dir;
         if (std.ascii.eqlIgnoreCase(s, "file")) return .file;
-        if (std.ascii.eqlIgnoreCase(s, "docker")) return .docker;
         if (std.ascii.eqlIgnoreCase(s, "archive")) return .archive;
         return .unknown;
     }
@@ -161,7 +153,6 @@ pub const SourceKind = enum {
         return switch (self) {
             .dir => "dir",
             .file => "file",
-            .docker => "docker",
             .archive => "archive",
             .unknown => "unknown",
         };
@@ -231,7 +222,7 @@ pub const QueryPredicates = struct {
     bisect_slop_ns: u64 = 5 * std.time.ns_per_s,
     source_kind: SourceKind = .dir,
     time_mode: TimeFilterMode = .auto,
-    preset: Preset = .auto,
+    preset: Preset = .timeseries,
     custom_plugin_mask: ?u32 = null,
     enabled_overrides: []const PluginId = &.{},
     disabled_overrides: []const PluginId = &.{},
@@ -243,8 +234,7 @@ pub const QueryPredicates = struct {
     anchors_case_insensitive: bool = true,
     anchor_case_flags: []const bool = &.{},
     kv_predicates: []const KvPredicate = &.{},
-    /// When false (e.g. `timeMode == "content"`), `.auto` must NOT fall back to mtime on `unparsed_no_ts`.
-    allow_mtime_fallback_on_no_ts: bool = true,
+    allow_mtime_fallback_on_no_ts: bool = false,
     /// When true, untimestamped standalone lines inside files are dropped rather than inheriting mtime.
     strict_content_time: bool = false,
 
@@ -442,7 +432,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.path_scope",
         .description = "Zero-alloc path, extension, and glob pruning before scanning",
         .stages = &.{ .source_plan, .file_prune },
-        .default_presets = &.{ .auto, .timeseries, .code, .raw },
+        .default_presets = &.{ .timeseries, .code },
         .priority = 10,
         .cost_hint = "O(1) path",
     },
@@ -453,7 +443,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.mtime_guard",
         .description = "Lower-bound mtime guard (mtime < timeStart)",
         .stages = &.{.file_prune},
-        .default_presets = &.{ .auto, .timeseries, .code },
+        .default_presets = &.{ .timeseries, .code },
         .priority = 20,
         .cost_hint = "O(1) stat",
     },
@@ -462,7 +452,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .id_str = "mtime_window",
         .domain = .code,
         .name_key = "plugins.mtime_window",
-        .description = "Upper-bound mtime window (active in code; fallback for timestamp-less files in auto)",
+        .description = "Upper-bound mtime window (active in code sources)",
         .stages = &.{.file_prune},
         .default_presets = &.{.code},
         .priority = 25,
@@ -475,7 +465,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.filename_date",
         .description = "Extract rotated filename dates/hours before decompression",
         .stages = &.{.file_prune},
-        .default_presets = &.{ .auto, .timeseries },
+        .default_presets = &.{.timeseries},
         .priority = 30,
         .cost_hint = "O(1) name",
     },
@@ -486,7 +476,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.sidecar_sketch",
         .description = "Observed timestamp bounds & ASCII trigram Bloom sketch in data_dir",
         .stages = &.{.file_prune},
-        .default_presets = &.{ .auto, .timeseries, .code },
+        .default_presets = &.{ .timeseries, .code },
         .priority = 35,
         .cost_hint = "O(1) bloom",
     },
@@ -497,7 +487,7 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.time_bisect",
         .description = "Binary-search byte windows by parsed line timestamps",
         .stages = &.{.window_narrow},
-        .default_presets = &.{ .auto, .timeseries },
+        .default_presets = &.{.timeseries},
         .priority = 40,
         .cost_hint = "O(log N) pread",
     },
@@ -508,20 +498,13 @@ pub const PLUGIN_CATALOG = [_]PluginMetadata{
         .name_key = "plugins.line_time",
         .description = "Line timestamp filter, stack-trace continuation binding, and KV pushdown",
         .stages = &.{ .source_plan, .line_filter },
-        .default_presets = &.{ .auto, .timeseries, .raw },
+        .default_presets = &.{.timeseries},
         .priority = 50,
         .cost_hint = "O(1) sticky",
     },
 };
 
 pub const PRESET_CATALOG = [_]PresetMetadata{
-    .{
-        .preset = .auto,
-        .id_str = "auto",
-        .name_key = "prefilter.preset.auto",
-        .description = "Safe timestamp probing, filename/sketch pruning; never drops active daily logs",
-        .default_plugins = &.{ .path_scope, .mtime_guard, .filename_date, .sidecar_sketch, .time_bisect, .line_time },
-    },
     .{
         .preset = .timeseries,
         .id_str = "timeseries",
@@ -535,13 +518,6 @@ pub const PRESET_CATALOG = [_]PresetMetadata{
         .name_key = "prefilter.preset.code",
         .description = "Source code & docs (mtime window + path scope + sketch)",
         .default_plugins = &.{ .path_scope, .mtime_guard, .mtime_window, .sidecar_sketch },
-    },
-    .{
-        .preset = .raw,
-        .id_str = "raw",
-        .name_key = "prefilter.preset.raw",
-        .description = "Bypass heuristic prefilters for full raw scan",
-        .default_plugins = &.{ .path_scope, .line_time },
     },
 };
 
@@ -601,31 +577,24 @@ pub fn resolvePluginChain(
     disabled_overrides_opt: ?[]const PluginId,
 ) ResolvedPluginChain {
     var mask = defaultPluginMaskForPreset(preset);
-    var allow_fallback = (preset == .auto);
 
     if (enabled_overrides_opt) |en| {
         for (en) |pid| {
             if (!pid.domain().allowsInPreset(preset)) continue;
             mask |= pid.bit();
-            if (pid == .mtime_window and preset == .auto) {
-                allow_fallback = true;
-            }
         }
     }
 
     if (disabled_overrides_opt) |dis| {
         for (dis) |pid| {
             mask &= ~pid.bit();
-            if (pid == .mtime_window) {
-                allow_fallback = false;
-            }
         }
     }
 
     var chain = ResolvedPluginChain{
         .preset = preset,
         .active_mask = mask,
-        .allow_mtime_fallback_on_no_ts = allow_fallback,
+        .allow_mtime_fallback_on_no_ts = false,
     };
 
     for (PLUGIN_CATALOG) |entry| {
@@ -647,7 +616,7 @@ pub fn resolvePluginChainWithMask(
     var chain = ResolvedPluginChain{
         .preset = preset,
         .active_mask = explicit_mask,
-        .allow_mtime_fallback_on_no_ts = allow_mtime_fallback_on_no_ts and ((explicit_mask & PluginId.mtime_window.bit()) == 0 or preset == .auto),
+        .allow_mtime_fallback_on_no_ts = allow_mtime_fallback_on_no_ts and (explicit_mask & PluginId.mtime_window.bit()) == 0,
     };
     for (PLUGIN_CATALOG) |entry| {
         if ((explicit_mask & entry.id.bit()) != 0 and chain.len < MAX_PLUGINS) {
@@ -693,7 +662,7 @@ pub fn resolvePluginChainFromNames(
 
 pub fn resolveChainForPredicates(preds: QueryPredicates) ResolvedPluginChain {
     if (preds.custom_plugin_mask) |mask| {
-        return resolvePluginChainWithMask(preds.preset, mask, preds.preset == .auto and preds.allow_mtime_fallback_on_no_ts);
+        return resolvePluginChainWithMask(preds.preset, mask, preds.allow_mtime_fallback_on_no_ts);
     }
     var chain = resolvePluginChain(
         preds.preset,
@@ -713,27 +682,15 @@ pub fn resolveChainForPredicates(preds: QueryPredicates) ResolvedPluginChain {
 
 pub const SourcePlanResult = struct {
     verdict: Verdict = .keep,
-    docker_since_sec: ?u64 = null,
-    docker_until_sec: ?u64 = null,
 };
 
 pub fn planSource(
     chain: *const ResolvedPluginChain,
     preds: QueryPredicates,
-    allow_docker_pushdown: bool,
 ) SourcePlanResult {
     var out = SourcePlanResult{};
     if (chain.has(.path_scope)) {
         if (path_scope.planSource(preds) == .skip) {
-            out.verdict = .skip;
-            return out;
-        }
-    }
-    if (chain.has(.line_time)) {
-        const lt_plan = line_time.planSource(preds, allow_docker_pushdown);
-        out.docker_since_sec = lt_plan.docker_since_sec;
-        out.docker_until_sec = lt_plan.docker_until_sec;
-        if (lt_plan.verdict == .skip) {
             out.verdict = .skip;
             return out;
         }
@@ -885,303 +842,6 @@ test {
     _ = line_time;
 }
 
-test "prefilter: catalog, presets, deterministic ordering, and cache signature invalidation" {
-    const catalog = getCatalog();
-    try std.testing.expectEqual(@as(usize, 7), catalog.len);
-    for (catalog, 1..) |entry, idx| {
-        try std.testing.expectEqual(entry.id.domain(), entry.domain);
-        if (idx < catalog.len) {
-            try std.testing.expect(entry.priority < catalog[idx].priority);
-        }
-    }
-
-    // Domain isolation guard: code preset ignores log-domain enable overrides; timeseries ignores code-domain enable overrides
-    const c_code_isolated = resolvePluginChain(.code, &.{ .filename_date, .time_bisect, .line_time }, null);
-    try std.testing.expect(!c_code_isolated.has(.filename_date));
-    try std.testing.expect(!c_code_isolated.has(.time_bisect));
-    try std.testing.expect(!c_code_isolated.has(.line_time));
-    try std.testing.expect(c_code_isolated.has(.mtime_window));
-
-    const c_ts_isolated = resolvePluginChain(.timeseries, &.{.mtime_window}, null);
-    try std.testing.expect(!c_ts_isolated.has(.mtime_window));
-    try std.testing.expect(c_ts_isolated.has(.time_bisect));
-
-    const c_auto = resolvePluginChain(.auto, null, null);
-    const c_ts = resolvePluginChain(.timeseries, null, null);
-    const c_code = resolvePluginChain(.code, null, null);
-    const c_raw = resolvePluginChain(.raw, null, null);
-
-    try std.testing.expect(c_auto.has(.path_scope));
-    try std.testing.expect(c_auto.has(.mtime_guard));
-    try std.testing.expect(!c_auto.has(.mtime_window));
-    try std.testing.expect(c_auto.allow_mtime_fallback_on_no_ts);
-    try std.testing.expect(c_auto.has(.time_bisect));
-    try std.testing.expect(c_auto.has(.line_time));
-
-    try std.testing.expect(!c_ts.has(.mtime_window));
-    try std.testing.expect(!c_ts.allow_mtime_fallback_on_no_ts);
-
-    try std.testing.expect(c_code.has(.mtime_window));
-    try std.testing.expect(!c_code.has(.filename_date));
-    try std.testing.expect(!c_code.has(.time_bisect));
-
-    try std.testing.expect(c_raw.has(.path_scope));
-    try std.testing.expect(c_raw.has(.line_time));
-    try std.testing.expect(!c_raw.has(.mtime_guard));
-    try std.testing.expect(!c_raw.has(.mtime_window));
-    try std.testing.expect(!c_raw.has(.sidecar_sketch));
-
-    // Cache signatures change across presets and overrides
-    try std.testing.expect(c_auto.signature != c_ts.signature);
-    try std.testing.expect(c_auto.signature != c_code.signature);
-    try std.testing.expect(c_auto.signature != c_raw.signature);
-
-    const c_auto_no_mtime_fb = resolvePluginChain(.auto, null, &.{.mtime_window});
-    try std.testing.expect(!c_auto_no_mtime_fb.allow_mtime_fallback_on_no_ts);
-    try std.testing.expect(c_auto_no_mtime_fb.signature != c_auto.signature);
-
-    const c_raw_with_sketch = resolvePluginChainFromNames("raw", &.{"sidecar_sketch"}, &.{});
-    try std.testing.expect(c_raw_with_sketch.has(.sidecar_sketch));
-    try std.testing.expect(c_raw_with_sketch.signature != c_raw.signature);
-}
-
-test "prefilter: active daily-append log (mtime=23:59, query=09:00..10:00) across auto vs code vs timeseries vs raw" {
-    const t_00 = line_time.testUtcNs(2026, 11, 18, 0, 0, 0, 0);
-    const t_09_00 = line_time.testUtcNs(2026, 11, 18, 9, 0, 0, 0);
-    const t_09_30 = line_time.testUtcNs(2026, 11, 18, 9, 30, 0, 0);
-    const t_10_00 = line_time.testUtcNs(2026, 11, 18, 10, 0, 0, 0);
-    const t_23_59 = line_time.testUtcNs(2026, 11, 18, 23, 59, 0, 0);
-
-    const daily_log =
-        "2026-11-18T00:05:00Z INFO midnight boot\n" ++
-        "2026-11-18T09:30:00Z ERROR target_morning_hit\n" ++
-        "    at Worker.handle(worker.zig:42)\n" ++
-        "2026-11-18T23:59:00Z INFO end of day\n";
-
-    const log_meta = FileMeta{
-        .rel_path = "logs/service.log",
-        .size_bytes = daily_log.len,
-        .mtime_ns = @intCast(t_23_59),
-        .inode = 101,
-        .dev = 1,
-    };
-    const code_meta = FileMeta{
-        .rel_path = "src/main.zig",
-        .size_bytes = 32,
-        .mtime_ns = @intCast(t_23_59),
-        .inode = 102,
-        .dev = 1,
-    };
-    const code_data = "pub fn main() void {\n    _ = 1;\n}\n";
-
-    // 1. .auto: daily_log MUST survive Stage 2, narrow in Stage 3, and match morning hit + stack trace in Stage 4;
-    //    meanwhile untimestamped code_meta (mtime=23:59) confirms unparsed_no_ts and falls back to mtime_window -> skip!
-    {
-        const preds = QueryPredicates{
-            .time_start_ns = t_09_00,
-            .time_end_ns = t_10_00,
-            .preset = .auto,
-        };
-        const chain = resolveChainForPredicates(preds);
-        try std.testing.expectEqual(Verdict.keep, pruneFile(&chain, log_meta, preds, null).verdict);
-        const w_log = narrowSliceWindow(&chain, daily_log, log_meta, preds, .{});
-        try std.testing.expectEqual(WindowStatus.narrowed, w_log.status);
-        const sub = daily_log[@intCast(w_log.start_byte)..@intCast(w_log.end_byte)];
-        try std.testing.expect(std.mem.indexOf(u8, sub, "target_morning_hit") != null);
-        try std.testing.expect(std.mem.indexOf(u8, sub, "Worker.handle") != null);
-
-        var lstate = LineState{};
-        try std.testing.expect(filterLine(&chain, "2026-11-18T09:30:00Z ERROR target_morning_hit", log_meta, preds, &lstate, .{}));
-        try std.testing.expect(filterLine(&chain, "    at Worker.handle(worker.zig:42)", log_meta, preds, &lstate, .{}));
-        try std.testing.expect(!filterLine(&chain, "2026-11-18T23:59:00Z INFO end of day", log_meta, preds, &lstate, .{}));
-
-        try std.testing.expectEqual(Verdict.keep, pruneFile(&chain, code_meta, preds, null).verdict);
-        const w_code = narrowSliceWindow(&chain, code_data, code_meta, preds, .{});
-        try std.testing.expectEqual(WindowStatus.empty_skip, w_code.status);
-    }
-
-    // 2. .code: Stage 2 mtime_window skips mtime=23:59 > 10:00 immediately
-    {
-        const preds = QueryPredicates{
-            .time_start_ns = t_09_00,
-            .time_end_ns = t_10_00,
-            .preset = .code,
-        };
-        const chain = resolveChainForPredicates(preds);
-        const d = pruneFile(&chain, log_meta, preds, null);
-        try std.testing.expectEqual(Verdict.skip, d.verdict);
-        try std.testing.expectEqual(PluginId.mtime_window, d.pruned_by.?);
-    }
-
-    // 3. .timeseries: daily_log survives & narrows; untimestamped file is NOT dropped by mtime_window
-    {
-        const preds = QueryPredicates{
-            .time_start_ns = t_09_00,
-            .time_end_ns = t_10_00,
-            .preset = .timeseries,
-        };
-        const chain = resolveChainForPredicates(preds);
-        try std.testing.expectEqual(Verdict.keep, pruneFile(&chain, log_meta, preds, null).verdict);
-        const w_log = narrowSliceWindow(&chain, daily_log, log_meta, preds, .{});
-        try std.testing.expectEqual(WindowStatus.narrowed, w_log.status);
-
-        const w_code = narrowSliceWindow(&chain, code_data, code_meta, preds, .{});
-        try std.testing.expectEqual(WindowStatus.unparsed_no_ts, w_code.status);
-    }
-
-    // 4. .raw: never prunes at Stage 2/3, full_scan + Stage 4 line filter
-    {
-        const preds = QueryPredicates{
-            .time_start_ns = t_09_00,
-            .time_end_ns = t_10_00,
-            .preset = .raw,
-        };
-        const chain = resolveChainForPredicates(preds);
-        try std.testing.expectEqual(Verdict.keep, pruneFile(&chain, log_meta, preds, null).verdict);
-        const w_log = narrowSliceWindow(&chain, daily_log, log_meta, preds, .{});
-        try std.testing.expectEqual(WindowStatus.full_scan, w_log.status);
-        var lstate = LineState{};
-        try std.testing.expect(!filterLine(&chain, "2026-11-18T00:05:00Z INFO midnight boot", log_meta, preds, &lstate, .{}));
-        try std.testing.expect(filterLine(&chain, "2026-11-18T09:30:00Z ERROR target_morning_hit", log_meta, preds, &lstate, .{}));
-    }
-
-    _ = t_00;
-    _ = t_09_30;
-}
-
-test "prefilter: Monotone Superset property verification against linear brute-force oracle" {
-    const gpa = std.testing.allocator;
-    var store = sidecar_sketch.SketchStore{};
-    defer store.deinit(gpa);
-
-    // Construct a rich multi-file corpus with:
-    // (a) ordered ISO-8601 + stack traces + KV JSON/logfmt lines
-    // (b) active daily log (mtime=23:59)
-    // (c) rotated filename app-2026-11-10.log (written today so mtime=23:59!)
-    // (d) non-monotonic clock jump log
-    // (e) untimestamped code file with mtime at 09:30
-    const t_09_00 = line_time.testUtcNs(2026, 11, 18, 9, 0, 0, 0);
-    const t_09_30 = line_time.testUtcNs(2026, 11, 18, 9, 30, 0, 0);
-    const t_10_00 = line_time.testUtcNs(2026, 11, 18, 10, 0, 0, 0);
-    const t_23_59 = line_time.testUtcNs(2026, 11, 18, 23, 59, 0, 0);
-
-    const CorpusItem = struct {
-        meta: FileMeta,
-        body: []const u8,
-        min_ts: ?u64 = null,
-        max_ts: ?u64 = null,
-        has_ts: bool = true,
-    };
-
-    const corpus = [_]CorpusItem{
-        .{
-            .meta = .{ .rel_path = "logs/api.log", .size_bytes = 0, .mtime_ns = @intCast(t_23_59), .inode = 1, .dev = 1 },
-            .body = "2026-11-18T08:50:00Z INFO target_alpha status=200\n" ++
-                "2026-11-18T09:15:00Z ERROR target_alpha status=503\n" ++
-                "    at Handler.serve(api.zig:99)\n" ++
-                "2026-11-18T09:45:00Z ERROR target_alpha status=500\n" ++
-                "2026-11-18T11:10:00Z INFO target_alpha status=200\n",
-            .min_ts = line_time.testUtcNs(2026, 11, 18, 8, 50, 0, 0),
-            .max_ts = line_time.testUtcNs(2026, 11, 18, 11, 10, 0, 0),
-        },
-        .{
-            .meta = .{ .rel_path = "logs/app-2026-11-10.log", .size_bytes = 0, .mtime_ns = @intCast(t_23_59), .inode = 2, .dev = 1 },
-            .body = "2026-11-10T09:15:00Z INFO target_alpha old_rotated\n",
-            .min_ts = line_time.testUtcNs(2026, 11, 10, 9, 15, 0, 0),
-            .max_ts = line_time.testUtcNs(2026, 11, 10, 9, 15, 0, 0),
-        },
-        .{
-            .meta = .{ .rel_path = "logs/skewed.log", .size_bytes = 0, .mtime_ns = @intCast(t_23_59), .inode = 3, .dev = 1 },
-            .body = "2026-11-18T12:00:00Z INFO target_alpha out_of_order_head\n" ++
-                "2026-11-18T09:20:00Z ERROR target_alpha out_of_order_mid\n" ++
-                "2026-11-18T13:00:00Z INFO target_alpha out_of_order_tail\n",
-            .min_ts = t_09_00,
-            .max_ts = line_time.testUtcNs(2026, 11, 18, 13, 0, 0, 0),
-        },
-        .{
-            .meta = .{ .rel_path = "docs/notes.txt", .size_bytes = 0, .mtime_ns = @intCast(t_09_30), .inode = 4, .dev = 1 },
-            .body = "plain target_alpha inside untimestamped note\n",
-            .has_ts = false,
-        },
-    };
-
-    // Populate sidecar sketches with full file content
-    for (corpus) |item| {
-        var m = item.meta;
-        m.size_bytes = item.body.len;
-        if (sidecar_sketch.SketchKey.fromFileMeta(m)) |k| {
-            var b = sidecar_sketch.TrigramBloom{};
-            b.addSlice(item.body);
-            store.upsert(k, .{
-                .bloom = b,
-                .has_bloom = true,
-                .has_timestamps = item.has_ts,
-                .has_ts_bounds = item.has_ts,
-                .min_ts_ns = item.min_ts orelse 0,
-                .max_ts_ns = item.max_ts orelse 0,
-            });
-        }
-    }
-
-    const presets = [_]Preset{ .auto, .timeseries, .raw };
-    for (presets) |preset| {
-        const preds = QueryPredicates{
-            .time_start_ns = t_09_00,
-            .time_end_ns = t_10_00,
-            .preset = preset,
-            .literal_anchors = &.{"target_alpha"},
-        };
-        const chain = resolveChainForPredicates(preds);
-
-        for (corpus) |item| {
-            var meta = item.meta;
-            meta.size_bytes = item.body.len;
-
-            // Oracle: full linear line scan
-            var oracle_kept: std.ArrayList([]const u8) = .empty;
-            defer oracle_kept.deinit(gpa);
-            {
-                var st = LineState{};
-                var it = std.mem.splitScalar(u8, item.body, '\n');
-                while (it.next()) |line| {
-                    if (line.len == 0) continue;
-                    if (line_time.filterLine(line, meta, preds, &st, .{})) {
-                        try oracle_kept.append(gpa, line);
-                    }
-                }
-            }
-
-            // Pipeline: Stage 2 -> Stage 3 -> Stage 4
-            var pipe_kept: std.ArrayList([]const u8) = .empty;
-            defer pipe_kept.deinit(gpa);
-            if (pruneFile(&chain, meta, preds, &store).verdict == .keep) {
-                const win = narrowSliceWindow(&chain, item.body, meta, preds, .{});
-                if (win.status != .empty_skip) {
-                    const sub = item.body[@intCast(win.start_byte)..@intCast(win.end_byte)];
-                    var st = LineState{ .sticky_format_id = win.sticky_format_id };
-                    var it = std.mem.splitScalar(u8, sub, '\n');
-                    while (it.next()) |line| {
-                        if (line.len == 0) continue;
-                        if (filterLine(&chain, line, meta, preds, &st, .{})) {
-                            try pipe_kept.append(gpa, line);
-                        }
-                    }
-                }
-            }
-
-            // Monotone Superset Law: every oracle-kept line MUST appear in pipe_kept (0 false negatives!)
-            for (oracle_kept.items) |expected_line| {
-                var found = false;
-                for (pipe_kept.items) |actual_line| {
-                    if (std.mem.eql(u8, expected_line, actual_line)) {
-                        found = true;
-                        break;
-                    }
-                }
-                try std.testing.expect(found);
-            }
-            // In fact, for these inputs pipeline and oracle match identically!
-            try std.testing.expectEqual(oracle_kept.items.len, pipe_kept.items.len);
-        }
-    }
+test {
+    _ = @import("prefilter_tests.zig");
 }

@@ -15,7 +15,6 @@
   import {
     AlertTriangle,
     Check,
-    Container,
     FileText,
     Folder,
     Plus,
@@ -49,7 +48,7 @@
     if (src.config?.timeFormat !== undefined && src.config?.timeFormat !== null) {
       return src.config.timeFormat.trim();
     }
-    return src.kind === 'docker' ? 'auto' : '';
+    return '';
   }
 
   function toggleEditFormat(src: DataSourceEntry) {
@@ -156,19 +155,23 @@
         {@const effectivePreset = resolveSourcePluginPreset(src)}
         {@const effectiveOverrides = resolveSourcePluginOverrides(src)}
         {@const customOverrides = hasPluginOverrides(effectiveOverrides)}
-        {@const hasCustomPrefilter = effectivePreset !== 'auto' || customOverrides}
+        {@const presetMeta = t.sourcePrefilterPresets[effectivePreset]}
+        {@const overrideBadge = customOverrides
+          ? t.sourcePrefilterCustomBadge(
+              effectiveOverrides.enable.length,
+              effectiveOverrides.disable.length
+            )
+          : ''}
         <div class="py-1.5">
           <div class={`flex min-h-12 items-center gap-3 ${src.enabled ? '' : 'opacity-60'}`}>
             <span
               class={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-secondary/65 ${
                 src.exists ? 'text-muted-foreground' : 'text-status'
               }`}
-              title={src.exists ? '' : src.kind === 'docker' ? t.missingDocker : t.missingPath}
+              title={src.exists ? '' : t.missingPath}
             >
               {#if !src.exists}
                 <AlertTriangle class="h-3.5 w-3.5" />
-              {:else if src.kind === 'docker'}
-                <Container class="h-3.5 w-3.5" />
               {:else if src.kind === 'file'}
                 <FileText class="h-3.5 w-3.5" />
               {:else}
@@ -179,21 +182,16 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="truncate font-medium text-foreground/95">@{src.name}</span>
-                {#if hasCustomPrefilter}
-                  {@const presetMeta = t.sourcePrefilterPresets[effectivePreset]}
-                  {@const overrideBadge = customOverrides
-                    ? t.sourcePrefilterCustomBadge(
-                        effectiveOverrides.enable.length,
-                        effectiveOverrides.disable.length
-                      )
-                    : ''}
-                  <span
-                    class="shrink-0 truncate rounded bg-secondary/75 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-border/60"
-                    title={presetMeta?.hint ?? effectivePreset}
-                  >
-                    {presetMeta?.label ?? effectivePreset}{overrideBadge ? ` ${overrideBadge}` : ''}
-                  </span>
-                {/if}
+                <span
+                  class={`shrink-0 truncate rounded px-1.5 py-0.5 font-mono text-[10px] ring-1 ring-inset ${
+                    effectivePreset === 'code'
+                      ? 'bg-primary/10 text-primary ring-primary/25'
+                      : 'bg-secondary/75 text-muted-foreground ring-border/60'
+                  }`}
+                  title={presetMeta?.hint ?? effectivePreset}
+                >
+                  {presetMeta?.label ?? effectivePreset}{overrideBadge ? ` ${overrideBadge}` : ''}
+                </span>
                 {#if hasCustomFormat}
                   <span
                     class="max-w-[140px] shrink-0 truncate rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10.5px] text-primary ring-1 ring-inset ring-primary/20"
@@ -217,7 +215,7 @@
               class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg cursor-pointer active:bg-secondary/80 ${
                 editingFormatId === src.id
                   ? 'bg-secondary text-foreground'
-                  : hasCustomFormat || hasCustomPrefilter
+                  : hasCustomFormat || customOverrides
                     ? 'text-primary hover:bg-secondary/70'
                     : 'text-muted-foreground/70 hover:bg-secondary/70 hover:text-foreground'
               }`}
@@ -255,7 +253,7 @@
                 preset={presetDraft}
                 overrides={pluginsDraft}
                 timeFormat={formatDraft}
-                defaultAutoTimeFormat={src.kind === 'docker' ? 'auto' : ''}
+                defaultAutoTimeFormat=""
                 onchange={(nextPreset, nextOverrides) => {
                   presetDraft = nextPreset;
                   pluginsDraft = nextOverrides;

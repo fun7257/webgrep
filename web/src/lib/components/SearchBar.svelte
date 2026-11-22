@@ -11,10 +11,8 @@
     type Suggestion,
     type Vocabulary,
   } from '$lib/suggest';
-  import SearchScopeTriggers from './search/SearchScopeTriggers.svelte';
   import SearchAttachedDropdown from './search/SearchAttachedDropdown.svelte';
   import ConditionChainBar from './search/ConditionChainBar.svelte';
-  import SourcePickerContent from './pickers/SourcePickerContent.svelte';
   import { Loader2, Plus, Search, X } from 'lucide-svelte';
 
   interface Props {
@@ -38,7 +36,6 @@
   let pointerFocusingInput = false;
 
   let searchBoxWrapEl = $state<HTMLDivElement | null>(null);
-  let timePickerWrapEl = $state<HTMLDivElement | null>(null);
 
   function cancelScheduledVocabulary() {
     if (vocabHandle === null) return;
@@ -157,7 +154,7 @@
       const s = ghostSuffix(firstWord.insert, wordCompletion.token.text);
       if (s) return s;
     }
-    if (workbench.steps.length === 0 && !workbench.draftExclude && !workbench.isRegex) {
+    if (workbench.steps.length === 0 && !workbench.isRegex) {
       return historyGhost(workbench.pattern, workbench.searchHistory);
     }
     return '';
@@ -178,9 +175,7 @@
   const hasOpenDropdown = $derived(
     focused && dropdownOpen && (dropdownItems.length > 0 || regexTip !== null)
   );
-  const hasAttachedPanel = $derived(
-    !workbench.timePickerOpen && (showSymbolBar || hasOpenDropdown)
-  );
+  const hasAttachedPanel = $derived(showSymbolBar || hasOpenDropdown);
 
   const placeholderText = $derived.by(() => {
     if (workbench.isRegex) return workbench.t.searchBar.placeholderRegex;
@@ -356,7 +351,6 @@
   }
 
   function preparePointerFocus() {
-    if (workbench.timePickerOpen) workbench.closeTimePicker();
     pointerFocusingInput = true;
     flushSync(() => {
       dropdownOpen = true;
@@ -366,11 +360,7 @@
 
   function isPillPaddingTarget(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
-    return !(
-      target === inputEl ||
-      target.closest('button') ||
-      timePickerWrapEl?.contains(target)
-    );
+    return !(target === inputEl || target.closest('button'));
   }
 
   function handlePillSurfacePointerDown(e: PointerEvent) {
@@ -387,7 +377,6 @@
   }
 
   function handleFocus() {
-    if (workbench.timePickerOpen) workbench.closeTimePicker();
     focused = true;
     if (pointerFocusingInput) {
       pointerFocusingInput = false;
@@ -406,18 +395,10 @@
 
   function handleWindowPointerDown(e: PointerEvent) {
     const target = e.target as Node;
-    if (workbench.timePickerOpen && timePickerWrapEl && !timePickerWrapEl.contains(target)) {
-      workbench.closeTimePicker();
-    }
     if (dropdownOpen && searchBoxWrapEl && !searchBoxWrapEl.contains(target)) {
       dropdownOpen = false;
       activeIdx = -1;
     }
-  }
-
-  function resetDropdownForPicker() {
-    dropdownOpen = false;
-    activeIdx = -1;
   }
 </script>
 
@@ -477,8 +458,8 @@
           </div>
         {/if}
 
-        <!-- Left Cluster: Search Icon + Embedded Scope Triggers + Optional +/- Mode -->
-        <div class="flex items-center gap-0.5 sm:gap-1.5 text-muted-foreground shrink-0">
+        <!-- Left Cluster: Search Icon + Optional +/- Draft Mode -->
+        <div class="flex items-center gap-1 sm:gap-1.5 text-muted-foreground shrink-0">
           {#if workbench.isSearching}
             <Loader2 class="h-4 w-4 animate-spin text-primary" />
           {:else}
@@ -488,7 +469,6 @@
               onmousedown={(e) => e.preventDefault()}
               onclick={() => {
                 dropdownOpen = false;
-                workbench.closeTimePicker();
                 workbench.submitSearch();
               }}
               title={workbench.t.searchBar.searchNowTitle}
@@ -502,12 +482,6 @@
               <Search class="h-4 w-4" />
             </button>
           {/if}
-
-          <SearchScopeTriggers
-            bind:timeWrapEl={timePickerWrapEl}
-            onBeforeOpenPicker={resetDropdownForPicker}
-            onFocusMainInput={() => inputEl?.focus()}
-          />
         </div>
 
         <!-- Pure Single-Text Search Input + Fish-Style Ghost Completion Overlay -->
@@ -612,12 +586,6 @@
 
     {#if workbench.steps.length > 0}
       <ConditionChainBar onFocusInput={() => inputEl?.focus()} onSyncCursor={syncCursorPos} />
-    {/if}
-
-    {#if hero && !showSymbolBar}
-      <div class="mt-4">
-        <SourcePickerContent inline onFocusMainInput={() => inputEl?.focus()} />
-      </div>
     {/if}
   </div>
 </div>

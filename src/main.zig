@@ -1,6 +1,5 @@
 const std = @import("std");
 const auth = @import("auth.zig");
-const docker_logs = @import("docker_logs.zig");
 const file_api = @import("file_api.zig");
 const mcp = @import("mcp.zig");
 const net_bind = @import("net_bind.zig");
@@ -62,8 +61,6 @@ pub fn main(init: std.process.Init) !void {
         data_dir_arg,
         home_dir_opt,
     );
-    registry.docker_host = init.environ_map.get("DOCKER_HOST");
-    registry.xdg_runtime_dir = init.environ_map.get("XDG_RUNTIME_DIR");
     defer registry.deinit(io);
 
     var mcp_service = try mcp.McpService.init(gpa, io, data_dir_arg, &registry);
@@ -98,7 +95,6 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = auth;
-    _ = docker_logs;
     _ = file_api;
     _ = mcp;
     _ = net_bind;

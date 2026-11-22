@@ -299,7 +299,7 @@ test "filename_date: rotated log formats, hourly pruning, compressed extensions,
     const preds = QueryPredicates{
         .time_start_ns = q_start,
         .time_end_ns = q_end,
-        .preset = .auto,
+        .preset = .timeseries,
     };
 
     // Disjoint rotated logs pruned BEFORE decompression

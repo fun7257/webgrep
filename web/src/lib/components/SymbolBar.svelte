@@ -26,19 +26,6 @@
   onpointerdown={keepFocus}
   class="flex items-center gap-1 px-2.5 py-1.5"
 >
-  {#if workbench.canExcludeDraft}
-    <button
-      type="button"
-      onclick={() => workbench.toggleDraftExclude()}
-      class={`${btn} ${
-        workbench.draftExclude
-          ? 'bg-status/15 text-status font-semibold'
-          : 'bg-primary/10 text-primary font-semibold'
-      }`}
-    >
-      {workbench.draftExclude ? '-' : '+'}
-    </button>
-  {/if}
   <button
     type="button"
     onclick={() => workbench.toggleRegexMode()}

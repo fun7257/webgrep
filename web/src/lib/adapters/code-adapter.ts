@@ -1,7 +1,5 @@
 import { splitFilePath } from '../format.ts';
-import { resolveSourcePluginPreset } from '../prefilter.ts';
-import type { DataSourceItem, HitItem } from '../types.ts';
-import { getCachedLogProbe } from './log-parser.ts';
+import type { HitItem } from '../types.ts';
 import type {
   CodeDirStat,
   CodeLangStat,
@@ -9,10 +7,9 @@ import type {
   CodeStreamStats,
   CodeVirtualItem,
   CodeVirtualLayout,
-  FastLogProbe,
   HeadlessAdapter,
-  ParsedPlainRecord,
-  PlainRowProbe,
+  LineRowProbe,
+  ParsedLineMeta,
   RowLayoutMetrics,
   RowMeasureContext,
 } from './types.ts';
@@ -115,19 +112,6 @@ const SPECIAL_FILENAME_LANGS: Record<string, CodeLanguageInfo> = {
   '.ignore': { id: 'ignore', label: 'Ignore', ext: '.ignore' },
 };
 
-const MANIFEST_JSON_FILENAMES = new Set<string>([
-  'package.json',
-  'package-lock.json',
-  'tsconfig.json',
-  'jsconfig.json',
-  'composer.json',
-  'deno.json',
-  'deno.jsonc',
-  'manifest.json',
-]);
-
-const JSON_LOG_EXTS = new Set<string>(['json', 'jsonl', 'ndjson']);
-
 export function detectCodeLanguage(filePath: string): CodeLanguageInfo | null {
   const { name, ext } = splitFilePath(filePath);
   const lowerName = name.toLowerCase();
@@ -135,24 +119,6 @@ export function detectCodeLanguage(filePath: string): CodeLanguageInfo | null {
   if (special) return special;
   if (!ext) return null;
   return CODE_EXT_MAP[ext] ?? null;
-}
-
-export function isCodeOrManifestPath(filePath: string): boolean {
-  return detectCodeLanguage(filePath) !== null;
-}
-
-/**
- * Returns true for dedicated source/config/manifest paths that are never treated as logs in `auto` mode
- * (non-manifest `.json`/`.jsonl`/`.ndjson` files are intentionally excluded so NDJSON log dumps can use `log`).
- */
-export function isCodeOnlyPath(filePath: string): boolean {
-  const { name, ext } = splitFilePath(filePath);
-  const lowerName = name.toLowerCase();
-  if (MANIFEST_JSON_FILENAMES.has(lowerName) || SPECIAL_FILENAME_LANGS[lowerName]) {
-    return true;
-  }
-  if (!ext || JSON_LOG_EXTS.has(ext)) return false;
-  return Boolean(CODE_EXT_MAP[ext]);
 }
 
 /**
@@ -172,34 +138,7 @@ export function extractCodeDirectory(filePath: string): string {
   return `${parts.slice(0, 2).join('/')}/`;
 }
 
-export function scoreCodeConfidence(
-  item: HitItem,
-  source?: DataSourceItem,
-  logProbe?: FastLogProbe
-): number {
-  const preset = source ? resolveSourcePluginPreset(source) : 'auto';
-  if (source) {
-    if (preset === 'code') return 0.95;
-    if (preset === 'timeseries' || preset === 'raw' || source.kind === 'docker') {
-      return 0;
-    }
-  }
-
-  const { name, ext } = splitFilePath(item.file);
-  const lowerName = name.toLowerCase();
-  if (MANIFEST_JSON_FILENAMES.has(lowerName) || SPECIAL_FILENAME_LANGS[lowerName]) {
-    return 0.9;
-  }
-
-  if (JSON_LOG_EXTS.has(ext)) {
-    const probe = logProbe ?? getCachedLogProbe(item);
-    if (probe.isLog) return 0;
-  }
-
-  return detectCodeLanguage(item.file) ? 0.9 : 0;
-}
-
-export function measureCodeHitRow(probe: PlainRowProbe, ctx: RowMeasureContext): RowLayoutMetrics {
+export function measureCodeHitRow(probe: LineRowProbe, ctx: RowMeasureContext): RowLayoutMetrics {
   const maxLines = ctx.wordWrap ? Math.max(1, Math.min(3, ctx.maxPreviewLines)) : 1;
   let lines = 1;
   if (maxLines > 1) {
@@ -217,10 +156,6 @@ export const codeAdapter: HeadlessAdapter = {
   order: 1,
   inspectContextLines: 12,
   supportsStructuredToggle: false,
-
-  classifyHit(item: HitItem, source?: DataSourceItem): number {
-    return scoreCodeConfidence(item, source, getCachedLogProbe(item));
-  },
 
   getFormattedCopyText(): string | null {
     return null;
@@ -337,8 +272,8 @@ export function buildCodeVirtualLayout(params: {
   activeDirFilter: string | null;
   ctx: RowMeasureContext;
   budget: number;
-  getPlainMeta: (item: HitItem) => ParsedPlainRecord;
-  getPlainProbe: (item: HitItem, budget: number) => PlainRowProbe;
+  getPlainMeta: (item: HitItem) => ParsedLineMeta;
+  getPlainProbe: (item: HitItem, budget: number) => LineRowProbe;
 }): CodeVirtualLayout {
   const {
     hits,

@@ -8,7 +8,6 @@
   import {
     AlertTriangle,
     ChevronRight,
-    Container,
     FileText,
     Folder,
     FolderOpen,
@@ -26,11 +25,10 @@
 
   const t = $derived(workbench.t.ui);
 
-  let kind = $state<'dir' | 'file' | 'docker'>('dir');
+  let kind = $state<'dir' | 'file'>('dir');
   let pathInput = $state('');
   let nameInput = $state('');
   let timeFormatInput = $state('');
-  let timeFormatTouched = $state(false);
   let timeFormatValid = $state(true);
   let pluginPresetInput = $state<PluginPreset>(DEFAULT_PLUGIN_PRESET);
   let pluginOverridesInput = $state<NormalizedPluginOverrides>({ enable: [], disable: [] });
@@ -45,14 +43,6 @@
 
   const derivedName = $derived.by(() => {
     const clean = pathInput.trim().replace(/\/+$/, '');
-    if (kind === 'docker') {
-      const sep = clean.indexOf('::');
-      if (sep !== -1) {
-        const target = clean.slice(sep + 2).trim();
-        if (target) return target;
-      }
-      return 'docker';
-    }
     if (!clean) return '';
     const parts = clean.split('/');
     return parts[parts.length - 1] || '';
@@ -70,43 +60,10 @@
     }, 60);
   }
 
-  function selectKind(next: 'dir' | 'file' | 'docker') {
+  function selectKind(next: 'dir' | 'file') {
     if (kind === next) return;
-    const prev = kind;
     kind = next;
     submitError = null;
-    if (next === 'docker') {
-      if (!timeFormatTouched && !timeFormatInput) {
-        timeFormatInput = 'auto';
-      }
-      const cur = pathInput.trim();
-      const isDockerEndpoint =
-        cur === 'auto' ||
-        cur.includes('::') ||
-        cur.startsWith('unix://') ||
-        cur.startsWith('tcp://') ||
-        cur.startsWith('http://') ||
-        cur.endsWith('.sock') ||
-        cur.includes('/containers');
-      if (cur && !isDockerEndpoint) {
-        pathInput = '';
-      }
-    } else if (prev === 'docker') {
-      if (!timeFormatTouched && timeFormatInput === 'auto') {
-        timeFormatInput = '';
-      }
-      const cur = pathInput.trim();
-      if (
-        cur === 'auto' ||
-        cur.includes('::') ||
-        cur.startsWith('unix://') ||
-        cur.startsWith('tcp://') ||
-        cur.startsWith('http://') ||
-        cur.endsWith('.sock')
-      ) {
-        pathInput = '';
-      }
-    }
     flushSync();
     queueSuggest(pathInput);
     pathEl?.focus({ preventScroll: true });
@@ -167,8 +124,7 @@
   }
 
   async function submit() {
-    const rawTrimmed = pathInput.trim();
-    const cleanPath = kind === 'docker' ? rawTrimmed || 'auto' : rawTrimmed;
+    const cleanPath = pathInput.trim();
     if (!cleanPath) {
       submitError = kind === 'file' ? t.pathRequiredFile : t.pathRequiredDir;
       return;
@@ -177,7 +133,7 @@
       submitError = t.sourceTimeCustomRequired;
       return;
     }
-    const finalName = (nameInput.trim() || derivedName || (kind === 'docker' ? 'docker' : 'project')).trim();
+    const finalName = (nameInput.trim() || derivedName || 'project').trim();
     submitting = true;
     submitError = null;
     try {
@@ -193,8 +149,7 @@
       });
       pathInput = '';
       nameInput = '';
-      timeFormatTouched = false;
-      timeFormatInput = kind === 'docker' ? 'auto' : '';
+      timeFormatInput = '';
       timeFormatValid = true;
       pluginPresetInput = DEFAULT_PLUGIN_PRESET;
       pluginOverridesInput = { enable: [], disable: [] };
@@ -218,16 +173,13 @@
       options={[
         { value: 'dir', label: t.dir, icon: Folder, title: t.kindDirDesc },
         { value: 'file', label: t.file, icon: FileText, title: t.kindFileDesc },
-        { value: 'docker', label: t.docker, icon: Container, title: t.kindDockerDesc },
       ]}
       onchange={selectKind}
     />
   </div>
 
   <div class="relative">
-      {#if kind === 'docker'}
-        <Container class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      {:else if kind === 'file'}
+      {#if kind === 'file'}
         <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
       {:else}
         <FolderOpen class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -242,12 +194,8 @@
         }}
         onfocus={() => queueSuggest(pathInput)}
         onkeydown={onPathKeydown}
-        title={kind === 'docker' ? t.dockerEndpoint : kind === 'file' ? t.filePath : t.dirPath}
-        placeholder={kind === 'docker'
-          ? t.dockerPlaceholder
-          : kind === 'file'
-            ? t.filePlaceholder
-            : t.dirPlaceholder}
+        title={kind === 'file' ? t.filePath : t.dirPath}
+        placeholder={kind === 'file' ? t.filePlaceholder : t.dirPlaceholder}
         spellcheck="false"
         autocomplete="off"
         class={`${inputCls} pl-9 pr-3`}
@@ -273,9 +221,7 @@
                 onclick={() => apply(entry, false)}
                 class="flex min-h-10 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs"
               >
-                {#if kind === 'docker' && !isDir}
-                  <Container class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                {:else if isDir}
+                {#if isDir}
                   <Folder class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 {:else}
                   <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -312,11 +258,9 @@
       title={t.nameOptional}
       placeholder={derivedName
         ? `${t.defaultNamePrefix}${derivedName}`
-        : kind === 'docker'
-          ? t.defaultDockerName
-          : kind === 'file'
-            ? t.defaultFileName
-            : t.defaultDirName}
+        : kind === 'file'
+          ? t.defaultFileName
+          : t.defaultDirName}
       spellcheck="false"
       class={`${inputCls} px-3`}
     />
@@ -325,13 +269,12 @@
       preset={pluginPresetInput}
       overrides={pluginOverridesInput}
       timeFormat={timeFormatInput}
-      defaultAutoTimeFormat={kind === 'docker' ? 'auto' : ''}
+      defaultAutoTimeFormat=""
       onchange={(nextPreset, nextOverrides) => {
         pluginPresetInput = nextPreset;
         pluginOverridesInput = nextOverrides;
       }}
       ontimeformatchange={(fmt, valid) => {
-        timeFormatTouched = true;
         timeFormatInput = fmt;
         timeFormatValid = valid;
       }}
@@ -352,7 +295,7 @@
 
   <button
     type="button"
-    disabled={submitting || (kind !== 'docker' && !pathInput.trim()) || !timeFormatValid}
+    disabled={submitting || !pathInput.trim() || !timeFormatValid}
     onclick={submit}
     title={t.addSource}
     aria-label={t.addSource}

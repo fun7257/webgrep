@@ -118,14 +118,7 @@ export function computeActiveSources(
 
 /** Determines whether a source resolves time filtering via line content timestamps. */
 export function isContentTimeSource(source: DataSourceItem): boolean {
-  const preset = resolveSourcePluginPreset(source);
-  if (preset === 'code') return false;
-  if (preset === 'timeseries') return true;
-  if (source.config?.timeFormat !== undefined && source.config?.timeFormat !== null) {
-    const tf = source.config.timeFormat.trim();
-    if (tf.length > 0) return true;
-  }
-  return source.kind === 'docker' || preset === 'auto';
+  return resolveSourcePluginPreset(source) !== 'code';
 }
 
 export function computeTimeBasisSummary(
@@ -153,46 +146,19 @@ export function computeSourceTimeFormatsSig(
     .join('|');
 }
 
-export function isDockerVirtualPath(
-  sources: ReadonlyArray<Pick<DataSourceItem, 'kind' | 'name'>>,
-  filePath: string
-): boolean {
-  const slash = filePath.indexOf('/');
-  if (slash <= 0) return false;
-  const prefix = filePath.slice(0, slash).toLowerCase();
-  return sources.some((s) => s.kind === 'docker' && s.name.toLowerCase() === prefix);
-}
-
-/** Checks whether step `idx` can flip between `+` (include) and `-` (exclude). */
-export function canToggleStepExcludeAt(
-  steps: readonly QueryStep[],
-  idx: number,
-  draftStep: QueryStep | null,
-  timePreset: TimePreset
-): boolean {
-  const target = steps[idx];
-  if (!target) return false;
-  if (target.exclude) return true;
-  const otherPositiveStep = steps.some((s, i) => i !== idx && !s.exclude);
-  const positiveDraft = Boolean(draftStep && !draftStep.exclude);
-  return otherPositiveStep || positiveDraft || timePreset !== '';
-}
-
 export interface EditedStepState {
   steps: QueryStep[];
   pattern: string;
   caseSensitive: boolean;
   wholeWord: boolean;
   isRegex: boolean;
-  draftExclude: boolean;
 }
 
 /** Pulls committed step `idx` back into draft state while preserving any existing draft. */
 export function buildEditedStepState(
   steps: readonly QueryStep[],
   idx: number,
-  draftStep: QueryStep | null,
-  timePreset: TimePreset
+  draftStep: QueryStep | null
 ): EditedStepState | null {
   if (idx < 0 || idx >= steps.length) return null;
   const target = steps[idx];
@@ -200,15 +166,12 @@ export function buildEditedStepState(
   if (draftStep && !remaining.some((s) => stepsEqual(s, draftStep))) {
     remaining.push(draftStep);
   }
-  const draftExclude =
-    target.exclude && (remaining.some((s) => !s.exclude) || timePreset !== '');
   return {
     steps: remaining,
     pattern: target.text,
     caseSensitive: target.caseSensitive,
     wholeWord: target.wholeWord,
     isRegex: target.isRegex,
-    draftExclude,
   };
 }
 

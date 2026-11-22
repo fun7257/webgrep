@@ -400,25 +400,3 @@ export function buildQueryCacheKeys(params: {
   const exactKey = `${baseKey}|max:${params.maxResults}`;
   return { baseKey, exactKey, historyId };
 }
-
-/**
- * Computes the aligned Docker HTTP `/logs?since=<sec>` preview offset so 1-based line numbers
- * from `/api/file` & `/api/context` match content-time auto-filtered Docker search hits 1:1.
- */
-export function computeDockerPreviewSinceSec(
-  sources: ReadonlyArray<Pick<DataSourceItem, 'kind' | 'name' | 'config'>>,
-  filePath: string,
-  timeStartMs: number
-): number | null {
-  if (!Number.isFinite(timeStartMs) || timeStartMs <= 0) return null;
-  const slash = filePath.indexOf('/');
-  if (slash <= 0) return null;
-  const prefix = filePath.slice(0, slash).toLowerCase();
-  const matched = sources.find((s) => s.kind === 'docker' && s.name.toLowerCase() === prefix);
-  if (!matched) return null;
-  const rawTf = matched.config?.timeFormat;
-  const effectiveTf = rawTf === undefined || rawTf === null ? 'auto' : rawTf.trim().toLowerCase();
-  if (effectiveTf !== 'auto') return null;
-  const sinceSec = Math.floor(timeStartMs / 1000) - 2;
-  return sinceSec > 0 ? sinceSec : null;
-}

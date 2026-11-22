@@ -9,8 +9,8 @@ import type {
 } from './types.ts';
 import { formatBytes } from './utils.ts';
 
-export const PLUGIN_PRESETS: readonly PluginPreset[] = ['auto', 'timeseries', 'code', 'raw'];
-export const DEFAULT_PLUGIN_PRESET: PluginPreset = 'auto';
+export const PLUGIN_PRESETS: readonly PluginPreset[] = ['timeseries', 'code'];
+export const DEFAULT_PLUGIN_PRESET: PluginPreset = 'timeseries';
 export const PLUGIN_DOMAINS: readonly PluginDomain[] = ['common', 'log', 'code'];
 
 const PLUGIN_PRESET_SET = new Set<string>(PLUGIN_PRESETS);
@@ -55,11 +55,6 @@ export interface PluginDomainGroup {
 
 export const DEFAULT_PRESET_CATALOG: readonly NormalizedPresetMetadata[] = [
   {
-    id: 'auto',
-    nameKey: 'prefilter.preset.auto',
-    description: 'Safe timestamp probing, filename/sketch pruning; never drops active daily logs',
-  },
-  {
     id: 'timeseries',
     nameKey: 'prefilter.preset.timeseries',
     description: 'Append logs & time-series (time bisect + filename date + sketch, no mtime upper bound)',
@@ -68,11 +63,6 @@ export const DEFAULT_PRESET_CATALOG: readonly NormalizedPresetMetadata[] = [
     id: 'code',
     nameKey: 'prefilter.preset.code',
     description: 'Source code & docs (mtime window + path scope + sketch)',
-  },
-  {
-    id: 'raw',
-    nameKey: 'prefilter.preset.raw',
-    description: 'Bypass heuristic prefilters for full raw scan',
   },
 ];
 
@@ -83,7 +73,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.path_scope',
     description: 'Zero-alloc path, extension, and glob pruning before scanning',
     stages: ['source_plan', 'file_prune'],
-    defaultPresets: ['auto', 'timeseries', 'code', 'raw'],
+    defaultPresets: ['timeseries', 'code'],
     costHint: 'O(1) path',
   },
   {
@@ -92,14 +82,14 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.mtime_guard',
     description: 'Lower-bound mtime guard (mtime < timeStart)',
     stages: ['file_prune'],
-    defaultPresets: ['auto', 'timeseries', 'code'],
+    defaultPresets: ['timeseries', 'code'],
     costHint: 'O(1) stat',
   },
   {
     id: 'mtime_window',
     domain: 'code',
     nameKey: 'plugins.mtime_window',
-    description: 'Upper-bound mtime window (active in code; fallback for timestamp-less files in auto)',
+    description: 'Upper-bound mtime window (active in code sources)',
     stages: ['file_prune'],
     defaultPresets: ['code'],
     costHint: 'O(1) stat',
@@ -110,7 +100,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.filename_date',
     description: 'Extract rotated filename dates/hours before decompression',
     stages: ['file_prune'],
-    defaultPresets: ['auto', 'timeseries'],
+    defaultPresets: ['timeseries'],
     costHint: 'O(1) name',
   },
   {
@@ -119,7 +109,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.sidecar_sketch',
     description: 'Observed timestamp bounds & ASCII trigram Bloom sketch in data_dir',
     stages: ['file_prune'],
-    defaultPresets: ['auto', 'timeseries', 'code'],
+    defaultPresets: ['timeseries', 'code'],
     costHint: 'O(1) bloom',
   },
   {
@@ -128,7 +118,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.time_bisect',
     description: 'Binary-search byte windows by parsed line timestamps',
     stages: ['window_narrow'],
-    defaultPresets: ['auto', 'timeseries'],
+    defaultPresets: ['timeseries'],
     costHint: 'O(log N) pread',
   },
   {
@@ -137,7 +127,7 @@ export const DEFAULT_PLUGIN_CATALOG: readonly NormalizedPluginMetadata[] = [
     nameKey: 'plugins.line_time',
     description: 'Line timestamp filter, stack-trace continuation binding, and KV pushdown',
     stages: ['source_plan', 'line_filter'],
-    defaultPresets: ['auto', 'timeseries', 'raw'],
+    defaultPresets: ['timeseries'],
     costHint: 'O(1) sticky',
   },
 ];
@@ -165,6 +155,7 @@ export function normalizePluginPreset(
 ): PluginPreset {
   if (typeof raw !== 'string') return fallback;
   const clean = raw.trim().toLowerCase();
+  if (clean === 'log') return 'timeseries';
   return PLUGIN_PRESET_SET.has(clean) ? (clean as PluginPreset) : fallback;
 }
 
@@ -367,10 +358,7 @@ export function isPluginApplicableToPreset(
   if (preset === 'code') {
     return plugin.domain === 'common' || plugin.domain === 'code';
   }
-  if (preset === 'timeseries') {
-    return plugin.domain === 'common' || plugin.domain === 'log';
-  }
-  return true;
+  return plugin.domain === 'common' || plugin.domain === 'log';
 }
 
 export function groupPluginsForPreset(
@@ -378,11 +366,7 @@ export function groupPluginsForPreset(
   preset: PluginPreset
 ): PluginDomainGroup[] {
   const order: readonly PluginDomain[] =
-    preset === 'code'
-      ? ['code', 'common']
-      : preset === 'timeseries'
-        ? ['log', 'common']
-        : ['log', 'code', 'common'];
+    preset === 'code' ? ['code', 'common'] : ['log', 'common'];
 
   const buckets = new Map<PluginDomain, NormalizedPluginMetadata[]>();
   for (const d of order) {

@@ -1,25 +1,23 @@
-import type { DataSourceItem, HitItem, ViewAdapterId, ViewModePreference } from '../types.ts';
+import { resolveSourcePluginPreset } from '../prefilter.ts';
+import type { DataSourceItem, HitItem, ViewAdapterId } from '../types.ts';
 import { codeAdapter } from './code-adapter.ts';
-import { logAdapter, parseLineLogMeta } from './log-adapter.ts';
+import {
+  estimateLineColumns,
+  logAdapter,
+  parseHitFileMeta,
+  parseLineLogMeta,
+} from './log-adapter.ts';
 import { getCachedLogProbe } from './log-parser.ts';
-import { estimatePlainColumns, parsePlainHitMeta, plainAdapter } from './plain-adapter.ts';
 import type {
-  AdapterBatchSummary,
   HeadlessAdapter,
+  LineRowProbe,
+  ParsedLineMeta,
   ParsedLogRecord,
-  ParsedPlainRecord,
-  PlainRowProbe,
 } from './types.ts';
 
 export const HEADLESS_ADAPTERS: readonly HeadlessAdapter[] = [
   logAdapter,
   codeAdapter,
-  plainAdapter,
-];
-
-export const VIEW_MODE_CYCLE_ORDER: readonly ViewModePreference[] = [
-  'auto',
-  ...HEADLESS_ADAPTERS.map((a) => a.id),
 ];
 
 const ADAPTER_BY_ID = new Map<ViewAdapterId, HeadlessAdapter>(
@@ -27,12 +25,12 @@ const ADAPTER_BY_ID = new Map<ViewAdapterId, HeadlessAdapter>(
 );
 
 export function getHeadlessAdapter(id: ViewAdapterId): HeadlessAdapter {
-  return ADAPTER_BY_ID.get(id) ?? plainAdapter;
+  return ADAPTER_BY_ID.get(id) ?? logAdapter;
 }
 
 const parsedLogCache = new WeakMap<HitItem, ParsedLogRecord>();
-const plainMetaCache = new WeakMap<HitItem, ParsedPlainRecord>();
-const plainProbeCache = new WeakMap<HitItem, PlainRowProbe>();
+const lineMetaCache = new WeakMap<HitItem, ParsedLineMeta>();
+const lineProbeCache = new WeakMap<HitItem, LineRowProbe>();
 
 export { getCachedLogProbe };
 
@@ -44,22 +42,22 @@ export function getCachedParsedLog(item: HitItem): ParsedLogRecord {
   return cached;
 }
 
-export function getCachedPlainMeta(item: HitItem): ParsedPlainRecord {
-  let cached = plainMetaCache.get(item);
+export function getCachedPlainMeta(item: HitItem): ParsedLineMeta {
+  let cached = lineMetaCache.get(item);
   if (cached) return cached;
-  cached = parsePlainHitMeta(item);
-  plainMetaCache.set(item, cached);
+  cached = parseHitFileMeta(item);
+  lineMetaCache.set(item, cached);
   return cached;
 }
 
-export function getCachedPlainProbe(item: HitItem, budget: number): PlainRowProbe {
-  let cached = plainProbeCache.get(item);
+export function getCachedPlainProbe(item: HitItem, budget: number): LineRowProbe {
+  let cached = lineProbeCache.get(item);
   if (cached && cached.budget === budget) return cached;
   cached = {
     budget,
-    cols: estimatePlainColumns(item.text, budget),
+    cols: estimateLineColumns(item.text, budget),
   };
-  plainProbeCache.set(item, cached);
+  lineProbeCache.set(item, cached);
   return cached;
 }
 
@@ -73,113 +71,62 @@ export function resolveSourceForHit(
 }
 
 /**
- * Classifies a single `HitItem` against all registered `HEADLESS_ADAPTERS`,
- * returning the highest-scoring adapter ID (ties broken by lowest `order`, fallback `'plain'`).
+ * Deterministic view mode bound directly to the DataSource configuration:
+ * `'code'` sources render in Codebase View; `'timeseries'` (log) sources render in Log View.
  */
-export function classifyHitBestAdapter(item: HitItem, source?: DataSourceItem): ViewAdapterId {
-  let bestId: ViewAdapterId = 'plain';
-  let bestScore = -1;
-  let bestOrder = Number.MAX_SAFE_INTEGER;
-
-  for (let i = 0; i < HEADLESS_ADAPTERS.length; i++) {
-    const adapter = HEADLESS_ADAPTERS[i];
-    const score = adapter.classifyHit(item, source);
-    if (score > bestScore || (score === bestScore && adapter.order < bestOrder)) {
-      bestScore = score;
-      bestOrder = adapter.order;
-      bestId = adapter.id;
-    }
-  }
-  return bestId;
+export function resolveSourceAdapterId(
+  source?: Pick<DataSourceItem, 'pluginPreset' | 'config'>
+): ViewAdapterId {
+  return source && resolveSourcePluginPreset(source) === 'code' ? 'code' : 'log';
 }
 
 export function resolveHitAdapterId(
-  item: HitItem,
-  source: DataSourceItem | undefined,
-  preference: ViewModePreference
+  _item: HitItem,
+  source?: Pick<DataSourceItem, 'pluginPreset' | 'config'>
 ): ViewAdapterId {
-  if (preference !== 'auto') {
-    return preference;
-  }
-  return classifyHitBestAdapter(item, source);
+  return resolveSourceAdapterId(source);
+}
+
+export function resolvePathAdapterId(
+  file: string,
+  sourceByName: ReadonlyMap<string, DataSourceItem>
+): ViewAdapterId {
+  return resolveSourceAdapterId(resolveSourceForHit(file, sourceByName));
 }
 
 /**
- * Samples up to 64 hits (first 32 + 32 strided across the tail) in bounded O(1) time
- * to determine the dominant surface adapter and whether mixed data shapes are present.
+ * Resolves the active result-list presentation adapter strictly from configured DataSource modes
+ * (zero content/extension auto-detection heuristics).
  */
-export function resolveBatchAdapterSummary(
+export function resolveBatchViewAdapter(
   hits: readonly HitItem[],
   sourceByName: ReadonlyMap<string, DataSourceItem>,
-  preference: ViewModePreference
-): AdapterBatchSummary {
-  const hLen = hits.length;
-  const sampleCounts: Record<ViewAdapterId, number> = {
-    log: 0,
-    code: 0,
-    plain: 0,
-  };
-
-  if (hLen === 0) {
-    return {
-      activeAdapter: preference === 'auto' ? 'plain' : preference,
-      detectedDominant: 'plain',
-      isMixed: false,
-      sampleCount: 0,
-      sampleCounts,
-    };
-  }
-
-  let lastFile = '';
-  let lastSrc: DataSourceItem | undefined = undefined;
-  let sampleCount = 0;
-
-  const tally = (it: HitItem) => {
-    if (it.file !== lastFile) {
-      lastFile = it.file;
-      lastSrc = resolveSourceForHit(lastFile, sourceByName);
-    }
-    const id = classifyHitBestAdapter(it, lastSrc);
-    sampleCounts[id] += 1;
-    sampleCount += 1;
-  };
-
-  const headEnd = Math.min(32, hLen);
-  for (let i = 0; i < headEnd; i++) {
-    tally(hits[i]);
-  }
-  if (hLen > 32) {
-    const tailLen = hLen - 32;
-    const tailSamples = Math.min(32, tailLen);
-    for (let s = 0; s < tailSamples; s++) {
-      const idx = 32 + Math.floor((s * tailLen) / tailSamples);
-      tally(hits[idx]);
-    }
-  }
-
-  let detectedDominant: ViewAdapterId = 'plain';
-  const structuredCount = sampleCounts.log + sampleCounts.code;
-  const topStructuredCount = Math.max(sampleCounts.log, sampleCounts.code);
-  if (
-    structuredCount > 0 &&
-    (topStructuredCount * 100 >= sampleCount * 35 || structuredCount * 2 >= sampleCount)
-  ) {
-    detectedDominant = sampleCounts.log >= sampleCounts.code ? 'log' : 'code';
-  }
-
-  return {
-    activeAdapter: preference === 'auto' ? detectedDominant : preference,
-    detectedDominant,
-    isMixed: sampleCounts.log > 0 && sampleCounts.code > 0,
-    sampleCount,
-    sampleCounts,
-  };
-}
-
-export function resolveDominantAdapter(
-  hits: readonly HitItem[],
-  sourceByName: ReadonlyMap<string, DataSourceItem>,
-  preference: ViewModePreference
+  activeSources: readonly DataSourceItem[] = []
 ): ViewAdapterId {
-  return resolveBatchAdapterSummary(hits, sourceByName, preference).activeAdapter;
+  if (hits.length > 0) {
+    let logCount = 0;
+    let codeCount = 0;
+    let lastFile = '';
+    let lastAdapter: ViewAdapterId = 'log';
+    const limit = Math.min(hits.length, 64);
+    for (let i = 0; i < limit; i++) {
+      const file = hits[i].file;
+      if (file !== lastFile) {
+        lastFile = file;
+        lastAdapter = resolvePathAdapterId(file, sourceByName);
+      }
+      if (lastAdapter === 'code') codeCount++;
+      else logCount++;
+    }
+    return codeCount > logCount ? 'code' : 'log';
+  }
+
+  if (activeSources.length > 0) {
+    let codeCount = 0;
+    for (const src of activeSources) {
+      if (resolveSourceAdapterId(src) === 'code') codeCount++;
+    }
+    if (codeCount === activeSources.length) return 'code';
+  }
+  return 'log';
 }

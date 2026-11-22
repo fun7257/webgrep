@@ -20,13 +20,12 @@ import type {
   TimePreset,
   TimePreviewResponse,
   ViewAdapterId,
-  ViewModePreference,
   WsIncomingMessage,
 } from './types';
 import {
   getHeadlessAdapter,
-  resolveBatchAdapterSummary,
-  type AdapterBatchSummary,
+  resolveBatchViewAdapter,
+  resolvePathAdapterId,
 } from './adapters/index.ts';
 import { messages, type Locale } from './i18n';
 import { DEFAULT_MCP_MAX_LOGS, clampMcpMaxLogs } from './mcp';
@@ -87,7 +86,6 @@ import {
   type PersistedSettings,
 } from './state/persistence';
 import {
-  computeDockerPreviewSinceSec,
   fetchAuthStatus,
   postAuthLogin,
   postAuthLogout,
@@ -121,10 +119,8 @@ import {
   buildEditedStepState,
   buildSearchRequestPlan,
   buildWorkbenchShareUrl,
-  canToggleStepExcludeAt,
   computeActiveSources,
   computeTimeBasisSummary,
-  isDockerVirtualPath,
   normalizeScopeSourceLists,
   resolveSourceIdOrName,
   sameSourceList,
@@ -222,7 +218,6 @@ class WorkbenchState {
   caseSensitive = $state<boolean>(false);
   wholeWord = $state<boolean>(false);
   isRegex = $state<boolean>(false);
-  draftExclude = $state<boolean>(false);
   scope = $state<ScopeFilter>({
     sources: [],
     excludedSources: [],
@@ -281,7 +276,7 @@ class WorkbenchState {
   addSourceModalOpen = $state<boolean>(false);
   drawerPanel = $state<DrawerPanelId | null>(null);
   sourceAddOpen = $state<boolean>(false);
-  timePickerOpen = $state<boolean>(false);
+  mobileScopeOpen = $state<boolean>(false);
   rightDrawerOpen = $derived<boolean>(this.drawerPanel !== null);
   settingsOpen = $derived<boolean>(this.drawerPanel === 'settings');
   sourcesDrawerOpen = $derived<boolean>(this.drawerPanel === 'sources');
@@ -337,6 +332,14 @@ class WorkbenchState {
   paletteOpen = $state<boolean>(false);
   detailOpen = $state<boolean>(false);
   isCompact = $state<boolean>(false);
+  scopeSidebarOpen = $derived<boolean>(
+    this.isCompact ? this.mobileScopeOpen : this.leftSidebarOpen
+  );
+  hasActiveScope = $derived<boolean>(
+    this.scope.timePreset !== '' ||
+      this.scope.sources.length > 0 ||
+      (this.scope.excludedSources?.length ?? 0) > 0
+  );
   isTouch = $state<boolean>(false);
   insertToken: ((token: string) => void) | null = null;
   codeFontSize = $state<number>(13.5);
@@ -346,13 +349,20 @@ class WorkbenchState {
   contextStepLines = $state<number>(DEFAULT_CONTEXT_STEP_LINES);
   contextAutoLoadPace = $state<ContextAutoLoadPace>(DEFAULT_CONTEXT_AUTO_LOAD_PACE);
   resultDensity = $state<'compact' | 'comfortable'>('comfortable');
-  viewMode = $state<ViewModePreference>('auto');
-  adapterBatchSummary = $derived<AdapterBatchSummary>(
-    resolveBatchAdapterSummary(this.flatHits, this.sourceByName, this.viewMode)
+  activeViewAdapter = $derived<ViewAdapterId>(
+    resolveBatchViewAdapter(
+      this.flatHits,
+      this.sourceByName,
+      computeActiveSources(this.sources, this.scope)
+    )
   );
-  activeViewAdapter = $derived<ViewAdapterId>(this.adapterBatchSummary.activeAdapter);
+  activeInspectorAdapter = $derived<ViewAdapterId>(
+    this.inspectedPath
+      ? resolvePathAdapterId(this.inspectedPath, this.sourceByName)
+      : this.activeViewAdapter
+  );
   activeInspectContextLines = $derived<number>(
-    getHeadlessAdapter(this.activeViewAdapter).inspectContextLines
+    getHeadlessAdapter(this.activeInspectorAdapter).inspectContextLines
   );
   collapsedFilesSet = $derived.by(() => {
     const set = new Set<string>();
@@ -385,7 +395,7 @@ class WorkbenchState {
     this.pattern.trim().length > 0
       ? normalizeStep({
           text: this.pattern,
-          exclude: this.draftExclude,
+          exclude: false,
           caseSensitive: this.caseSensitive,
           wholeWord: this.wholeWord,
           isRegex: this.isRegex,
@@ -398,11 +408,6 @@ class WorkbenchState {
   primaryPattern = $derived<string>(this.compiledQuery.primaryPattern);
   contains = $derived<string[]>(this.compiledQuery.contains);
   excludes = $derived<string[]>(this.compiledQuery.excludes);
-  canExcludeDraft = $derived<boolean>(
-    this.steps.some((s) => !s.exclude) ||
-      this.scope.timePreset !== '' ||
-      this.draftExclude
-  );
   hasAnyQueryInput = $derived<boolean>(
     this.steps.length > 0 ||
       this.pattern.trim().length > 0 ||
@@ -476,11 +481,11 @@ class WorkbenchState {
     void this.bootstrapAuth();
   }
 
-  // Drawer & Popover Coordination
+  // Drawer & Sidebar Coordination
   private openDrawerPanel(panel: DrawerPanelId, expandAdd = false) {
     this.abortContextFetch();
     this.paletteOpen = false;
-    this.timePickerOpen = false;
+    this.mobileScopeOpen = false;
     this.sourceAddOpen = expandAdd;
     this.drawerPanel = panel;
   }
@@ -502,22 +507,34 @@ class WorkbenchState {
     this.openDrawerPanel('settings');
   }
 
+  toggleScopeSidebar() {
+    if (this.isCompact) {
+      this.mobileScopeOpen = !this.mobileScopeOpen;
+      if (this.mobileScopeOpen) {
+        this.paletteOpen = false;
+        this.closeRightDrawer();
+      }
+    } else {
+      this.leftSidebarOpen = !this.leftSidebarOpen;
+    }
+  }
+
+  closeMobileScope() {
+    this.mobileScopeOpen = false;
+  }
+
   openTimePicker() {
     this.paletteOpen = false;
     this.closeRightDrawer();
-    this.timePickerOpen = true;
+    if (this.isCompact) {
+      this.mobileScopeOpen = true;
+    } else {
+      this.leftSidebarOpen = true;
+    }
   }
 
   closeTimePicker() {
-    this.timePickerOpen = false;
-  }
-
-  toggleTimePicker() {
-    if (this.timePickerOpen) {
-      this.closeTimePicker();
-    } else {
-      this.openTimePicker();
-    }
+    this.mobileScopeOpen = false;
   }
 
   closeSettings() {
@@ -584,7 +601,7 @@ class WorkbenchState {
     }
     this.closeRightDrawer();
     this.paletteOpen = false;
-    this.timePickerOpen = false;
+    this.mobileScopeOpen = false;
     this.clearSearch();
     this.wsTransport.closeForLock();
     this.invalidateCaches();
@@ -788,7 +805,6 @@ class WorkbenchState {
       codeFontSize: this.codeFontSize,
       wordWrap: this.wordWrap,
       resultDensity: this.resultDensity,
-      viewMode: this.viewMode,
     };
   }
 
@@ -812,27 +828,6 @@ class WorkbenchState {
     this.codeFontSize = loaded.codeFontSize;
     this.wordWrap = loaded.wordWrap;
     this.resultDensity = loaded.resultDensity;
-    this.viewMode = loaded.viewMode;
-  }
-
-  setViewMode(mode: ViewModePreference) {
-    if (this.viewMode === mode) return;
-    this.viewMode = mode;
-    this.saveSettings();
-    if (this.inspectedPath && this.inspectedLine > 0) {
-      const nextCtxLines = getHeadlessAdapter(this.activeViewAdapter).inspectContextLines;
-      const loadedCount =
-        this.inspectedFile?.path === this.inspectedPath ? this.inspectedFile.lines.length : 0;
-      if (nextCtxLines > 0 && loadedCount <= 1) {
-        void this.inspectFileAtLine(
-          this.inspectedPath,
-          this.inspectedLine,
-          false,
-          this.inspectedHit?.byteOffset,
-          nextCtxLines
-        );
-      }
-    }
   }
 
   setTenant(nextTenant: string) {
@@ -867,7 +862,6 @@ class WorkbenchState {
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
-    this.viewMode = 'auto';
     this.saveSettings();
     if (this.hasSearchedOnce && this.hasExecutableQuery) {
       this.executeSearch({ forceRefresh: false });
@@ -1103,18 +1097,11 @@ class WorkbenchState {
     this.isRegex = !this.isRegex;
   }
 
-  toggleDraftExclude() {
-    if (this.canExcludeDraft) {
-      this.draftExclude = !this.draftExclude;
-    }
-  }
-
   private resetDraft() {
     this.pattern = '';
     this.caseSensitive = false;
     this.wholeWord = false;
     this.isRegex = false;
-    this.draftExclude = false;
   }
 
   private applyDraftStep(step: QueryStep | null) {
@@ -1126,7 +1113,6 @@ class WorkbenchState {
     this.caseSensitive = step.caseSensitive;
     this.wholeWord = step.wholeWord;
     this.isRegex = step.isRegex;
-    this.draftExclude = step.exclude;
   }
 
   private clearToIdle() {
@@ -1160,29 +1146,14 @@ class WorkbenchState {
     return true;
   }
 
-  canToggleStepExclude(idx: number): boolean {
-    return canToggleStepExcludeAt(this.steps, idx, this.draftStep, this.scope.timePreset);
-  }
-
-  toggleStepExclude(idx: number) {
-    if (!this.canToggleStepExclude(idx)) return;
-    const next = this.steps.slice();
-    next[idx] = { ...next[idx], exclude: !next[idx].exclude };
-    this.steps = next;
-    if (this.hasExecutableQuery) {
-      this.executeSearch({ forceRefresh: false, recordInHistory: true });
-    }
-  }
-
   editStepInSearchBox(idx: number) {
-    const next = buildEditedStepState(this.steps, idx, this.draftStep, this.scope.timePreset);
+    const next = buildEditedStepState(this.steps, idx, this.draftStep);
     if (!next) return;
     this.steps = next.steps;
     this.pattern = next.pattern;
     this.caseSensitive = next.caseSensitive;
     this.wholeWord = next.wholeWord;
     this.isRegex = next.isRegex;
-    this.draftExclude = next.draftExclude;
   }
 
   removeStep(idx: number) {
@@ -1434,10 +1405,6 @@ class WorkbenchState {
     this.displayedTimeStartMs = 0;
   }
 
-  private hasActiveDockerSource(): boolean {
-    return computeActiveSources(this.sources, this.scope).some((s) => s.kind === 'docker');
-  }
-
   getEffectiveTimeBasisSummary(): { contentCount: number; mtimeCount: number } {
     return computeTimeBasisSummary(computeActiveSources(this.sources, this.scope));
   }
@@ -1459,7 +1426,6 @@ class WorkbenchState {
   }
 
   private putL0Entry(meta: InflightCacheMeta) {
-    if (this.hasActiveDockerSource()) return;
     this.l0Store.put(meta, {
       fileGroups: this.fileGroups,
       flatHits: this.flatHits,
@@ -1554,7 +1520,7 @@ class WorkbenchState {
       this.recordHistory(plan.keys.historyId);
     }
 
-    if (!opts.forceRefresh && !this.hasActiveDockerSource() && !opts.replayTimeRange) {
+    if (!opts.forceRefresh && !opts.replayTimeRange) {
       const l0Hit = this.l0Store.findValid(
         plan.keys.exactKey,
         plan.keys.baseKey,
@@ -1852,8 +1818,6 @@ class WorkbenchState {
   ): Promise<FileResponse> {
     return requestFileWindow(this.apiFetcher, {
       tenant: this.tenant,
-      sources: this.sources,
-      displayedTimeStartMs: this.displayedTimeStartMs,
       filePath,
       ...opts,
       signal,
@@ -1866,7 +1830,7 @@ class WorkbenchState {
     const anchor = Math.max(1, line ?? (this.inspectedHit?.line ?? this.inspectedLine));
 
     this.paletteOpen = false;
-    this.timePickerOpen = false;
+    this.mobileScopeOpen = false;
     this.sourceAddOpen = false;
     this.drawerPanel = 'context';
 
@@ -2036,14 +2000,7 @@ class WorkbenchState {
       this.inspectedHit = null;
     }
 
-    const cacheKey = buildFileContextCacheKey(
-      this.tenant,
-      filePath,
-      targetLine,
-      isDockerVirtualPath(this.sources, filePath) ? this.searchCount : null,
-      computeDockerPreviewSinceSec(this.sources, filePath, this.displayedTimeStartMs),
-      ctx
-    );
+    const cacheKey = buildFileContextCacheKey(this.tenant, filePath, targetLine, ctx);
 
     if (forceOpen) {
       this.detailOpen = true;

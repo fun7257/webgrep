@@ -6,12 +6,11 @@
     Database,
     Keyboard,
     Lock,
+    PanelLeft,
     SlidersHorizontal,
-    Wifi,
-    WifiOff,
   } from 'lucide-svelte';
 
-  type HeaderTarget = 'sources' | 'mcp' | 'shortcuts' | 'settings';
+  type HeaderTarget = 'sidebar' | 'sources' | 'mcp' | 'shortcuts' | 'settings';
 
   const hasMissingSource = $derived(
     workbench.sourcesLoaded &&
@@ -27,7 +26,9 @@
   let btnPickedOnDown: HeaderTarget | null = null;
 
   function togglePanel(target: HeaderTarget) {
-    if (target === 'sources') {
+    if (target === 'sidebar') {
+      workbench.toggleScopeSidebar();
+    } else if (target === 'sources') {
       if (workbench.sourcesDrawerOpen) workbench.closeRightDrawer();
       else workbench.openSourcesDrawer(false);
     } else if (target === 'mcp') {
@@ -63,25 +64,21 @@
   class="pt-safe flex shrink-0 items-center justify-between bg-background px-3 md:px-6 select-none"
 >
   <div class="flex h-11 items-center w-full justify-between">
-    <!-- Left: connection status -->
-    {#if !workbench.wsDegraded}
-      <span
-        class="flex h-8 w-8 items-center justify-center text-muted-foreground/70"
-        title={workbench.t.header.connected}
-      >
-        <Wifi class="h-3.5 w-3.5" />
-      </span>
-    {:else}
-      <button
-        type="button"
-        onclick={() => workbench.connectWebSocket()}
-        class={`${iconBtn} text-status hover:bg-secondary/60`}
-        title={workbench.t.header.reconnectTitle}
-        aria-label={workbench.t.header.reconnect}
-      >
-        <WifiOff class="h-3.5 w-3.5 animate-pulse" />
-      </button>
-    {/if}
+    <!-- Left: scope sidebar toggle -->
+    <button
+      type="button"
+      title={workbench.t.header.toggleSidebar}
+      aria-label={workbench.t.header.toggleSidebar}
+      aria-expanded={workbench.scopeSidebarOpen}
+      onpointerdown={(e) => onBtnPointerDown('sidebar', e)}
+      onclick={(e) => onBtnClick('sidebar', e)}
+      class={`${iconBtn} ${workbench.scopeSidebarOpen ? activeBtn : idleBtn}`}
+    >
+      <PanelLeft class="h-3.5 w-3.5" />
+      {#if !workbench.scopeSidebarOpen && workbench.hasActiveScope}
+        <span class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary"></span>
+      {/if}
+    </button>
 
     <!-- Right: standalone top-level menus (数据源 · MCP · 快捷键说明 · 设置) -->
     <div class="flex items-center gap-1">

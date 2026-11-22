@@ -17,7 +17,181 @@ export interface StructuredAnalysis {
 }
 
 /**
- * Recursively unwraps nested JSON strings (e.g. Docker `"log":"{\"level\":\"error\"}"`)
+ * Attempts to repair and parse a JSON object/array that was truncated mid-stream
+ * (e.g. by a logger's 4 KiB / 5 KiB line cap), closing dangling strings, incomplete
+ * escapes/primitives, trailing commas/colons, and unclosed `{`/`[` containers.
+ */
+export function tryParseTruncatedJson(raw: string): unknown | undefined {
+  const s = raw.trimStart();
+  if (s.length < 4) return undefined;
+  const first = s[0];
+  if (first !== '{' && first !== '[') return undefined;
+
+  // Quick structural sanity check on the first non-whitespace char after `{` / `[`
+  let probe = 1;
+  while (probe < s.length && (s[probe] === ' ' || s[probe] === '\t' || s[probe] === '\r' || s[probe] === '\n')) {
+    probe++;
+  }
+  if (probe >= s.length) return undefined;
+  const second = s[probe];
+  if (first === '{' && second !== '"' && second !== '}') return undefined;
+  if (
+    first === '[' &&
+    second !== '"' &&
+    second !== '{' &&
+    second !== '[' &&
+    second !== '-' &&
+    second !== 't' &&
+    second !== 'f' &&
+    second !== 'n' &&
+    second !== ']' &&
+    (second < '0' || second > '9')
+  ) {
+    return undefined;
+  }
+
+  const stack: ('{' | '[')[] = [];
+  let inString = false;
+  let escaped = false;
+  // Tracks whether the current/just-closed string is an object property key
+  let expectKeyInObj = false;
+  let currentStringIsKey = false;
+  let lastStructural: '' | '{' | '[' | '}' | ']' | ',' | ':' | 'val' = '';
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+        lastStructural = 'val';
+        if (currentStringIsKey) {
+          currentStringIsKey = false;
+          expectKeyInObj = false;
+        }
+      }
+      continue;
+    }
+
+    if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') continue;
+
+    if (ch === '"') {
+      inString = true;
+      escaped = false;
+      currentStringIsKey = expectKeyInObj && stack.length > 0 && stack[stack.length - 1] === '{';
+    } else if (ch === '{') {
+      stack.push('{');
+      expectKeyInObj = true;
+      lastStructural = '{';
+    } else if (ch === '[') {
+      stack.push('[');
+      expectKeyInObj = false;
+      lastStructural = '[';
+    } else if (ch === '}') {
+      if (stack.length === 0 || stack[stack.length - 1] !== '{') return undefined;
+      stack.pop();
+      expectKeyInObj = false;
+      lastStructural = '}';
+    } else if (ch === ']') {
+      if (stack.length === 0 || stack[stack.length - 1] !== '[') return undefined;
+      stack.pop();
+      expectKeyInObj = false;
+      lastStructural = ']';
+    } else if (ch === ':') {
+      expectKeyInObj = false;
+      lastStructural = ':';
+    } else if (ch === ',') {
+      expectKeyInObj = stack.length > 0 && stack[stack.length - 1] === '{';
+      lastStructural = ',';
+    } else {
+      lastStructural = 'val';
+    }
+  }
+
+  // If already balanced and outside string, regular JSON.parse would have handled it
+  if (!inString && stack.length === 0) return undefined;
+
+  let repaired = s;
+  if (inString) {
+    // Strip dangling trailing backslash or incomplete \uXXXX escape before closing quote
+    if (escaped) {
+      repaired = repaired.slice(0, -1);
+    } else {
+      const uMatch = repaired.match(/\\u[0-9a-fA-F]{0,3}$/);
+      if (uMatch) {
+        repaired = repaired.slice(0, repaired.length - uMatch[0].length);
+      }
+    }
+    repaired += '"';
+    if (currentStringIsKey) {
+      repaired += ':null';
+    }
+  } else {
+    repaired = repaired.trimEnd();
+    if (lastStructural === ',') {
+      repaired = repaired.slice(0, -1);
+    } else if (lastStructural === ':') {
+      repaired += 'null';
+    } else if (lastStructural === 'val') {
+      // Complete truncated boolean/null literal or trim incomplete numeric exponent/decimal
+      const tailWord = repaired.match(/([a-zA-Z]+)$/);
+      if (tailWord) {
+        const w = tailWord[1];
+        if (w !== 'true' && w !== 'false' && w !== 'null') {
+          if ('true'.startsWith(w)) {
+            repaired += 'true'.slice(w.length);
+          } else if ('false'.startsWith(w)) {
+            repaired += 'false'.slice(w.length);
+          } else if ('null'.startsWith(w)) {
+            repaired += 'null'.slice(w.length);
+          }
+        }
+      } else if (/(?:[eE][+-]?|\.)$/.test(repaired)) {
+        repaired = repaired.replace(/(?:[eE][+-]?|\.)$/, '');
+      } else if (/[:,[\s]-$/.test(repaired)) {
+        repaired = repaired.slice(0, -1) + 'null';
+      }
+      // If an object key string closed right at EOF without `:`, complete with `:null`
+      if (
+        stack.length > 0 &&
+        stack[stack.length - 1] === '{' &&
+        repaired.endsWith('"')
+      ) {
+        // Check if this string is a key (preceded by `{` or `,`)
+        // Simple & exact: try parsing with closing brackets first, and if that fails try `:null`
+      }
+    }
+  }
+
+  let closing = '';
+  for (let i = stack.length - 1; i >= 0; i--) {
+    closing += stack[i] === '{' ? '}' : ']';
+  }
+
+  const candidates = [repaired + closing];
+  if (!inString && stack.length > 0 && stack[stack.length - 1] === '{' && repaired.endsWith('"')) {
+    candidates.push(repaired + ':null' + closing);
+  }
+
+  for (const cand of candidates) {
+    try {
+      const parsed = JSON.parse(preserveLargeJsonIntegers(cand));
+      if (typeof parsed === 'object' && parsed !== null) {
+        const count = Array.isArray(parsed) ? parsed.length : Object.keys(parsed).length;
+        if (count > 0) return parsed;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Recursively unwraps nested JSON strings (e.g. `"log":"{\"level\":\"error\"}"`)
  * and decodes `\uXXXX` / `%XX` inside JSON string values.
  */
 function deepHumanizeJsonValue(val: unknown, depth = 0): unknown {
@@ -34,7 +208,13 @@ function deepHumanizeJsonValue(val: unknown, depth = 0): unknown {
           return deepHumanizeJsonValue(inner, depth + 1);
         }
       } catch {
-        // keep as string
+        // fall through to truncated repair check
+      }
+    }
+    if (trimmed.startsWith('{"') || trimmed.startsWith('[{')) {
+      const repairedInner = tryParseTruncatedJson(trimmed);
+      if (repairedInner !== undefined) {
+        return deepHumanizeJsonValue(repairedInner, depth + 1);
       }
     }
     return decodeHumanEscapes(val);
@@ -93,31 +273,48 @@ function computeStructuredAnalysis(text: string): StructuredAnalysis {
   const trimmed = bodyText.trim();
   const charCount = text.length;
 
-  // 1. Direct JSON object or array
-  if (
-    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-    (trimmed.startsWith('[') && trimmed.endsWith(']'))
-  ) {
-    try {
-      const parsed = JSON.parse(preserveLargeJsonIntegers(trimmed));
-      const humanized = deepHumanizeJsonValue(parsed);
+  // 1. Direct JSON object or array (complete or truncated mid-stream)
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    const isClosed =
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'));
+    if (isClosed) {
+      try {
+        const parsed = JSON.parse(preserveLargeJsonIntegers(trimmed));
+        const humanized = deepHumanizeJsonValue(parsed);
+        const pretty = JSON.stringify(humanized, null, 2);
+        return {
+          kind: 'json',
+          jsonValue: humanized,
+          timeHint,
+          formatBadge: 'JSON',
+          prefix: tsHeader || undefined,
+          bodyFormattedText: pretty,
+          formattedText: tsHeader ? `${tsHeader}\n\n${pretty}` : pretty,
+          charCount,
+        };
+      } catch {
+        // fall through to truncated repair check
+      }
+    }
+    const repaired = tryParseTruncatedJson(trimmed);
+    if (repaired !== undefined) {
+      const humanized = deepHumanizeJsonValue(repaired);
       const pretty = JSON.stringify(humanized, null, 2);
       return {
         kind: 'json',
         jsonValue: humanized,
         timeHint,
-        formatBadge: 'JSON',
+        formatBadge: 'JSON (truncated)',
         prefix: tsHeader || undefined,
         bodyFormattedText: pretty,
         formattedText: tsHeader ? `${tsHeader}\n\n${pretty}` : pretty,
         charCount,
       };
-    } catch {
-      // fall through
     }
   }
 
-  // 2. Embedded JSON inside a line
+  // 2. Embedded JSON inside a line (complete or truncated mid-stream)
   const firstBrace = bodyText.indexOf('{');
   const lastBrace = bodyText.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace + 1) {
@@ -143,7 +340,28 @@ function computeStructuredAnalysis(text: string): StructuredAnalysis {
         charCount,
       };
     } catch {
-      // fall through
+      // fall through to truncated embedded JSON check
+    }
+  }
+  if (firstBrace > 0) {
+    const repaired = tryParseTruncatedJson(bodyText.slice(firstBrace));
+    if (repaired !== undefined) {
+      const humanized = deepHumanizeJsonValue(repaired);
+      const rawPrefix = bodyText.slice(0, firstBrace).trim();
+      const prefix = [tsHeader, rawPrefix].filter((p) => p.length > 0).join('  ');
+      const prettyJson = JSON.stringify(humanized, null, 2);
+      const bodyParts = [rawPrefix, prettyJson].filter((p) => p.length > 0);
+      const parts = [prefix, prettyJson].filter((p) => p.length > 0);
+      return {
+        kind: 'embedded-json',
+        jsonValue: humanized,
+        timeHint,
+        formatBadge: 'JSON (truncated)',
+        prefix,
+        bodyFormattedText: bodyParts.join('\n\n'),
+        formattedText: parts.join('\n\n'),
+        charCount,
+      };
     }
   }
 

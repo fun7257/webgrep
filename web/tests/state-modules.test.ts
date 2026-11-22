@@ -41,20 +41,17 @@ import {
   buildEditedStepState,
   buildSearchRequestPlan,
   buildWorkbenchShareUrl,
-  canToggleStepExcludeAt,
   computeActiveSources,
   computeEffectiveSourceIds,
   computeSourceTimeFormatsSig,
   computeTimeBasisSummary,
   isContentTimeSource,
-  isDockerVirtualPath,
   normalizeScopeSourceLists,
   resolveSourceIdOrName,
   sameSourceList,
   toPortableSourceRefs,
 } from '../src/lib/state/query-actions.ts';
 import {
-  computeDockerPreviewSinceSec,
   fetchAuthStatus,
   postAuthLogin,
   postTimePreview,
@@ -185,7 +182,6 @@ describe('state/persistence', () => {
       codeFontSize: 4,
       wordWrap: false,
       resultDensity: 'compact',
-      viewMode: 'log',
       locale: 'en',
       mcpMaxLogs: 500,
       tenant: '  team-a  ',
@@ -200,15 +196,9 @@ describe('state/persistence', () => {
     assert.equal(norm.codeFontSize, 10);
     assert.equal(norm.wordWrap, false);
     assert.equal(norm.resultDensity, 'compact');
-    assert.equal(norm.viewMode, 'log');
     assert.equal(norm.locale, 'en');
     assert.equal(norm.mcpMaxLogs, 200);
     assert.equal(norm.tenant, 'team-a');
-
-    assert.equal(normalizeSettings({}).viewMode, 'auto');
-    assert.equal(normalizeSettings({ viewMode: 'code' }).viewMode, 'code');
-    assert.equal(normalizeSettings({ viewMode: 'plain' }).viewMode, 'plain');
-    assert.equal(normalizeSettings({ viewMode: 'invalid-mode' }).viewMode, 'auto');
 
     const storage = makeMemoryStorage();
     saveSettingsToStorage(storage, norm);
@@ -389,11 +379,11 @@ describe('state/stream-buffer', () => {
     assert.equal(resolveAnchorByteHint(undefined, hit, 'other.log', 50), undefined);
 
     assert.equal(
-      buildFileContextCacheKey('default', 'docker/app', 12, 3, 1700),
-      'default\u0000docker/app\u000012\u00003\u0000s=1700'
+      buildFileContextCacheKey('default', 'logs/app.log', 12),
+      'default\u0000logs/app.log\u000012'
     );
     assert.equal(
-      buildFileContextCacheKey('default', 'repo/src/main.zig', 42, null, null, 12),
+      buildFileContextCacheKey('default', 'repo/src/main.zig', 42, 12),
       'default\u0000repo/src/main.zig\u000042\u0000c=12'
     );
 
@@ -435,15 +425,15 @@ describe('state/query-actions', () => {
     name: 'BackendCode',
     pluginPreset: 'code',
   });
-  const srcDocker = makeSource('s-docker', {
-    id: 's-docker',
-    kind: 'docker',
-    name: 'api-ctr',
+  const srcSingle = makeSource('s-file', {
+    id: 's-file',
+    kind: 'file',
+    name: 'api.log',
     enabled: false,
   });
   const srcDup1 = makeSource('s-dup1', { name: 'DupName', enabled: false });
   const srcDup2 = makeSource('s-dup2', { name: 'DupName', enabled: false });
-  const sources = [srcLogs, srcCode, srcDocker, srcDup1, srcDup2];
+  const sources = [srcLogs, srcCode, srcSingle, srcDup1, srcDup2];
 
   it('resolves source IDs/names, portable refs, and scope normalization', () => {
     assert.equal(resolveSourceIdOrName(sources, 'applogs'), 's-logs');
@@ -465,7 +455,7 @@ describe('state/query-actions', () => {
     });
 
     assert.deepEqual(computeEffectiveSourceIds(sources, []), ['s-logs', 's-code']);
-    assert.deepEqual(computeEffectiveSourceIds(sources, ['s-docker']), ['s-docker']);
+    assert.deepEqual(computeEffectiveSourceIds(sources, ['s-file']), ['s-file']);
 
     const activeAll = computeActiveSources(sources, {
       sources: [],
@@ -475,43 +465,32 @@ describe('state/query-actions', () => {
       activeAll.map((s) => s.id),
       ['s-logs']
     );
-
-    assert.equal(isDockerVirtualPath(sources, 'API-CTR/stdout'), true);
-    assert.equal(isDockerVirtualPath(sources, 'AppLogs/app.log'), false);
   });
 
   it('computes content-time vs mtime basis and source time format signatures', () => {
     assert.equal(isContentTimeSource(srcLogs), true);
     assert.equal(isContentTimeSource(srcCode), false);
-    assert.equal(isContentTimeSource(srcDocker), true);
+    assert.equal(isContentTimeSource(srcSingle), true);
 
-    assert.deepEqual(computeTimeBasisSummary([srcLogs, srcCode, srcDocker]), {
+    assert.deepEqual(computeTimeBasisSummary([srcLogs, srcCode, srcSingle]), {
       contentCount: 2,
       mtimeCount: 1,
     });
 
     assert.equal(
-      computeSourceTimeFormatsSig([srcLogs, srcCode, srcDocker]),
-      's-docker=auto|s-logs=%Y-%m-%d %H:%M:%S'
+      computeSourceTimeFormatsSig([srcLogs, srcCode, srcSingle]),
+      's-file=auto|s-logs=%Y-%m-%d %H:%M:%S'
     );
   });
 
-  it('handles step exclusion rules, editing back to draft, and appending steps', () => {
+  it('handles editing steps back to draft and appending steps', () => {
     const pos = createQueryStep('error');
     const neg = createQueryStep('health', { exclude: true });
 
-    // Only one positive step without timePreset cannot flip to exclude
-    assert.equal(canToggleStepExcludeAt([pos], 0, null, ''), false);
-    // Flipping exclude -> include is always allowed
-    assert.equal(canToggleStepExcludeAt([pos, neg], 1, null, ''), true);
-    // With timePreset active, sole positive step can flip to exclude
-    assert.equal(canToggleStepExcludeAt([pos], 0, null, '15m'), true);
-
     // Editing a step preserves current draft in steps
-    const edited = buildEditedStepState([pos, neg], 1, createQueryStep('timeout'), '');
+    const edited = buildEditedStepState([pos, neg], 1, createQueryStep('timeout'));
     assert.ok(edited !== null);
     assert.equal(edited.pattern, 'health');
-    assert.equal(edited.draftExclude, true);
     assert.deepEqual(
       edited.steps.map((s) => s.text),
       ['error', 'timeout']
@@ -608,7 +587,7 @@ describe('state/query-actions', () => {
 });
 
 describe('state/api-client & state/ws-transport', () => {
-  it('routes auth, upsert errors, time preview, and Docker file window requests cleanly', async () => {
+  it('routes auth, upsert errors, time preview, and file window requests cleanly', async () => {
     const authRes = await fetchAuthStatus(
       async () =>
         new Response(JSON.stringify({ authRequired: true, authenticated: false }), { status: 200 })
@@ -637,27 +616,21 @@ describe('state/api-client & state/ws-transport', () => {
     assert.equal(previewErr.errorMessage, 'Bad mask');
 
     let requestedUrl = '';
-    const dockerSrc = makeSource('dk', { kind: 'docker', name: 'web-api' });
-    assert.equal(computeDockerPreviewSinceSec([dockerSrc], 'web-api/stdout', 1_700_000_000_000), 1_699_999_998);
-
     const fileRes = await requestFileWindow(
       async (input) => {
         requestedUrl = String(input);
-        return new Response(JSON.stringify(makeFileResponse('web-api/stdout', [10])), { status: 200 });
+        return new Response(JSON.stringify(makeFileResponse('web-api/app.log', [10])), { status: 200 });
       },
       {
         tenant: 'default',
-        sources: [dockerSrc],
-        displayedTimeStartMs: 1_700_000_000_000,
-        filePath: 'web-api/stdout',
+        filePath: 'web-api/app.log',
         line: 10,
         context: 0,
         anchorByte: 512.9,
       }
     );
-    assert.equal(fileRes.path, 'web-api/stdout');
+    assert.equal(fileRes.path, 'web-api/app.log');
     assert.ok(requestedUrl.includes('anchorByte=512'));
-    assert.ok(requestedUrl.includes('since=1699999998'));
   });
 
   it('SearchWsTransport fast-filters stale search IDs and handles mcp_state pushes', () => {

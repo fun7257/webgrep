@@ -13,7 +13,7 @@
   import { getPresentationAdapter } from './adapters/registry.ts';
 
   const host = createWorkbenchAdapterHost();
-  const activeAdapter = $derived(getPresentationAdapter(workbench.activeViewAdapter));
+  const activeAdapter = $derived(getPresentationAdapter(workbench.activeInspectorAdapter));
 
   let asideEl = $state<HTMLElement | null>(null);
   let scrollContainerEl = $state<HTMLDivElement | null>(null);

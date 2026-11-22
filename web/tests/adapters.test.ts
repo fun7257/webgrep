@@ -4,7 +4,6 @@ import {
   CodeStreamStatsTracker,
   buildCodeVirtualLayout,
   buildLogVirtualLayout,
-  classifyHitBestAdapter,
   codeAdapter,
   detectCodeLanguage,
   extractLineTime,
@@ -12,12 +11,12 @@ import {
   getCachedPlainProbe,
   logAdapter,
   parseLineLogMeta,
-  plainAdapter,
   preserveLargeJsonIntegers,
   probeLogLineFast,
-  resolveBatchAdapterSummary,
-  resolveDominantAdapter,
+  resolveBatchViewAdapter,
   resolveHitAdapterId,
+  resolvePathAdapterId,
+  resolveSourceAdapterId,
   resolveSourceForHit,
 } from '../src/lib/adapters/index.ts';
 import type { DataSourceItem, HitItem } from '../src/lib/types.ts';
@@ -116,71 +115,54 @@ describe('Presentation Adapter layer & simple line-log time probe', () => {
     assert.equal(plain.hasTime, false);
   });
 
-  it('respects source presets, code extensions, and user viewMode overrides across log/code/plain', () => {
+  it('routes log vs code strictly by configured DataSource preset without content heuristics', () => {
     const jsonLogLine = '{"t":"2026-09-11T08:00:00.009+08:00","l":"info","message":"hello"}';
     const logHit = makeHit('logs/test.log', jsonLogLine);
-    const jsonEventsHit = makeHit('mixed/events.json', jsonLogLine);
-    const codeJsonHit = makeHit('mixed/package.json', jsonLogLine);
-    const tsCodeHit = makeHit('mixed/src/app.ts', 'const level = "error";');
-    const plainBlobHit = makeHit('mixed/notes.bin', 'arbitrary unformatted content');
+    const tsInLogSource = makeHit('logs/src/app.ts', 'const level = "error";');
+    const logInCodeSource = makeHit('repo/test.log', jsonLogLine);
+    const tsCodeHit = makeHit('repo/src/app.ts', 'const level = "error";');
+    const plainBlobHit = makeHit('logs/notes.bin', 'arbitrary unformatted content');
 
     const logSrc = makeSource('logs', { pluginPreset: 'timeseries' });
     const codeSrc = makeSource('repo', { pluginPreset: 'code' });
-    const autoSrc = makeSource('mixed', { pluginPreset: 'auto' });
-    const rawSrc = makeSource('rawsrc', { pluginPreset: 'raw' });
+    const defaultSrc = makeSource('defaultsrc');
 
     const sourceByName = new Map<string, DataSourceItem>([
       ['logs', logSrc],
       ['repo', codeSrc],
-      ['mixed', autoSrc],
-      ['rawsrc', rawSrc],
+      ['defaultsrc', defaultSrc],
     ]);
 
     assert.equal(resolveSourceForHit('logs/test.log', sourceByName), logSrc);
-    assert.equal(classifyHitBestAdapter(logHit, logSrc), 'log');
-    assert.equal(classifyHitBestAdapter(jsonEventsHit, autoSrc), 'log');
-    assert.equal(classifyHitBestAdapter(codeJsonHit, autoSrc), 'code');
-    assert.equal(classifyHitBestAdapter(tsCodeHit, autoSrc), 'code');
-    assert.equal(classifyHitBestAdapter(logHit, codeSrc), 'code');
-    assert.equal(classifyHitBestAdapter(logHit, rawSrc), 'plain');
-    assert.equal(classifyHitBestAdapter(plainBlobHit, autoSrc), 'plain');
+    assert.equal(resolveSourceAdapterId(logSrc), 'log');
+    assert.equal(resolveSourceAdapterId(codeSrc), 'code');
+    assert.equal(resolveSourceAdapterId(defaultSrc), 'log');
+    assert.equal(resolveSourceAdapterId(undefined), 'log');
 
-    assert.equal(resolveHitAdapterId(logHit, logSrc, 'auto'), 'log');
-    assert.equal(resolveHitAdapterId(tsCodeHit, autoSrc, 'auto'), 'code');
+    // View is strictly determined by DataSource configuration, regardless of file extension or text
+    assert.equal(resolveHitAdapterId(logHit, logSrc), 'log');
+    assert.equal(resolveHitAdapterId(tsInLogSource, logSrc), 'log');
+    assert.equal(resolveHitAdapterId(plainBlobHit, logSrc), 'log');
+    assert.equal(resolveHitAdapterId(tsCodeHit, codeSrc), 'code');
+    assert.equal(resolveHitAdapterId(logInCodeSource, codeSrc), 'code');
 
-    assert.equal(resolveHitAdapterId(logHit, logSrc, 'plain'), 'plain');
-    assert.equal(resolveHitAdapterId(logHit, codeSrc, 'log'), 'log');
-    assert.equal(resolveHitAdapterId(logHit, logSrc, 'code'), 'code');
+    // Path-based resolution for InspectorPane preserves per-source view even in mixed-source batches
+    assert.equal(resolvePathAdapterId('logs/src/app.ts', sourceByName), 'log');
+    assert.equal(resolvePathAdapterId('repo/test.log', sourceByName), 'code');
+    assert.equal(resolvePathAdapterId('unknown/file.ts', sourceByName), 'log');
 
     assert.equal(logAdapter.inspectContextLines, 0);
     assert.equal(codeAdapter.inspectContextLines, 12);
-    assert.equal(plainAdapter.inspectContextLines, 0);
     assert.equal(logAdapter.supportsStructuredToggle, true);
     assert.equal(codeAdapter.supportsStructuredToggle, false);
-    assert.equal(plainAdapter.supportsStructuredToggle, true);
 
-    assert.equal(resolveDominantAdapter([logHit], sourceByName, 'auto'), 'log');
-    assert.equal(resolveDominantAdapter([tsCodeHit], sourceByName, 'auto'), 'code');
-    assert.equal(resolveDominantAdapter([plainBlobHit], sourceByName, 'auto'), 'plain');
-    assert.equal(resolveDominantAdapter([tsCodeHit], sourceByName, 'log'), 'log');
-    assert.equal(resolveDominantAdapter([logHit], sourceByName, 'code'), 'code');
-
-    const mixedSummary = resolveBatchAdapterSummary(
-      [logHit, logHit, tsCodeHit],
-      sourceByName,
-      'auto'
-    );
-    assert.equal(mixedSummary.isMixed, true);
-    assert.equal(mixedSummary.detectedDominant, 'log');
-    assert.equal(mixedSummary.sampleCounts.log, 2);
-    assert.equal(mixedSummary.sampleCounts.code, 1);
-
-    const manyLogs = Array.from({ length: 40 }, (_, i) =>
-      makeHit('logs/test.log', jsonLogLine, i + 1)
-    );
-    const tailMixed = resolveBatchAdapterSummary([...manyLogs, tsCodeHit], sourceByName, 'auto');
-    assert.equal(tailMixed.isMixed, true);
-    assert.equal(tailMixed.sampleCounts.code, 1);
+    // Batch view uses code when active sources / hits belong solely to code sources, otherwise log
+    assert.equal(resolveBatchViewAdapter([logHit], sourceByName, [logSrc]), 'log');
+    assert.equal(resolveBatchViewAdapter([tsCodeHit], sourceByName, [codeSrc]), 'code');
+    assert.equal(resolveBatchViewAdapter([logInCodeSource], sourceByName, [codeSrc]), 'code');
+    assert.equal(resolveBatchViewAdapter([], sourceByName, [codeSrc]), 'code');
+    assert.equal(resolveBatchViewAdapter([], sourceByName, [logSrc, codeSrc]), 'log');
+    assert.equal(resolveBatchViewAdapter([logHit, tsCodeHit], sourceByName, [logSrc, codeSrc]), 'log');
   });
 
   it('builds simple 1:1 line-log virtual layout matching plain line height math', () => {
@@ -200,7 +182,7 @@ describe('Presentation Adapter layer & simple line-log time probe', () => {
         density: 'compact',
       },
       budget: 540,
-      getPlainProbe: getCachedPlainProbe,
+      getLineProbe: getCachedPlainProbe,
     });
 
     assert.equal(layout.lines.length, 2);

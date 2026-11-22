@@ -1,6 +1,5 @@
 import type {
   AuthStatusResponse,
-  DataSourceItem,
   DirSuggestEntry,
   DirSuggestResponse,
   FileResponse,
@@ -14,9 +13,6 @@ import type {
   TimePreviewResponse,
 } from '../types.ts';
 import { normalizePluginOverrides, normalizePluginPreset } from '../prefilter.ts';
-import { computeDockerPreviewSinceSec } from '../query.ts';
-
-export { computeDockerPreviewSinceSec };
 
 export type ApiFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -38,8 +34,6 @@ export interface UpsertSourcePayload {
 
 export interface FileWindowRequestParams {
   tenant: string;
-  sources: ReadonlyArray<Pick<DataSourceItem, 'kind' | 'name' | 'config'>>;
-  displayedTimeStartMs: number;
   filePath: string;
   line: number;
   context: number;
@@ -149,12 +143,7 @@ export async function postUpsertSource(
   fetcher: ApiFetcher,
   payload: UpsertSourcePayload
 ): Promise<SourcesResponse> {
-  const cleanPath = (
-    payload.config?.path ??
-    payload.config?.endpoint ??
-    payload.path ??
-    ''
-  ).trim();
+  const cleanPath = (payload.config?.path ?? payload.path ?? '').trim();
   const resolvedTimeFormat =
     payload.timeFormat !== undefined ? payload.timeFormat.trim() : payload.config?.timeFormat;
   const resolvedPluginPreset =
@@ -180,7 +169,6 @@ export async function postUpsertSource(
       path: cleanPath,
       config: {
         path: cleanPath,
-        endpoint: payload.config?.endpoint ?? null,
         ...(resolvedTimeFormat !== undefined ? { timeFormat: resolvedTimeFormat } : {}),
         ...(resolvedPluginPreset !== undefined ? { pluginPreset: resolvedPluginPreset } : {}),
         ...(resolvedPlugins !== undefined ? { plugins: resolvedPlugins } : {}),
@@ -297,11 +285,6 @@ export async function requestFileWindow(
   fetcher: ApiFetcher,
   params: FileWindowRequestParams
 ): Promise<FileResponse> {
-  const dockerSinceSec = computeDockerPreviewSinceSec(
-    params.sources,
-    params.filePath,
-    params.displayedTimeStartMs
-  );
   const query = new URLSearchParams({
     tenant: params.tenant,
     path: params.filePath,
@@ -317,9 +300,6 @@ export async function requestFileWindow(
     params.anchorByte >= 0
   ) {
     query.set('anchorByte', String(Math.floor(params.anchorByte)));
-  }
-  if (dockerSinceSec !== null) {
-    query.set('since', String(dockerSinceSec));
   }
   const res = await fetcher(`/api/file?${query.toString()}`, { signal: params.signal });
   if (!res.ok) {
