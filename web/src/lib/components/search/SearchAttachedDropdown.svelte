@@ -13,7 +13,6 @@
     regexTip: { text: string } | null;
     activeIdx: number;
     onInsertSymbol: (sym: string) => void;
-    onBackspaceSymbol: () => void;
     onSelectHistory: (index: number) => void;
     onSelectWord: (suggestion: Suggestion) => void;
     onEnableRegex: () => void;
@@ -26,7 +25,6 @@
     regexTip,
     activeIdx = $bindable(-1),
     onInsertSymbol,
-    onBackspaceSymbol,
     onSelectHistory,
     onSelectWord,
     onEnableRegex,
@@ -49,7 +47,7 @@
 >
   {#if showSymbolBar}
     <div class="mx-3 border-t border-border/60"></div>
-    <SymbolBar onInsert={onInsertSymbol} onBackspace={onBackspaceSymbol} />
+    <SymbolBar onInsert={onInsertSymbol} />
   {/if}
 
   {#if historySuggestions.length > 0}
@@ -72,7 +70,7 @@
           }`}
         >
           <div class="flex items-center gap-2 min-w-0">
-            <History class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
+            <History class="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
             <span class="font-mono text-[13.5px] text-foreground truncate">{entry.label}</span>
             {#if entry.draft && stepFlagTag(entry.draft)}
               <span class="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground shrink-0">
@@ -82,19 +80,19 @@
             {#if scopeFlags.hasSources}
               <span
                 title={workbench.t.searchBar.historyHasSourceTitle}
-                class="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-primary ring-1 ring-inset ring-primary/20 shrink-0"
+                aria-label={workbench.t.searchBar.historyHasSourceTitle}
+                class="inline-flex h-4 w-4 items-center justify-center rounded bg-primary/10 text-primary ring-1 ring-inset ring-primary/20 shrink-0"
               >
                 <Database class="h-2.5 w-2.5 shrink-0" />
-                <span>{workbench.t.searchBar.historyHasSourceBadge}</span>
               </span>
             {/if}
             {#if scopeFlags.hasTime}
               <span
                 title={workbench.t.searchBar.historyHasTimeTitle}
-                class="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium leading-none text-primary ring-1 ring-inset ring-primary/20 shrink-0"
+                aria-label={workbench.t.searchBar.historyHasTimeTitle}
+                class="inline-flex h-4 w-4 items-center justify-center rounded bg-primary/10 text-primary ring-1 ring-inset ring-primary/20 shrink-0"
               >
                 <Clock class="h-2.5 w-2.5 shrink-0" />
-                <span>{workbench.t.searchBar.historyHasTimeBadge}</span>
               </span>
             {/if}
           </div>
@@ -105,7 +103,7 @@
               e.stopPropagation();
               workbench.removeHistoryEntry(entry.id);
             }}
-            class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/60 hover:bg-secondary hover:text-foreground cursor-pointer"
+            class="touch-target shrink-0 rounded p-1.5 text-muted-foreground/70 hover:bg-secondary hover:text-foreground cursor-pointer"
             title={workbench.t.ui.removeHistory}
             aria-label={workbench.t.ui.removeHistory}
           >
@@ -131,13 +129,10 @@
             isSelected ? 'bg-secondary text-foreground' : 'text-foreground hover:bg-secondary/60'
           }`}
         >
-          <span class="flex items-center gap-2.5 min-w-0">
-            <span class="truncate font-mono text-xs font-medium">{item.label}</span>
-            {#if item.hint}
-              <span class="truncate text-[11px] text-muted-foreground/70">{item.hint}</span>
-            {/if}
-          </span>
-          <span class="shrink-0 text-[10px] text-muted-foreground/60">{item.kind}</span>
+          <span class="truncate font-mono text-xs font-medium">{item.label}</span>
+          {#if item.hint}
+            <span class="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/70">{item.hint}</span>
+          {/if}
         </button>
       {/each}
     </div>

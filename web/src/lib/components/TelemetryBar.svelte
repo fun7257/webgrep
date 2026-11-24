@@ -4,6 +4,7 @@
   import { formatMs } from '$lib/utils';
   import {
     AlertTriangle,
+    FileText,
     Filter,
     Hash,
     Loader2,
@@ -27,7 +28,7 @@
 
 {#if workbench.hasSearchedOnce || workbench.isSearching || workbench.errorMessage}
   <div
-    class="flex items-center justify-between gap-2 px-3 md:px-7 pb-1.5 pt-0.5 text-xs text-muted-foreground/65 select-none"
+    class="flex items-center justify-between gap-2 px-3 md:px-6 pb-1.5 pt-0.5 text-xs text-muted-foreground/70 select-none"
   >
     <div class="flex h-6 flex-1 items-center gap-2 min-w-0 font-mono tabular-nums text-[12px]">
       {#if workbench.errorMessage}
@@ -46,8 +47,10 @@
 
         {#if workbench.isSearching}
           <span
-            class="inline-flex items-center text-muted-foreground shrink-0"
+            role="status"
+            class="inline-flex items-center text-primary shrink-0"
             title={workbench.t.telemetry.searching}
+            aria-label={workbench.t.telemetry.searching}
           >
             <Loader2 class="h-3 w-3 animate-spin" />
           </span>
@@ -56,14 +59,27 @@
             onclick={() => workbench.cancelSearch()}
             title={workbench.t.telemetry.stopSearch}
             aria-label={workbench.t.telemetry.stopSearch}
-            class="touch-target inline-flex h-6 w-6 items-center justify-center rounded bg-secondary/60 text-foreground hover:bg-secondary active:bg-secondary/80 active:scale-[0.97] shrink-0"
+            class="touch-target inline-flex h-6 w-6 items-center justify-center rounded bg-secondary/60 text-foreground hover:bg-secondary active:bg-secondary/80 active:scale-[0.97] shrink-0 cursor-pointer"
           >
             <Square class="h-2.5 w-2.5 fill-current" />
           </button>
         {:else if workbench.elapsedMs > 0}
-          <span class="inline-flex items-center gap-1 shrink-0 opacity-75">
+          <span class="inline-flex items-center gap-1 shrink-0 text-muted-foreground/70">
             <Timer class="h-3 w-3" />
             {formatMs(workbench.elapsedMs)}
+          </span>
+        {/if}
+
+        {#if workbench.filesMatched > 1}
+          {@const filesLabel = workbench.t.telemetry.filesCount(
+            workbench.filesMatched.toLocaleString()
+          )}
+          <span
+            class="inline-flex items-center gap-1 shrink-0 text-muted-foreground/70 tabular-nums"
+            title={filesLabel}
+          >
+            <FileText class="h-3 w-3 shrink-0" />
+            {filesLabel}
           </span>
         {/if}
 
@@ -78,7 +94,7 @@
 
         {#if prunedView.visible}
           <span
-            class="inline-flex h-5 max-w-full items-center gap-1 truncate rounded bg-secondary/65 px-1.5 text-[11px] leading-none text-muted-foreground/90 ring-1 ring-inset ring-border/50 shrink-0 tabular-nums"
+            class="inline-flex h-5 max-w-full items-center gap-1 truncate rounded bg-secondary/65 px-1.5 text-[11px] leading-none text-muted-foreground ring-1 ring-inset ring-border/50 shrink-0 tabular-nums"
             title={prunedTitle}
           >
             <Filter class="h-2.5 w-2.5 shrink-0" />

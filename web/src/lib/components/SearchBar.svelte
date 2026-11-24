@@ -13,7 +13,7 @@
   } from '$lib/suggest';
   import SearchAttachedDropdown from './search/SearchAttachedDropdown.svelte';
   import ConditionChainBar from './search/ConditionChainBar.svelte';
-  import { Loader2, Plus, Search, X } from 'lucide-svelte';
+  import { FunnelPlus, Plus, Search, X } from 'lucide-svelte';
 
   interface Props {
     inputEl?: HTMLInputElement | null;
@@ -171,7 +171,7 @@
     return list;
   });
 
-  const showSymbolBar = $derived(workbench.isCompact && focused);
+  const showSymbolBar = $derived(workbench.isCompact && focused && workbench.isRegex);
   const hasOpenDropdown = $derived(
     focused && dropdownOpen && (dropdownItems.length > 0 || regexTip !== null)
   );
@@ -235,23 +235,6 @@
     const end = inputEl.selectionEnd ?? start;
     const next = workbench.pattern.slice(0, start) + sym + workbench.pattern.slice(end);
     commitPatternAndCaret(next, sym === '()' ? start + 1 : start + sym.length);
-  }
-
-  function backspaceAtCursor() {
-    if (!inputEl) {
-      workbench.pattern = workbench.pattern.slice(0, -1);
-      return;
-    }
-    const start = inputEl.selectionStart ?? workbench.pattern.length;
-    const end = inputEl.selectionEnd ?? start;
-    if (end > start) {
-      commitPatternAndCaret(workbench.pattern.slice(0, start) + workbench.pattern.slice(end), start);
-    } else if (start > 0) {
-      commitPatternAndCaret(
-        workbench.pattern.slice(0, start - 1) + workbench.pattern.slice(start),
-        start - 1
-      );
-    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -350,11 +333,17 @@
     if (focused) scheduleVocabularyBuild();
   }
 
+  function shouldAutoOpenDropdownOnFocus(): boolean {
+    return hero || workbench.pattern.trim().length === 0;
+  }
+
   function preparePointerFocus() {
     pointerFocusingInput = true;
-    flushSync(() => {
-      dropdownOpen = true;
-    });
+    if (shouldAutoOpenDropdownOnFocus()) {
+      flushSync(() => {
+        dropdownOpen = true;
+      });
+    }
     setTimeout(syncCursorPos, 0);
   }
 
@@ -380,7 +369,9 @@
     focused = true;
     if (pointerFocusingInput) {
       pointerFocusingInput = false;
-      dropdownOpen = true;
+      if (shouldAutoOpenDropdownOnFocus()) {
+        dropdownOpen = true;
+      }
     }
     syncCursorPos();
   }
@@ -413,7 +404,7 @@
     onmousedown={(e) => e.preventDefault()}
     onpointerdown={(e) => handleFlagPointerDown(id, e, toggle)}
     onclick={(e) => handleFlagClick(id, e, toggle)}
-    class={`touch-target inline-flex h-7 min-w-[22px] sm:min-w-[28px] items-center justify-center rounded-md px-1 sm:px-1.5 font-mono text-[11px] sm:text-[12px] leading-none cursor-pointer select-none ${
+    class={`touch-target inline-flex h-7 min-w-[26px] sm:min-w-[28px] items-center justify-center rounded-md px-1 sm:px-1.5 font-mono text-[11px] sm:text-[12px] leading-none cursor-pointer select-none ${
       active
         ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 font-semibold'
         : 'text-muted-foreground/75 hover:bg-secondary/60 hover:text-foreground active:bg-secondary'
@@ -458,31 +449,25 @@
           </div>
         {/if}
 
-        <!-- Left Cluster: Search Icon + Optional +/- Draft Mode -->
-        <div class="flex items-center gap-1 sm:gap-1.5 text-muted-foreground shrink-0">
-          {#if workbench.isSearching}
-            <Loader2 class="h-4 w-4 animate-spin text-primary" />
-          {:else}
-            <button
-              type="button"
-              disabled={!workbench.hasExecutableQuery}
-              onmousedown={(e) => e.preventDefault()}
-              onclick={() => {
-                dropdownOpen = false;
-                workbench.submitSearch();
-              }}
-              title={workbench.t.searchBar.searchNowTitle}
-              aria-label={workbench.t.searchBar.searchNowTitle}
-              class={`touch-target flex h-5 w-5 items-center justify-center rounded ${
-                workbench.hasExecutableQuery
-                  ? 'text-muted-foreground hover:text-foreground cursor-pointer'
-                  : 'text-muted-foreground/60 cursor-default'
-              }`}
-            >
-              <Search class="h-4 w-4" />
-            </button>
-          {/if}
-        </div>
+        <!-- Left Cluster: Static Search Button (shimmer bar + TelemetryBar indicate active search) -->
+        <button
+          type="button"
+          disabled={!workbench.hasExecutableQuery}
+          onmousedown={(e) => e.preventDefault()}
+          onclick={() => {
+            dropdownOpen = false;
+            workbench.submitSearch();
+          }}
+          title={workbench.t.searchBar.searchNowTitle}
+          aria-label={workbench.t.searchBar.searchNowTitle}
+          class={`touch-target flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+            workbench.hasExecutableQuery
+              ? 'bg-primary/10 text-primary hover:bg-primary/15 active:bg-primary/20 cursor-pointer'
+              : 'text-muted-foreground/70 cursor-default'
+          }`}
+        >
+          <Search class="h-4 w-4" />
+        </button>
 
         <!-- Pure Single-Text Search Input + Fish-Style Ghost Completion Overlay -->
         <div class="relative h-9 min-w-[56px] sm:min-w-[96px] flex-1">
@@ -512,7 +497,7 @@
             onkeydown={handleKeydown}
             onclick={() => {
               pointerFocusingInput = false;
-              if (focused) dropdownOpen = true;
+              if (focused && shouldAutoOpenDropdownOnFocus()) dropdownOpen = true;
               syncCursorPos();
             }}
             onkeyup={syncCursorPos}
@@ -521,13 +506,17 @@
           />
         </div>
 
-        <!-- Right Side Controls: Explicit Toggles (Aa, ab, .*), Progressive Filter (+ Filter), and Clear (×) -->
+        <!-- Right Side Controls: Explicit Toggles (Aa, ab, .*), Progressive Funnel Filter, and Clear (×) -->
         <div class="flex items-center gap-0.5 sm:gap-1 shrink-0">
           {@render flagToggle('case', workbench.caseSensitive, workbench.t.searchBar.matchCaseTitle, 'Aa', () => workbench.toggleCaseSensitive())}
           {@render flagToggle('word', workbench.wholeWord, workbench.t.searchBar.wholeWordTitle, 'ab', () => workbench.toggleWholeWord())}
           {@render flagToggle('regex', workbench.isRegex, workbench.t.searchBar.useRegexTitle, '.*', () => workbench.toggleRegexMode())}
 
-          {#if workbench.pattern.trim().length > 0}
+          {#if workbench.pattern.length > 0}
+            <span class="mx-0.5 h-4 w-px shrink-0 bg-border/60" aria-hidden="true"></span>
+          {/if}
+
+          {#if workbench.pattern.trim().length > 0 && (workbench.hasSearchedOnce || workbench.steps.length > 0)}
             <button
               type="button"
               title={workbench.t.searchBar.addNextFilterTitle}
@@ -539,10 +528,9 @@
                 cursorPos = 0;
                 inputEl?.focus();
               }}
-              class="touch-target ml-0.5 inline-flex h-6 w-6 sm:h-7 sm:w-auto shrink-0 items-center justify-center sm:gap-0.5 rounded-full bg-secondary/70 sm:px-2.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border/70 hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer select-none"
+              class="touch-target flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-primary/15 hover:text-primary active:bg-primary/20 cursor-pointer select-none"
             >
-              <Plus class="h-3.5 w-3.5 shrink-0" />
-              <span class="hidden sm:inline">{workbench.t.searchBar.addNextFilter.replace(/^\+\s*/, '')}</span>
+              <FunnelPlus class="h-4 w-4 shrink-0" />
             </button>
           {/if}
 
@@ -557,9 +545,9 @@
                 cursorPos = 0;
                 inputEl?.focus();
               }}
-              class="touch-target shrink-0 rounded-full p-1 sm:p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
+              class="touch-target flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
             >
-              <X class="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+              <X class="h-4 w-4" />
             </button>
           {/if}
         </div>
@@ -573,7 +561,6 @@
           {regexTip}
           bind:activeIdx
           onInsertSymbol={insertSymbolAtCursor}
-          onBackspaceSymbol={backspaceAtCursor}
           onSelectHistory={applyDropdownItem}
           onSelectWord={applyWordSuggestion}
           onEnableRegex={() => {
@@ -586,6 +573,20 @@
 
     {#if workbench.steps.length > 0}
       <ConditionChainBar onFocusInput={() => inputEl?.focus()} onSyncCursor={syncCursorPos} />
+    {/if}
+
+    {#if hero && workbench.sourcesLoaded && workbench.sources.length === 0}
+      <div class="mt-4 flex flex-wrap items-center justify-center gap-2.5 text-xs text-muted-foreground">
+        <span>{workbench.t.results.emptyNoSourceTitle}</span>
+        <button
+          type="button"
+          onclick={() => workbench.openSourcesDrawer(true)}
+          class="touch-target inline-flex h-7 items-center gap-1 rounded-full bg-primary/10 px-2.5 text-xs font-medium text-primary ring-1 ring-inset ring-primary/25 hover:bg-primary/15 active:bg-primary/20 cursor-pointer"
+        >
+          <Plus class="h-3.5 w-3.5 shrink-0" />
+          <span>{workbench.t.scopeBar.addSourcePill}</span>
+        </button>
+      </div>
     {/if}
   </div>
 </div>

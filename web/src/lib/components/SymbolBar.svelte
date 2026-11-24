@@ -1,22 +1,27 @@
 <script lang="ts">
   import { workbench } from '$lib/state.svelte';
-  import { Delete } from 'lucide-svelte';
 
   interface Props {
     onInsert: (sym: string) => void;
-    onBackspace: () => void;
   }
 
-  let { onInsert, onBackspace }: Props = $props();
+  let { onInsert }: Props = $props();
 
-  const regexSymbols = ['\\d+', '|', '.*', '()'];
+  const regexSymbols: ReadonlyArray<{ sym: string; zh: string; en: string }> = [
+    { sym: '.*', zh: '.* (任意字符)', en: '.* (any)' },
+    { sym: '\\d+', zh: '\\d+ (数字)', en: '\\d+ (digits)' },
+    { sym: '|', zh: '| (或)', en: '| (or)' },
+    { sym: '()', zh: '() (分组)', en: '() (group)' },
+    { sym: '^', zh: '^ (行首)', en: '^ (line start)' },
+    { sym: '$', zh: '$ (行尾)', en: '$ (line end)' },
+  ];
 
   function keepFocus(e: Event) {
     e.preventDefault();
   }
 
   const btn =
-    'touch-target flex h-8 min-w-10 flex-1 items-center justify-center rounded-lg font-mono text-[13.5px] hover:bg-secondary/60 active:bg-secondary';
+    'touch-target flex h-8 min-w-9 flex-1 items-center justify-center rounded-lg font-mono text-[13px] text-foreground hover:bg-secondary/60 active:bg-secondary cursor-pointer';
 </script>
 
 <div
@@ -26,30 +31,16 @@
   onpointerdown={keepFocus}
   class="flex items-center gap-1 px-2.5 py-1.5"
 >
-  <button
-    type="button"
-    onclick={() => workbench.toggleRegexMode()}
-    class={`${btn} ${
-      workbench.isRegex ? 'bg-primary/15 text-primary font-semibold' : 'text-foreground'
-    }`}
-  >
-    .*
-  </button>
-  {#each regexSymbols as sym (sym)}
+  {#each regexSymbols as item (item.sym)}
+    {@const tip = workbench.locale === 'zh' ? item.zh : item.en}
     <button
       type="button"
-      onclick={() => onInsert(sym)}
-      class={`${btn} text-foreground`}
+      onclick={() => onInsert(item.sym)}
+      title={tip}
+      aria-label={tip}
+      class={btn}
     >
-      {sym}
+      {item.sym}
     </button>
   {/each}
-  <button
-    type="button"
-    onclick={onBackspace}
-    aria-label="Backspace token"
-    class={`${btn} text-muted-foreground`}
-  >
-    <Delete class="h-4 w-4" />
-  </button>
 </div>

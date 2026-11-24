@@ -1,7 +1,7 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import { ChevronRight, X } from 'lucide-svelte';
+  import { ChevronRight, Eraser, X } from 'lucide-svelte';
 
   interface Props {
     onFocusInput: () => void;
@@ -23,7 +23,7 @@
           : 'border-border/75 bg-secondary/45 text-foreground'
       }`}
     >
-      <span class="text-[10px] text-muted-foreground/65 select-none">#{idx + 1}</span>
+      <span class="text-[10px] text-muted-foreground/70 select-none">#{idx + 1}</span>
       {#if step.exclude}
         <span class="inline-flex h-4 min-w-[16px] items-center justify-center rounded bg-status/15 px-1 font-mono text-[11px] font-semibold text-status select-none">
           -
@@ -47,17 +47,17 @@
       >
         <span class="truncate">{step.text}</span>
         {#if step.caseSensitive}
-          <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+          <span class="rounded bg-primary/15 px-1 py-0.5 text-[9.5px] leading-none font-semibold text-primary shrink-0">
             Aa
           </span>
         {/if}
         {#if step.wholeWord}
-          <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+          <span class="rounded bg-primary/15 px-1 py-0.5 text-[9.5px] leading-none font-semibold text-primary shrink-0">
             ab
           </span>
         {/if}
         {#if step.isRegex}
-          <span class="rounded bg-primary/15 px-1 py-0.2 text-[9.5px] font-semibold text-primary shrink-0">
+          <span class="rounded bg-primary/15 px-1 py-0.5 text-[9.5px] leading-none font-semibold text-primary shrink-0">
             .*
           </span>
         {/if}
@@ -86,9 +86,10 @@
       workbench.clearSearch();
       onFocusInput();
     }}
-    title={workbench.t.searchBar.clearTitle}
-    class="touch-target ml-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
+    title={workbench.t.searchBar.clearAllSteps}
+    aria-label={workbench.t.searchBar.clearAllSteps}
+    class="touch-target inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
   >
-    {workbench.t.searchBar.clearAllSteps}
+    <Eraser class="h-3.5 w-3.5" />
   </button>
 </div>
