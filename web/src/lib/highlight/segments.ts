@@ -185,12 +185,34 @@ export function buildHighlightSegments(
     return lowerText;
   };
 
+  const recencyKind = (stepsBack: number): HighlightSegment['kind'] => {
+    if (stepsBack <= 0) return 'primary';
+    if (stepsBack === 1) return 'contains-0';
+    if (stepsBack === 2) return 'contains-1';
+    return 'contains-2';
+  };
+
+  // Recency-first highlighting: the latest search condition always gets the vivid `primary`
+  // focus highlight (priority 0), while earlier locked conditions recede to subtle context tiers.
+  let lastValidContainsIdx = -1;
+  if (containsTerms && containsTerms.length > 0) {
+    for (let i = containsTerms.length - 1; i >= 0; i--) {
+      if (containsTerms[i].trim().length > 0) {
+        lastValidContainsIdx = i;
+        break;
+      }
+    }
+  }
+
+  const baseStepsBack = lastValidContainsIdx >= 0 ? lastValidContainsIdx + 1 : 0;
+  const baseKind = recencyKind(baseStepsBack);
+
   if (primarySpans && primarySpans.length > 0) {
     for (const s of primarySpans) {
       const start = Math.max(0, Math.min(len, s.start));
       const end = Math.max(start, Math.min(len, s.end));
       if (end > start) {
-        allSpans.push({ start, end, kind: 'primary', priority: 0 });
+        allSpans.push({ start, end, kind: baseKind, priority: baseStepsBack });
       }
     }
   } else if (primaryPattern.trim().length > 0) {
@@ -202,13 +224,15 @@ export function buildHighlightSegments(
       caseInsensitive
     );
     for (const s of pSpans) {
-      allSpans.push({ start: s.start, end: s.end, kind: 'primary', priority: 0 });
+      allSpans.push({ start: s.start, end: s.end, kind: baseKind, priority: baseStepsBack });
     }
   }
 
   if (containsTerms && containsTerms.length > 0) {
     containsTerms.forEach((rawTerm, idx) => {
-      const kind = `contains-${idx % 3}` as HighlightSegment['kind'];
+      if (rawTerm.trim().length === 0) return;
+      const stepsBack = Math.max(0, lastValidContainsIdx - idx);
+      const kind = recencyKind(stepsBack);
       const cSpans = collectTermSpans(
         text,
         getLower,
@@ -221,7 +245,7 @@ export function buildHighlightSegments(
           start: s.start,
           end: s.end,
           kind,
-          priority: idx + 1,
+          priority: stepsBack,
         });
       }
     });

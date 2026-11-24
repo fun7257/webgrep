@@ -583,8 +583,34 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     );
     const primaryMatches = segs.filter((s) => s.kind === 'primary').map((s) => s.text);
     const containsMatches = segs.filter((s) => s.kind === 'contains-0').map((s) => s.text);
-    assert.deepEqual(primaryMatches, ['ErrorCode']);
-    assert.deepEqual(containsMatches, ['1001']);
+    // Recency-first: latest condition ($rw(\d{4})) gets primary focus; earlier condition recedes to contains-0
+    assert.deepEqual(primaryMatches, ['1001']);
+    assert.deepEqual(containsMatches, ['ErrorCode']);
+  });
+
+  it('prioritizes the latest progressive filter condition as primary while earlier steps recede', () => {
+    const line = 'pub fn exceeded(self: *const State, config: SearchConfig) bool {';
+    const segs = buildHighlightSegments(
+      line,
+      undefined,
+      ['search', 'config'],
+      true,
+      false,
+      'fn',
+      false
+    );
+    assert.deepEqual(
+      segs.filter((s) => s.kind === 'primary').map((s) => s.text),
+      ['config', 'Config']
+    );
+    assert.deepEqual(
+      segs.filter((s) => s.kind === 'contains-0').map((s) => s.text),
+      ['Search']
+    );
+    assert.deepEqual(
+      segs.filter((s) => s.kind === 'contains-1').map((s) => s.text),
+      ['fn']
+    );
   });
 
   it('extracts 19-digit nanosecond timestamp and formats JSON payload cleanly', () => {
@@ -745,8 +771,8 @@ describe('analyzeStructuredLine & buildHighlightSegments (Inspector formatting &
     const mediumRendered = mediumSegs.map((s) => s.text).join('');
     assert.equal(mediumRendered.startsWith('{"level":"error"'), true);
     assert.equal(mediumRendered.includes('…'), false);
-    assert.ok(mediumSegs.some((s) => s.text === 'error' && s.kind === 'primary'));
-    assert.ok(mediumSegs.some((s) => s.text === 'timeout' && s.kind === 'contains-0'));
+    assert.ok(mediumSegs.some((s) => s.text === 'timeout' && s.kind === 'primary'));
+    assert.ok(mediumSegs.some((s) => s.text === 'error' && s.kind === 'contains-0'));
 
     // 2000-char ultra-long record: centers match window cleanly and trims leading/trailing filler
     const prefix = 'x'.repeat(1150);
@@ -803,10 +829,10 @@ describe('selection latency optimization helpers', () => {
         pattern,
         true,
       );
-      const hits = segs.filter((s) => s.kind === 'primary').map((s) => s.text);
-      assert.deepEqual(hits, ['err_12', 'err-34']);
-      const secondaryHits = segs.filter((s) => s.kind === 'contains-0').map((s) => s.text);
-      assert.deepEqual(secondaryHits, ['second']);
+      const latestHits = segs.filter((s) => s.kind === 'primary').map((s) => s.text);
+      assert.deepEqual(latestHits, ['second']);
+      const priorHits = segs.filter((s) => s.kind === 'contains-0').map((s) => s.text);
+      assert.deepEqual(priorHits, ['err_12', 'err-34']);
     }
   });
 

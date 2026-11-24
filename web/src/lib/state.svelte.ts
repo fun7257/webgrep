@@ -70,14 +70,12 @@ import {
 } from './prefilter';
 import { L0StepCache, type InflightCacheMeta, type L0CacheEntry } from './l0-cache';
 import {
-  clearHistoryFromStorage,
   getBrowserLocalStorage,
   getBrowserSessionStorage,
   loadCachedSourcesFromStorage,
   loadHistoryFromStorage,
   loadSettingsFromStorage,
   loadThemeFromStorage,
-  sanitizeTenantId,
   saveCachedSourcesToStorage,
   saveHistoryToStorage,
   saveSettingsToStorage,
@@ -93,7 +91,6 @@ import {
   postDeleteSource,
   postMcpConfig,
   postTimePreview,
-  postToggleAllSources,
   postToggleSource,
   postUpsertSource,
   requestDirSuggestions,
@@ -121,6 +118,7 @@ import {
   buildWorkbenchShareUrl,
   computeActiveSources,
   computeTimeBasisSummary,
+  isContentTimeSource,
   normalizeScopeSourceLists,
   resolveSourceIdOrName,
   sameSourceList,
@@ -129,6 +127,15 @@ import {
 import { SearchWsTransport } from './state/ws-transport';
 
 export type DrawerPanelId = 'sources' | 'mcp' | 'shortcuts' | 'settings' | 'context';
+
+export interface DetectedTimeInfo {
+  status: 'matched' | 'unrecognized';
+  typeLabel: string;
+  sampleTime: string;
+  sampleFile: string;
+}
+
+const DETECTED_TIME_STORAGE_KEY = 'webgrep.detectedTimeTypes.v1';
 
 export interface ExecuteSearchOptions {
   forceRefresh?: boolean;
@@ -222,8 +229,9 @@ class WorkbenchState {
     sources: [],
     excludedSources: [],
     types: [],
-    timePreset: '',
+    timePreset: 'today',
   });
+  defaultTimePreset = $state<TimePreset>('today');
   readonly mode: SearchMode = 'literal';
   hidden = $state<boolean>(false);
   respectIgnore = $state<boolean>(false);
@@ -271,9 +279,9 @@ class WorkbenchState {
   // Data Sources & Drawers
   tenant = $state<string>('default');
   sources = $state.raw<DataSourceItem[]>([]);
+  detectedTimeBySource = $state<Record<string, DetectedTimeInfo>>({});
   sourcesLoading = $state<boolean>(false);
   sourcesLoaded = $state<boolean>(false);
-  addSourceModalOpen = $state<boolean>(false);
   drawerPanel = $state<DrawerPanelId | null>(null);
   sourceAddOpen = $state<boolean>(false);
   mobileScopeOpen = $state<boolean>(false);
@@ -291,6 +299,7 @@ class WorkbenchState {
 
   // Active Hit, Right Inspector & File Context LRU
   activeHitIndex = $state<number>(-1);
+  visibleHitPredicate: ((hit: HitItem) => boolean) | null = null;
   inspectedHit = $state.raw<HitItem | null>(null);
   scrollToActiveTick = $state<number>(0);
   inspectedPath = $state<string | null>(null);
@@ -325,24 +334,31 @@ class WorkbenchState {
   // UI Layout, Theme & Client Preferences
   locale = $state<Locale>('zh');
   darkMode = $state<boolean>(true);
-  leftSidebarOpen = $state<boolean>(false);
   railFlyout = $state<'time' | 'sources' | null>(null);
   rightInspectorOpen = $state<boolean>(true);
-  leftSidebarWidth = $state<number>(260);
   rightInspectorWidth = $state<number>(520);
   paletteOpen = $state<boolean>(false);
   detailOpen = $state<boolean>(false);
   isCompact = $state<boolean>(false);
-  scopeSidebarOpen = $derived<boolean>(
-    this.isCompact ? this.mobileScopeOpen : this.leftSidebarOpen
+  scopeSidebarOpen = $derived<boolean>(this.isCompact && this.mobileScopeOpen);
+  activeSources = $derived<DataSourceItem[]>(computeActiveSources(this.sources, this.scope));
+  hasLogSourceInScope = $derived<boolean>(
+    this.activeSources.some((s) => isContentTimeSource(s))
+  );
+  effectiveTimePreset = $derived<TimePreset>(
+    this.hasLogSourceInScope ? this.scope.timePreset : ''
+  );
+  effectiveScope = $derived<ScopeFilter>(
+    this.effectiveTimePreset === this.scope.timePreset
+      ? this.scope
+      : { ...this.scope, timePreset: '' }
   );
   hasActiveScope = $derived<boolean>(
-    this.scope.timePreset !== '' ||
+    this.effectiveTimePreset !== '' ||
       this.scope.sources.length > 0 ||
       (this.scope.excludedSources?.length ?? 0) > 0
   );
   isTouch = $state<boolean>(false);
-  insertToken: ((token: string) => void) | null = null;
   codeFontSize = $state<number>(13.5);
   wordWrap = $state<boolean>(true);
   previewLines = $state<number>(3);
@@ -383,6 +399,8 @@ class WorkbenchState {
   mcpCapabilities = $state.raw<McpCapabilityItem[]>([]);
   mcpLogs = $state.raw<McpCallLogItem[]>([]);
   mcpLoaded = $state<boolean>(false);
+  mcpLoading = $state<boolean>(false);
+  mcpError = $state<string | null>(null);
   private mcpConfigTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Derived Query Signals
@@ -404,7 +422,7 @@ class WorkbenchState {
       : null
   );
   compiledQuery = $derived.by(() =>
-    compileSearchQuery(this.steps, this.draftStep, this.scope)
+    compileSearchQuery(this.steps, this.draftStep, this.effectiveScope)
   );
   primaryPattern = $derived<string>(this.compiledQuery.primaryPattern);
   contains = $derived<string[]>(this.compiledQuery.contains);
@@ -412,7 +430,7 @@ class WorkbenchState {
   hasAnyQueryInput = $derived<boolean>(
     this.steps.length > 0 ||
       this.pattern.trim().length > 0 ||
-      this.scope.timePreset !== ''
+      this.effectiveTimePreset !== ''
   );
   hasExecutableQuery = $derived<boolean>(this.compiledQuery.hasExecutableQuery);
   hasRegexActive = $derived<boolean>(this.isRegex || this.steps.some((s) => s.isRegex));
@@ -420,17 +438,7 @@ class WorkbenchState {
     this.caseSensitive || this.steps.some((s) => s.caseSensitive)
   );
   hasWordActive = $derived<boolean>(this.wholeWord || this.steps.some((s) => s.wholeWord));
-  hasTimeActive = $derived<boolean>(this.scope.timePreset !== '');
-  activeFilterCount = $derived<number>(
-    (this.steps.length > 1 ? this.steps.length - 1 : 0) +
-      this.steps.filter((s) => s.exclude).length +
-      this.scope.sources.length +
-      (this.scope.excludedSources?.length ?? 0) +
-      (this.scope.timePreset ? 1 : 0) +
-      (this.hasRegexActive ? 1 : 0) +
-      (this.hasCaseActive ? 1 : 0) +
-      (this.hasWordActive ? 1 : 0)
-  );
+  hasTimeActive = $derived<boolean>(this.effectiveTimePreset !== '');
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -438,7 +446,58 @@ class WorkbenchState {
       this.loadSettings();
       this.loadHistory();
       this.loadCachedSources();
+      this.loadDetectedTimeTypes();
     }
+  }
+
+  private loadDetectedTimeTypes() {
+    const storage = getBrowserLocalStorage();
+    if (!storage) return;
+    try {
+      const raw = storage.getItem(DETECTED_TIME_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const out: Record<string, DetectedTimeInfo> = {};
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (!v || typeof v !== 'object') continue;
+          const rec = v as Partial<DetectedTimeInfo>;
+          if (rec.status === 'matched' || rec.status === 'unrecognized') {
+            out[k] = {
+              status: rec.status,
+              typeLabel: typeof rec.typeLabel === 'string' ? rec.typeLabel : '',
+              sampleTime: typeof rec.sampleTime === 'string' ? rec.sampleTime : '',
+              sampleFile: typeof rec.sampleFile === 'string' ? rec.sampleFile : '',
+            };
+          }
+        }
+        this.detectedTimeBySource = out;
+      }
+    } catch {
+      // ignore corrupted storage
+    }
+  }
+
+  private persistDetectedTimeTypes() {
+    const storage = getBrowserLocalStorage();
+    if (!storage?.setItem) return;
+    try {
+      storage.setItem(DETECTED_TIME_STORAGE_KEY, JSON.stringify(this.detectedTimeBySource));
+    } catch {
+      // ignore quota errors
+    }
+  }
+
+  getDetectedTimeType(sourceId: string): DetectedTimeInfo | null {
+    return this.detectedTimeBySource[sourceId] ?? null;
+  }
+
+  saveDetectedTimeType(sourceId: string, info: DetectedTimeInfo) {
+    this.detectedTimeBySource = {
+      ...this.detectedTimeBySource,
+      [sourceId]: info,
+    };
+    this.persistDetectedTimeTypes();
   }
 
   init() {
@@ -510,15 +569,11 @@ class WorkbenchState {
   }
 
   toggleScopeSidebar() {
-    if (this.isCompact) {
-      this.mobileScopeOpen = !this.mobileScopeOpen;
-      if (this.mobileScopeOpen) {
-        this.paletteOpen = false;
-        this.closeRightDrawer();
-      }
-    } else {
-      this.railFlyout = null;
-      this.leftSidebarOpen = !this.leftSidebarOpen;
+    if (!this.isCompact) return;
+    this.mobileScopeOpen = !this.mobileScopeOpen;
+    if (this.mobileScopeOpen) {
+      this.paletteOpen = false;
+      this.closeRightDrawer();
     }
   }
 
@@ -540,51 +595,15 @@ class WorkbenchState {
     this.mobileScopeOpen = false;
   }
 
-  openTimePicker() {
-    this.paletteOpen = false;
-    this.closeRightDrawer();
-    if (this.isCompact) {
-      this.mobileScopeOpen = true;
-    } else if (!this.leftSidebarOpen) {
-      this.railFlyout = 'time';
-    }
-  }
-
-  closeTimePicker() {
+  closeScopeOverlays() {
     this.mobileScopeOpen = false;
     this.railFlyout = null;
-  }
-
-  closeSettings() {
-    if (this.drawerPanel === 'settings') {
-      this.drawerPanel = null;
-    }
   }
 
   closeRightDrawer() {
     this.abortContextFetch();
     this.sourceAddOpen = false;
     this.drawerPanel = null;
-  }
-
-  openSourceManager() {
-    this.openSourcesDrawer(false);
-  }
-
-  openAddSourceModal() {
-    this.openSourcesDrawer(true);
-  }
-
-  openSettings(tab: 'general' | 'sources' | 'add-source' | 'shortcuts' = 'general') {
-    if (tab === 'sources') {
-      this.openSourcesDrawer(false);
-    } else if (tab === 'add-source') {
-      this.openSourcesDrawer(true);
-    } else if (tab === 'shortcuts') {
-      this.openShortcutsDrawer();
-    } else {
-      this.openSettingsDrawer();
-    }
   }
 
   // Auth & Session Lifecycle
@@ -824,6 +843,7 @@ class WorkbenchState {
       codeFontSize: this.codeFontSize,
       wordWrap: this.wordWrap,
       resultDensity: this.resultDensity,
+      defaultTimePreset: this.defaultTimePreset,
     };
   }
 
@@ -833,40 +853,54 @@ class WorkbenchState {
       getBrowserSessionStorage(),
       this.currentSettingsSnapshot()
     );
-    if (!loaded) return;
-    this.locale = loaded.locale;
-    this.tenant = loaded.tenant;
-    this.respectIgnore = loaded.respectIgnore;
-    this.hidden = loaded.hidden;
-    this.previewLines = loaded.previewLines;
-    this.contextInitialLines = loaded.contextInitialLines;
-    this.contextStepLines = loaded.contextStepLines;
-    this.contextAutoLoadPace = loaded.contextAutoLoadPace;
-    this.mcpMaxLogs = loaded.mcpMaxLogs;
-    this.maxResults = loaded.maxResults;
-    this.codeFontSize = loaded.codeFontSize;
-    this.wordWrap = loaded.wordWrap;
-    this.resultDensity = loaded.resultDensity;
+    if (loaded) {
+      this.locale = loaded.locale;
+      this.tenant = loaded.tenant;
+      this.respectIgnore = loaded.respectIgnore;
+      this.hidden = loaded.hidden;
+      this.previewLines = loaded.previewLines;
+      this.contextInitialLines = loaded.contextInitialLines;
+      this.contextStepLines = loaded.contextStepLines;
+      this.contextAutoLoadPace = loaded.contextAutoLoadPace;
+      this.mcpMaxLogs = loaded.mcpMaxLogs;
+      this.maxResults = loaded.maxResults;
+      this.codeFontSize = loaded.codeFontSize;
+      this.wordWrap = loaded.wordWrap;
+      this.resultDensity = loaded.resultDensity;
+      this.defaultTimePreset = loaded.defaultTimePreset;
+      if (!this.hasSearchedOnce) {
+        this.scope = { ...this.scope, timePreset: loaded.defaultTimePreset };
+      }
+    }
+    this.applyLocaleLang();
   }
 
-  setTenant(nextTenant: string) {
-    const clean = sanitizeTenantId(nextTenant);
-    if (clean === this.tenant) return;
-    this.tenant = clean;
-    this.invalidateCaches();
+  setDefaultTimePreset(preset: TimePreset) {
+    const prev = this.defaultTimePreset;
+    this.defaultTimePreset = preset;
     this.saveSettings();
-    void this.fetchSources();
-    if (this.hasSearchedOnce && this.hasExecutableQuery) {
-      this.executeSearch({ forceRefresh: true });
+    if (!this.hasSearchedOnce || this.scope.timePreset === prev) {
+      this.scope = { ...this.scope, timePreset: preset };
+      if (this.hasSearchedOnce && this.hasExecutableQuery) {
+        this.executeSearch({ forceRefresh: false, recordInHistory: false });
+      }
+    }
+  }
+
+  private applyLocaleLang() {
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = this.locale === 'zh' ? 'zh-CN' : 'en';
     }
   }
 
   toggleLocale() {
     this.locale = this.locale === 'zh' ? 'en' : 'zh';
+    this.applyLocaleLang();
     this.saveSettings();
   }
 
   saveSettings() {
+    this.applyLocaleLang();
     saveSettingsToStorage(getBrowserLocalStorage(), this.currentSettingsSnapshot());
   }
 
@@ -881,6 +915,10 @@ class WorkbenchState {
     this.codeFontSize = 13.5;
     this.wordWrap = true;
     this.resultDensity = 'comfortable';
+    this.defaultTimePreset = 'today';
+    if (!this.hasSearchedOnce) {
+      this.scope = { ...this.scope, timePreset: 'today' };
+    }
     this.saveSettings();
     if (this.hasSearchedOnce && this.hasExecutableQuery) {
       this.executeSearch({ forceRefresh: false });
@@ -939,11 +977,6 @@ class WorkbenchState {
     saveHistoryToStorage(getBrowserLocalStorage(), this.searchHistory);
   }
 
-  clearHistory() {
-    this.searchHistory = [];
-    clearHistoryFromStorage(getBrowserLocalStorage());
-  }
-
   // Meta, Sources & MCP API Actions
   async fetchMeta() {
     const data = await requestMeta(this.apiFetcher);
@@ -1000,14 +1033,16 @@ class WorkbenchState {
 
   async upsertDirectorySource(payload: UpsertSourcePayload) {
     this.handleMutatedSources(await postUpsertSource(this.apiFetcher, payload));
+    const saved =
+      (payload.id ? this.sources.find((s) => s.id === payload.id) : undefined) ??
+      this.sources.find((s) => s.path === payload.path);
+    if (saved && isContentTimeSource(saved) && !this.detectedTimeBySource[saved.id]) {
+      void this.detectSourceTimeType(saved);
+    }
   }
 
   async toggleSourceEnabled(id: string) {
     this.handleMutatedSources(await postToggleSource(this.apiFetcher, id));
-  }
-
-  async toggleAllSourcesEnabled(enabled: boolean) {
-    this.handleMutatedSources(await postToggleAllSources(this.apiFetcher, enabled));
   }
 
   async removeSource(id: string) {
@@ -1015,6 +1050,12 @@ class WorkbenchState {
     if (!data) return;
     this.invalidateCaches();
     this.applySourcesResponse(data);
+    if (this.detectedTimeBySource[id]) {
+      const next = { ...this.detectedTimeBySource };
+      delete next[id];
+      this.detectedTimeBySource = next;
+      this.persistDetectedTimeTypes();
+    }
     const excluded = this.scope.excludedSources ?? [];
     if (this.scope.sources.includes(id) || excluded.includes(id)) {
       this.scope = {
@@ -1062,13 +1103,24 @@ class WorkbenchState {
     if (Array.isArray(data.logs)) {
       this.mcpLogs = data.logs;
     }
+    this.mcpError = null;
     this.mcpLoaded = true;
   }
 
   async fetchMcpState() {
-    const data = await requestMcpState(this.apiFetcher);
-    if (data) {
-      this.applyMcpState(data);
+    this.mcpLoading = true;
+    this.mcpError = null;
+    try {
+      const data = await requestMcpState(this.apiFetcher);
+      if (data) {
+        this.applyMcpState(data);
+      } else {
+        this.mcpError = this.t.auth.networkError;
+      }
+    } catch (err) {
+      this.mcpError = err instanceof Error ? err.message : this.t.auth.networkError;
+    } finally {
+      this.mcpLoading = false;
     }
   }
 
@@ -1257,8 +1309,13 @@ class WorkbenchState {
       excludedSources: nextExcluded,
       types: [],
     };
+    if (!this.hasLogSourceInScope && this.railFlyout === 'time') {
+      this.railFlyout = null;
+    }
     if (this.hasSearchedOnce && this.hasExecutableQuery) {
       this.executeSearch({ forceRefresh: false, recordInHistory: false });
+    } else if (this.hasSearchedOnce && !this.hasExecutableQuery) {
+      this.clearToIdle();
     }
   }
 
@@ -1320,20 +1377,6 @@ class WorkbenchState {
     if (this.hasSearchedOnce && this.hasExecutableQuery) {
       this.executeSearch({ forceRefresh: false, recordInHistory: false });
     } else if (!this.hasExecutableQuery) {
-      this.clearToIdle();
-    }
-  }
-
-  resetAllFilters() {
-    const firstPos = this.compiledQuery.activeSteps.find((s) => !s.exclude);
-    this.steps = [];
-    this.resetDraft();
-    this.pattern = firstPos ? firstPos.text : '';
-    this.isRegex = Boolean(firstPos?.isRegex);
-    this.scope = { sources: [], excludedSources: [], types: [], timePreset: '' };
-    if (this.hasExecutableQuery) {
-      this.executeSearch({ forceRefresh: false, recordInHistory: false });
-    } else {
       this.clearToIdle();
     }
   }
@@ -1433,7 +1476,7 @@ class WorkbenchState {
     return buildSearchRequestPlan({
       steps: this.steps,
       draftStep: this.draftStep,
-      scope: this.scope,
+      scope: this.effectiveScope,
       sources: this.sources,
       tenant: this.tenant,
       mode: this.mode,
@@ -1594,6 +1637,166 @@ class WorkbenchState {
     return postTimePreview(this.apiFetcher, format, sample);
   }
 
+  async detectSourceTimeType(src: DataSourceItem): Promise<{
+    matched: boolean;
+    typeLabel: string;
+    sampleTime: string;
+    sampleFile: string;
+  }> {
+    const empty = { matched: false, typeLabel: '', sampleTime: '', sampleFile: '' };
+    if (!src.exists || !src.path) {
+      this.saveDetectedTimeType(src.id, {
+        status: 'unrecognized',
+        typeLabel: '',
+        sampleTime: '',
+        sampleFile: '',
+      });
+      return empty;
+    }
+
+    const candidateFiles: { reqPath: string; displayName: string; score: number }[] = [];
+    const srcRoot = src.path.replace(/\/+$/, '');
+
+    const toFileRequestPath = (absPath: string): { reqPath: string; displayName: string } => {
+      if (srcRoot && absPath.startsWith(`${srcRoot}/`)) {
+        const rel = absPath.slice(srcRoot.length + 1);
+        return {
+          reqPath: `${src.name}/${rel}`,
+          displayName: rel,
+        };
+      }
+      const base = absPath.split('/').filter(Boolean).pop() || src.name;
+      return { reqPath: absPath, displayName: base };
+    };
+
+    const fileScore = (name: string): number => {
+      if (/\.(png|jpe?g|gif|webp|ico|pdf|zip|tar|tgz|gz|zst|xz|bin|exe|dylib|so|o|a|wasm|db|sqlite|mp4|mov|mp3|wav|ttf|woff2?)$/i.test(name)) {
+        // Keep compressed single-file logs (.log.gz / .log.zst / .log.xz) eligible
+        if (/\.(log|jsonl|ndjson|txt)\.(gz|zst|xz)$/i.test(name)) return 0;
+        return 99;
+      }
+      if (/\.(log|jsonl|ndjson)$/i.test(name)) return 0;
+      if (/(log|access|error|event)/i.test(name)) return 1;
+      if (/\.(out|txt)$/i.test(name)) return 2;
+      return 3;
+    };
+
+    const dirScore = (name: string): number => {
+      if (/^(logs?|var|events?|20\d{2})/i.test(name)) return 0;
+      return 1;
+    };
+
+    if (src.kind === 'file') {
+      const base = src.path.split('/').filter(Boolean).pop() || src.name;
+      candidateFiles.push({ reqPath: src.path, displayName: base, score: 0 });
+    } else {
+      const visitedDirs = new Set<string>();
+      const queue: { dirPath: string; depth: number }[] = [{ dirPath: srcRoot, depth: 0 }];
+      const MAX_DIRS = 16;
+      const MAX_DEPTH = 4;
+
+      while (queue.length > 0 && visitedDirs.size < MAX_DIRS) {
+        const cur = queue.shift()!;
+        const normDir = cur.dirPath.replace(/\/+$/, '');
+        if (!normDir || visitedDirs.has(normDir)) continue;
+        visitedDirs.add(normDir);
+
+        const entries = await requestDirSuggestions(this.apiFetcher, `${normDir}/`, 'file');
+        const subDirs: { dirPath: string; depth: number; score: number }[] = [];
+        for (const e of entries) {
+          if (e.isDir) {
+            if (cur.depth < MAX_DEPTH && !e.name.startsWith('.')) {
+              subDirs.push({ dirPath: e.path, depth: cur.depth + 1, score: dirScore(e.name) });
+            }
+          } else {
+            const sc = fileScore(e.name);
+            if (sc < 99) {
+              const { reqPath, displayName } = toFileRequestPath(e.path);
+              candidateFiles.push({ reqPath, displayName, score: sc + cur.depth * 0.25 });
+            }
+          }
+        }
+        subDirs.sort((a, b) => a.score - b.score);
+        for (const d of subDirs) {
+          if (!visitedDirs.has(d.dirPath.replace(/\/+$/, ''))) {
+            queue.push({ dirPath: d.dirPath, depth: d.depth });
+          }
+        }
+        // Fast exit if we already found top-priority .log/.jsonl files at this level
+        if (candidateFiles.some((f) => f.score === 0) && visitedDirs.size >= 1) {
+          break;
+        }
+      }
+      candidateFiles.sort((a, b) => a.score - b.score);
+    }
+
+    const classifyLine = (line: string): string => {
+      const trimmed = line.trim();
+      const isJson = trimmed.startsWith('{') && trimmed.endsWith('}');
+      const prefix = isJson ? 'JSON · ' : '';
+      if (/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(trimmed)) return `${prefix}ISO-8601`;
+      if (/\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}/.test(trimmed)) {
+        return `${prefix}${this.locale === 'zh' ? '标准时间' : 'Standard'}`;
+      }
+      if (/\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}/.test(trimmed)) {
+        return `${prefix}${this.locale === 'zh' ? '斜杠时间' : 'Slash Date'}`;
+      }
+      if (/\[\d{2}\/[A-Za-z]{3}\/\d{4}:\d{2}:\d{2}:\d{2}/.test(trimmed)) return 'Nginx CLF';
+      if (/^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}/.test(trimmed)) return 'Syslog';
+      if (/(?:^|\D)1\d{18}(?:\D|$)/.test(trimmed)) return `${prefix}Epoch (ns)`;
+      if (/(?:^|\D)1\d{12}(?:\D|$)/.test(trimmed)) return `${prefix}Epoch (ms)`;
+      if (/(?:^|\D)1\d{9}(?:\D|$)/.test(trimmed)) return `${prefix}Epoch (s)`;
+      if (/(?:^|\D)20\d{12}(?:\D|$)/.test(trimmed)) {
+        return `${prefix}${this.locale === 'zh' ? '紧凑数字' : 'Compact'}`;
+      }
+      return `${prefix}${this.locale === 'zh' ? '时间戳' : 'Timestamp'}`;
+    };
+
+    for (const cand of candidateFiles.slice(0, 10)) {
+      let resp: FileResponse;
+      try {
+        resp = await requestFileWindow(this.apiFetcher, {
+          tenant: this.tenant,
+          filePath: cand.reqPath,
+          line: 1,
+          context: 20,
+        });
+      } catch {
+        continue;
+      }
+      if (resp.binary || !resp.lines || resp.lines.length === 0) continue;
+      const nonEmpty = resp.lines
+        .map((l) => l.text.trim())
+        .filter((s) => s.length > 0)
+        .slice(0, 10);
+      for (const sample of nonEmpty) {
+        const res = await postTimePreview(this.apiFetcher, 'auto', sample);
+        if (res.matched && (res.localDisplay || res.isoUtc)) {
+          const result = {
+            matched: true,
+            typeLabel: classifyLine(sample),
+            sampleTime: res.localDisplay || res.isoUtc || '',
+            sampleFile: cand.displayName,
+          };
+          this.saveDetectedTimeType(src.id, {
+            status: 'matched',
+            typeLabel: result.typeLabel,
+            sampleTime: result.sampleTime,
+            sampleFile: result.sampleFile,
+          });
+          return result;
+        }
+      }
+    }
+    this.saveDetectedTimeType(src.id, {
+      status: 'unrecognized',
+      typeLabel: '',
+      sampleTime: '',
+      sampleFile: '',
+    });
+    return empty;
+  }
+
   private handleWsMessage(msg: WsIncomingMessage) {
     if (msg.id !== this.currentSearchId || msg.id === this.cancelledSearchId) {
       if (msg.type === 'done' || msg.type === 'error') {
@@ -1729,17 +1932,6 @@ class WorkbenchState {
     this.fileGroups = collapseAllGroups(this.fileGroups, collapsed);
   }
 
-  selectHit(item: HitItem) {
-    const idx = this.flatHits.findIndex(
-      (h) => h.file === item.file && h.line === item.line && h.col === item.col
-    );
-    if (idx >= 0) {
-      this.selectHitByIndex(idx, true);
-    } else {
-      void this.inspectFileAtLine(item.file, item.line, true);
-    }
-  }
-
   previewSelectHitByIndex(index: number) {
     if (index >= 0 && index < this.flatHits.length) {
       this.activeHitIndex = index;
@@ -1798,8 +1990,22 @@ class WorkbenchState {
   }
 
   navigateHits(delta: 1 | -1, rapid = false) {
-    if (this.flatHits.length === 0) return;
-    const next = Math.max(0, Math.min(this.flatHits.length - 1, this.activeHitIndex + delta));
+    const hits = this.flatHits;
+    if (hits.length === 0) return;
+    const pred = this.visibleHitPredicate;
+    let next =
+      this.activeHitIndex < 0 ? (delta > 0 ? 0 : hits.length - 1) : this.activeHitIndex + delta;
+    while (next >= 0 && next < hits.length && pred && !pred(hits[next])) {
+      next += delta;
+    }
+    if (next < 0 || next >= hits.length) {
+      if (!pred) {
+        const clamped = Math.max(0, Math.min(hits.length - 1, this.activeHitIndex + delta));
+        this.selectHitByIndex(clamped, false, rapid);
+        this.scrollToActiveTick += 1;
+      }
+      return;
+    }
     this.selectHitByIndex(next, false, rapid);
     this.scrollToActiveTick += 1;
   }

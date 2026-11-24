@@ -29,6 +29,8 @@ export interface StorageLike {
   removeItem?(key: string): void;
 }
 
+export const DEFAULT_TIME_PRESET_CHOICES = ['', '1h', 'today', '24h', '7d'] as const;
+
 export interface PersistedSettings {
   locale: Locale;
   tenant: string;
@@ -43,6 +45,7 @@ export interface PersistedSettings {
   codeFontSize: number;
   wordWrap: boolean;
   resultDensity: 'compact' | 'comfortable';
+  defaultTimePreset: TimePreset;
 }
 
 export const DEFAULT_PERSISTED_SETTINGS: Readonly<PersistedSettings> = {
@@ -59,6 +62,7 @@ export const DEFAULT_PERSISTED_SETTINGS: Readonly<PersistedSettings> = {
   codeFontSize: 13.5,
   wordWrap: true,
   resultDensity: 'comfortable',
+  defaultTimePreset: 'today',
 };
 
 export function getBrowserLocalStorage(): StorageLike | null {
@@ -188,6 +192,12 @@ export function normalizeSettings(
   }
   if (typeof s.tenant === 'string' && s.tenant.trim().length > 0) {
     base.tenant = s.tenant.trim();
+  }
+  if (typeof s.defaultTimePreset === 'string') {
+    const allowed = new Set<string>(['', '5m', '15m', '30m', '1h', '3h', '6h', '12h', '24h', 'today', 'yesterday', '7d', '30d']);
+    if (allowed.has(s.defaultTimePreset)) {
+      base.defaultTimePreset = s.defaultTimePreset as TimePreset;
+    }
   }
   return base;
 }
