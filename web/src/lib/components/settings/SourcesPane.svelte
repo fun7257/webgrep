@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import { filterSourcesForPicker } from '$lib/source-picker';
   import {
@@ -15,11 +16,9 @@
     AlertTriangle,
     Check,
     Clock,
-    Code2,
     FileText,
     Folder,
     Plus,
-    ScrollText,
     Search,
     SlidersHorizontal,
     Trash2,
@@ -28,9 +27,16 @@
 
   const t = $derived(workbench.t.ui);
 
-  // Two-step delete: first tap arms (icon turns into a check), second tap confirms.
+  // Two-step delete: first tap arms a compact confirmation pill, second tap confirms.
   let armedId = $state<string | null>(null);
   let armTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onDestroy(() => {
+    if (armTimer) {
+      clearTimeout(armTimer);
+      armTimer = null;
+    }
+  });
   let editingFormatId = $state<string | null>(null);
   let formatDraft = $state<string>('');
   let formatValid = $state<boolean>(true);
@@ -123,7 +129,7 @@
           onclick={() => (sourceFilter = '')}
           title={workbench.t.searchBar.clearDraftTitle}
           aria-label={workbench.t.searchBar.clearDraftTitle}
-          class="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
+          class="touch-target absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
         >
           <X class="h-3 w-3" />
         </button>
@@ -183,19 +189,20 @@
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="truncate font-medium text-foreground/95">@{src.name}</span>
                 <span
-                  class={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded ring-1 ring-inset ${
+                  class={`inline-flex h-5 shrink-0 items-center rounded px-1.5 text-[10.5px] font-medium ring-1 ring-inset ${
                     effectivePreset === 'code'
                       ? 'bg-primary/10 text-primary ring-primary/20'
                       : 'bg-secondary/75 text-muted-foreground ring-border/55'
                   }`}
                   title={modeTitle}
-                  aria-label={presetMeta?.label ?? effectivePreset}
                 >
-                  {#if effectivePreset === 'code'}
-                    <Code2 class="h-3 w-3" />
-                  {:else}
-                    <ScrollText class="h-3 w-3" />
-                  {/if}
+                  {effectivePreset === 'code'
+                    ? workbench.locale === 'zh'
+                      ? '代码'
+                      : 'Code'
+                    : workbench.locale === 'zh'
+                      ? '日志'
+                      : 'Log'}
                 </span>
                 {#if hasCustomFormat}
                   <span
@@ -239,14 +246,14 @@
               onclick={() => onDelete(src.id)}
               title={armedId === src.id ? t.confirmDelete : t.delete}
               aria-label={armedId === src.id ? t.confirmDelete : t.delete}
-              class={`touch-target flex h-8 w-8 shrink-0 items-center justify-center rounded-lg cursor-pointer ${
+              class={`touch-target inline-flex shrink-0 items-center justify-center rounded-lg cursor-pointer ${
                 armedId === src.id
-                  ? 'bg-status/15 text-status active:bg-status/25'
-                  : 'text-muted-foreground/65 hover:bg-secondary/70 hover:text-foreground active:bg-secondary/80'
+                  ? 'h-7 bg-status/15 px-2 text-[11px] font-medium text-status hover:bg-status/20 active:bg-status/25'
+                  : 'h-8 w-8 text-muted-foreground/65 hover:bg-secondary/70 hover:text-foreground active:bg-secondary/80'
               }`}
             >
               {#if armedId === src.id}
-                <Check class="h-4 w-4" />
+                <span>{workbench.locale === 'zh' ? '确认?' : 'Delete?'}</span>
               {:else}
                 <Trash2 class="h-4 w-4" />
               {/if}
@@ -254,8 +261,9 @@
           </div>
 
           {#if editingFormatId === src.id}
-            <div class="mb-2 mt-1.5 space-y-2 rounded-lg border border-border/55 bg-background/85 p-2.5">
+            <div class="mt-1.5 space-y-2.5 border-t border-border/40 pb-1.5 pt-2.5">
               <SourcePrefilterEditor
+                source={src}
                 preset={presetDraft}
                 overrides={pluginsDraft}
                 timeFormat={formatDraft}

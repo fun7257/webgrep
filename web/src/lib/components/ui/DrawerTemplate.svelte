@@ -7,6 +7,7 @@
   interface Props {
     icon: typeof SlidersHorizontal;
     title: string;
+    titleTooltip?: string;
     badge?: string;
     badgeTitle?: string;
     headerActions?: Snippet;
@@ -20,6 +21,7 @@
   let {
     icon: Icon,
     title,
+    titleTooltip,
     badge = '',
     badgeTitle = '',
     headerActions,
@@ -32,13 +34,13 @@
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col select-none bg-background text-foreground">
-  <div class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/50 px-4 md:px-5">
+  <div class="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/50 px-4 md:px-5">
     <div class="flex min-w-0 items-center gap-2.5">
       <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-secondary/70 text-foreground/80">
         <Icon class="h-3.5 w-3.5" />
       </span>
       <h2
-        title={title}
+        title={titleTooltip || title}
         class="truncate text-[13.5px] font-semibold tracking-[-0.01em] text-foreground"
       >
         {title}

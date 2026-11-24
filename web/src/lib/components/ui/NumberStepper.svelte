@@ -23,6 +23,9 @@
     onchange,
   }: Props = $props();
 
+  let isFocused = $state(false);
+  let draft = $state('');
+
   let isInteger = $derived(Number.isInteger(step));
   let stepUnit = $derived(`${step}${suffix}`);
   let rangeHint = $derived(`${min} – ${max}${suffix ? ` ${suffix}` : ''}`);
@@ -35,22 +38,44 @@
 
   function stepBy(delta: number) {
     const next = clamp(value + delta * step);
+    if (isFocused) {
+      draft = String(next);
+    }
     if (next !== value) {
       onchange(next);
     }
   }
 
-  function handleInput(e: Event) {
-    const raw = (e.currentTarget as HTMLInputElement).value.trim();
-    if (!raw) return;
+  function commitDraft() {
+    const raw = draft.trim();
+    if (!raw) {
+      draft = String(value);
+      return;
+    }
     const parsed = isInteger ? parseInt(raw, 10) : parseFloat(raw);
-    if (!Number.isFinite(parsed)) return;
-    onchange(clamp(parsed));
+    if (!Number.isFinite(parsed)) {
+      draft = String(value);
+      return;
+    }
+    const next = clamp(parsed);
+    draft = String(next);
+    if (next !== value) {
+      onchange(next);
+    }
   }
 
-  function handleBlur(e: FocusEvent) {
-    const input = e.currentTarget as HTMLInputElement;
-    input.value = String(value);
+  function handleFocus() {
+    isFocused = true;
+    draft = String(value);
+  }
+
+  function handleInput(e: Event) {
+    draft = (e.currentTarget as HTMLInputElement).value;
+  }
+
+  function handleBlur() {
+    commitDraft();
+    isFocused = false;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -60,12 +85,20 @@
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       stepBy(-1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      commitDraft();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      draft = String(value);
+      (e.currentTarget as HTMLInputElement).blur();
     }
   }
 </script>
 
 <div
-  class="inline-flex h-8 shrink-0 items-center rounded-lg border border-border/55 bg-secondary/50 dark:bg-secondary/45 p-0.5 shadow-2xs focus-within:border-primary/60 focus-within:bg-background"
+  class="inline-flex h-8 shrink-0 items-center rounded-lg border border-border/55 bg-secondary/50 dark:bg-secondary/45 p-0.5 shadow-sm focus-within:border-primary/60 focus-within:bg-background"
 >
   <button
     type="button"
@@ -86,7 +119,8 @@
       type="text"
       inputmode={isInteger ? 'numeric' : 'decimal'}
       aria-label={rangeHint}
-      value={value}
+      value={isFocused ? draft : String(value)}
+      onfocus={handleFocus}
       oninput={handleInput}
       onblur={handleBlur}
       onkeydown={handleKeydown}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { flushSync } from 'svelte';
+  import { flushSync, onDestroy, onMount } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import { DEFAULT_PLUGIN_PRESET, type NormalizedPluginOverrides } from '$lib/prefilter';
   import type { DirSuggestEntry, PluginPreset } from '$lib/types';
@@ -41,6 +41,16 @@
   let selectedIdx = $state(0);
   let suggestTimer: ReturnType<typeof setTimeout> | null = null;
   let pathEl = $state<HTMLInputElement | null>(null);
+
+  onMount(() => {
+    if (!workbench.isCompact && !workbench.isTouch) {
+      pathEl?.focus({ preventScroll: true });
+    }
+  });
+
+  onDestroy(() => {
+    if (suggestTimer) clearTimeout(suggestTimer);
+  });
 
   const derivedName = $derived.by(() => {
     const clean = pathInput.trim().replace(/\/+$/, '');
@@ -179,7 +189,15 @@
     />
   </div>
 
-  <div class="relative">
+  <div
+    class="relative"
+    onfocusout={(e) => {
+      const next = e.relatedTarget as Node | null;
+      if (!next || !e.currentTarget.contains(next)) {
+        showSuggest = false;
+      }
+    }}
+  >
     {#if kind === 'file'}
       <FileText class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
     {:else}
@@ -222,7 +240,14 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         onclick={(e) => e.stopPropagation()}
-        onkeydown={() => {}}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            showSuggest = false;
+            pathEl?.focus({ preventScroll: true });
+          }
+        }}
         class="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl"
       >
         {#each suggestions as entry, idx (entry.path)}
@@ -286,21 +311,23 @@
     />
   </div>
 
-  <SourcePrefilterEditor
-    preset={pluginPresetInput}
-    overrides={pluginOverridesInput}
-    timeFormat={timeFormatInput}
-    defaultAutoTimeFormat=""
-    onchange={(nextPreset, nextOverrides) => {
-      pluginPresetInput = nextPreset;
-      pluginOverridesInput = nextOverrides;
-    }}
-    ontimeformatchange={(fmt, valid) => {
-      timeFormatInput = fmt;
-      timeFormatValid = valid;
-    }}
-    onsubmit={() => void submit()}
-  />
+  <div class="border-t border-border/40 pt-2.5">
+    <SourcePrefilterEditor
+      preset={pluginPresetInput}
+      overrides={pluginOverridesInput}
+      timeFormat={timeFormatInput}
+      defaultAutoTimeFormat=""
+      onchange={(nextPreset, nextOverrides) => {
+        pluginPresetInput = nextPreset;
+        pluginOverridesInput = nextOverrides;
+      }}
+      ontimeformatchange={(fmt, valid) => {
+        timeFormatInput = fmt;
+        timeFormatValid = valid;
+      }}
+      onsubmit={() => void submit()}
+    />
+  </div>
 
   {#if submitError}
     <div class="flex items-center justify-between gap-2 rounded-lg bg-status/10 px-2.5 py-2 text-xs text-status">
@@ -308,25 +335,41 @@
         <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
         <span class="truncate">{submitError}</span>
       </div>
-      <button type="button" onclick={() => (submitError = null)} class="shrink-0 text-status/70 hover:text-status cursor-pointer" aria-label={workbench.t.settings.closeTitle}>
+      <button
+        type="button"
+        onclick={() => (submitError = null)}
+        class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded text-status/70 hover:text-status cursor-pointer"
+        aria-label={workbench.t.settings.closeTitle}
+      >
         <X class="h-3 w-3" />
       </button>
     </div>
   {/if}
 
-  <button
-    type="button"
-    disabled={submitting || !pathInput.trim() || !timeFormatValid}
-    onclick={submit}
-    title={t.addSource}
-    aria-label={t.addSource}
-    class="touch-target flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
-  >
-    {#if submitting}
-      <Loader2 class="h-3.5 w-3.5 animate-spin" />
-    {:else}
-      <Plus class="h-3.5 w-3.5" />
-    {/if}
-    <span>{t.addSource}</span>
-  </button>
+  <div class="flex items-center gap-2">
+    <button
+      type="button"
+      onclick={ondone}
+      title={t.cancel}
+      aria-label={t.cancel}
+      class="touch-target flex h-9 shrink-0 items-center justify-center gap-1 rounded-lg border border-border/60 bg-background px-3 text-xs font-medium text-muted-foreground hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
+    >
+      <span>{t.cancel}</span>
+    </button>
+    <button
+      type="button"
+      disabled={submitting || !pathInput.trim() || !timeFormatValid}
+      onclick={submit}
+      title={t.addSource}
+      aria-label={t.addSource}
+      class="touch-target flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-40 cursor-pointer"
+    >
+      {#if submitting}
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+      {:else}
+        <Plus class="h-3.5 w-3.5" />
+      {/if}
+      <span>{t.addSource}</span>
+    </button>
+  </div>
 </div>

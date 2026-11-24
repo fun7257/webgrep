@@ -4,14 +4,23 @@
     normalizePluginPreset,
     type NormalizedPluginOverrides,
   } from '$lib/prefilter';
-  import type { PluginOverrides, PluginPreset } from '$lib/types';
+  import type { DataSourceItem, PluginOverrides, PluginPreset } from '$lib/types';
   import Segmented from '../ui/Segmented.svelte';
-  import SourceTimeFormatEditor from './SourceTimeFormatEditor.svelte';
-  import { ChevronDown, ChevronRight, Clock, Code2, Layers, ScrollText } from 'lucide-svelte';
+  import {
+    AlertTriangle,
+    Check,
+    Clock,
+    Code2,
+    Layers,
+    Loader2,
+    ScrollText,
+    Sparkles,
+  } from 'lucide-svelte';
 
   interface Props {
     preset: PluginPreset;
     overrides?: PluginOverrides;
+    source?: DataSourceItem;
     onchange: (nextPreset: PluginPreset, nextOverrides: NormalizedPluginOverrides) => void;
     timeFormat?: string;
     defaultAutoTimeFormat?: string;
@@ -23,32 +32,49 @@
   let {
     preset,
     overrides: _overrides,
+    source,
     onchange,
-    timeFormat = '',
+    timeFormat: _timeFormat = '',
     defaultAutoTimeFormat = '',
     ontimeformatchange,
-    onsubmit,
-    oncancel,
+    onsubmit: _onsubmit,
+    oncancel: _oncancel,
   }: Props = $props();
 
   const t = $derived(workbench.t.ui);
   const catalog = $derived(workbench.prefilterCatalog);
+  const isZh = $derived(workbench.locale === 'zh');
 
-  let formatExpanded = $state(false);
+  type DetectState =
+    | { status: 'idle' }
+    | { status: 'loading' }
+    | { status: 'matched'; typeLabel: string; sampleTime: string; sampleFile: string }
+    | { status: 'unrecognized' };
+
+  let detecting = $state(false);
+  let detectSeq = 0;
 
   const normalizedPreset = $derived(normalizePluginPreset(preset));
-  const trimmedFormat = $derived(timeFormat.trim());
-  const hasCustomFormat = $derived(
-    Boolean(trimmedFormat) && trimmedFormat.toLowerCase() !== 'auto'
-  );
-  const showTimeFormatSection = $derived(
-    Boolean(ontimeformatchange) && normalizedPreset !== 'code'
-  );
+  const showTimeDetectSection = $derived(Boolean(source) && normalizedPreset !== 'code');
+  const savedDetect = $derived(source ? workbench.getDetectedTimeType(source.id) : null);
+
+  const detectState = $derived.by<DetectState>(() => {
+    if (detecting) return { status: 'loading' };
+    if (!savedDetect) return { status: 'idle' };
+    if (savedDetect.status === 'matched') {
+      return {
+        status: 'matched',
+        typeLabel: savedDetect.typeLabel,
+        sampleTime: savedDetect.sampleTime,
+        sampleFile: savedDetect.sampleFile,
+      };
+    }
+    return { status: 'unrecognized' };
+  });
 
   $effect(() => {
-    if (hasCustomFormat) {
-      formatExpanded = true;
-    }
+    void source?.id;
+    detecting = false;
   });
 
   const presetOptions = $derived(
@@ -71,17 +97,27 @@
 
   function handlePresetChange(nextPreset: PluginPreset) {
     if (nextPreset === 'code') {
-      formatExpanded = false;
+      detecting = false;
       ontimeformatchange?.('', true);
-    } else if (normalizedPreset === 'code' && !hasCustomFormat) {
+    } else if (normalizedPreset === 'code') {
       ontimeformatchange?.(defaultAutoTimeFormat, true);
     }
     if (nextPreset === normalizedPreset) return;
     onchange(nextPreset, { enable: [], disable: [] });
   }
+
+  async function runDetect() {
+    if (!source || detecting) return;
+    const seq = ++detectSeq;
+    detecting = true;
+    ontimeformatchange?.(defaultAutoTimeFormat, true);
+    await workbench.detectSourceTimeType(source);
+    if (seq !== detectSeq) return;
+    detecting = false;
+  }
 </script>
 
-<div class="space-y-2 rounded-lg border border-border/65 bg-secondary/15 p-2.5">
+<div class="space-y-2">
   <div class="flex items-center justify-between gap-2" title={activePresetHint}>
     <span class="inline-flex min-w-0 items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
       <Layers class="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" />
@@ -94,45 +130,58 @@
     />
   </div>
 
-  {#if showTimeFormatSection}
-    <div class="border-t border-border/45 pt-2">
-      <button
-        type="button"
-        aria-expanded={formatExpanded}
-        onclick={() => (formatExpanded = !formatExpanded)}
-        title={hasCustomFormat ? `${t.sourceTimeFormatLabel}: ${trimmedFormat}` : t.sourceTimeAutoHint}
-        class="touch-target flex w-full items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[11.5px] text-muted-foreground hover:text-foreground cursor-pointer"
-      >
-        <span class="inline-flex min-w-0 items-center gap-1.5">
-          {#if formatExpanded}
-            <ChevronDown class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
-          {:else}
-            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" />
-          {/if}
+  {#if showTimeDetectSection}
+    <div class="border-t border-border/40 pt-2">
+      <div class="flex items-center justify-between gap-2">
+        <span class="inline-flex shrink-0 items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
           <Clock class="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" />
-          <span class="truncate">{t.sourceTimeFormatLabel}</span>
+          <span>{isZh ? '时间类型' : 'Time Type'}</span>
         </span>
 
-        <span
-          class={`max-w-[55%] shrink-0 truncate rounded px-1.5 py-0.5 font-mono text-[10.5px] ${
-            hasCustomFormat
-              ? 'bg-primary/10 font-medium text-primary ring-1 ring-inset ring-primary/20'
-              : 'bg-secondary/75 text-muted-foreground'
-          }`}
-        >
-          {hasCustomFormat ? trimmedFormat : t.sourceBadgeAuto}
-        </span>
-      </button>
+        <div class="flex min-w-0 items-center gap-1.5">
+          <!-- Time Type Status Window -->
+          {#if detectState.status === 'loading'}
+            <span class="inline-flex items-center gap-1 rounded-md bg-secondary/65 px-2 py-1 font-mono text-[10.5px] leading-none text-muted-foreground">
+              <Loader2 class="h-3 w-3 animate-spin shrink-0" />
+              <span>{isZh ? '识别中…' : 'Detecting…'}</span>
+            </span>
+          {:else if detectState.status === 'matched'}
+            <span
+              title={`${detectState.typeLabel} · ${detectState.sampleTime} (${detectState.sampleFile})`}
+              class="inline-flex min-w-0 max-w-[200px] items-center gap-1 rounded-md bg-primary/12 px-2 py-1 font-mono text-[10.5px] leading-none text-primary ring-1 ring-inset ring-primary/30"
+            >
+              <Check class="h-3 w-3 shrink-0" />
+              <span class="truncate">{detectState.typeLabel}</span>
+            </span>
+          {:else if detectState.status === 'unrecognized'}
+            <span class="inline-flex items-center gap-1 rounded-md bg-status/12 px-2 py-1 font-mono text-[10.5px] leading-none text-status ring-1 ring-inset ring-status/30">
+              <AlertTriangle class="h-3 w-3 shrink-0" />
+              <span>{isZh ? '无法识别' : 'Unrecognized'}</span>
+            </span>
+          {:else}
+            <span class="inline-flex items-center rounded-md bg-secondary/55 px-2 py-1 font-mono text-[10.5px] leading-none text-muted-foreground">
+              {isZh ? '未检测' : 'Not checked'}
+            </span>
+          {/if}
 
-      {#if formatExpanded}
-        <div class="mt-2">
-          <SourceTimeFormatEditor
-            value={timeFormat}
-            defaultAutoValue={defaultAutoTimeFormat}
-            onchange={(fmt, valid) => ontimeformatchange?.(fmt, valid)}
-            {onsubmit}
-            {oncancel}
-          />
+          <button
+            type="button"
+            disabled={detectState.status === 'loading'}
+            onclick={() => void runDetect()}
+            title={isZh ? '采样日志自动识别时间类型' : 'Sample log lines to detect timestamp type'}
+            class="touch-target inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border/70 bg-background px-2 text-[11px] font-medium text-foreground hover:bg-secondary/70 active:bg-secondary disabled:opacity-50 cursor-pointer"
+          >
+            <Sparkles class="h-3 w-3 shrink-0 text-primary" />
+            <span>{isZh ? '识别' : 'Detect'}</span>
+          </button>
+        </div>
+      </div>
+
+      {#if detectState.status === 'matched' && detectState.sampleTime}
+        <div class="mt-1.5 flex items-center justify-end gap-1.5 font-mono text-[10.5px] text-muted-foreground tabular-nums">
+          <span class="truncate">{detectState.sampleFile}</span>
+          <span>·</span>
+          <span class="shrink-0 text-foreground/85">{detectState.sampleTime}</span>
         </div>
       {/if}
     </div>

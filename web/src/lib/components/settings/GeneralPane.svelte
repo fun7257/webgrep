@@ -12,24 +12,20 @@
   import Switch from '../ui/Switch.svelte';
   import {
     ALargeSmall,
+    AlignLeft,
     ChevronsUpDown,
-    Cpu,
+    Clock,
     FoldVertical,
-    Gauge,
     Languages,
     ListOrdered,
     Moon,
     Palette,
     PanelRight,
     Rows3,
-    Rows4,
     Sun,
     SunMoon,
     TextWrap,
     Timer,
-    Turtle,
-    UnfoldVertical,
-    Zap,
   } from 'lucide-svelte';
 
   const s = $derived(workbench.t.settings);
@@ -110,14 +106,22 @@
         <Segmented
           value={workbench.resultDensity}
           options={[
-            { value: 'compact', icon: Rows4, title: s.densityCompact },
-            { value: 'comfortable', icon: Rows3, title: s.densityComfortable },
+            {
+              value: 'compact',
+              label: workbench.locale === 'zh' ? '紧凑' : 'Compact',
+              title: s.densityCompact,
+            },
+            {
+              value: 'comfortable',
+              label: workbench.locale === 'zh' ? '舒适' : 'Comfy',
+              title: s.densityComfortable,
+            },
           ]}
           onchange={(v) => display(() => (workbench.resultDensity = v))}
         />
       </SettingRow>
 
-      <SettingRow icon={UnfoldVertical} label={s.previewLinesLabel} hint={s.previewLinesDesc}>
+      <SettingRow icon={AlignLeft} label={s.previewLinesLabel} hint={s.previewLinesDesc}>
         <NumberStepper
           value={workbench.previewLines}
           min={1}
@@ -125,6 +129,57 @@
           step={1}
           widthClass="w-10"
           onchange={(v) => display(() => (workbench.previewLines = v))}
+        />
+      </SettingRow>
+
+      <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
+        <NumberStepper
+          value={workbench.maxResults}
+          min={500}
+          max={500000}
+          step={500}
+          widthClass="w-16"
+          onchange={(v) => search(() => (workbench.maxResults = v))}
+        />
+      </SettingRow>
+
+      <SettingRow
+        icon={Clock}
+        label={workbench.locale === 'zh' ? '默认时间' : 'Default Time'}
+        hint={workbench.locale === 'zh'
+          ? '打开页面时日志检索的默认时间范围'
+          : 'Default log search time range on startup'}
+      >
+        <Segmented
+          value={workbench.defaultTimePreset}
+          options={[
+            {
+              value: '',
+              label: workbench.t.scopeBar.timeTriggerAny,
+              title: workbench.t.scopeBar.timeLabels[''],
+            },
+            {
+              value: '1h',
+              label: '1h',
+              title: workbench.t.scopeBar.timeLabels['1h'],
+            },
+            {
+              value: 'today',
+              label: workbench.t.scopeBar.timeShortLabels.today,
+              title: workbench.t.scopeBar.timeLabels.today,
+            },
+            {
+              value: '24h',
+              label: '24h',
+              title: workbench.t.scopeBar.timeLabels['24h'],
+            },
+            {
+              value: '7d',
+              label: '7d',
+              title: workbench.t.scopeBar.timeLabels['7d'],
+            },
+          ]}
+          onchange={(v) => workbench.setDefaultTimePreset(v)}
         />
       </SettingRow>
     </div>
@@ -179,34 +234,12 @@
         <Segmented
           value={workbench.contextAutoLoadPace}
           options={[
-            { value: 'slow', icon: Turtle, title: `${s.paceSlow} (480ms)` },
-            { value: 'normal', icon: Gauge, title: `${s.paceNormal} (240ms)` },
-            { value: 'fast', icon: Zap, title: `${s.paceFast} (90ms)` },
+            { value: 'slow', label: s.paceSlow, title: `${s.paceSlow} (480ms)` },
+            { value: 'normal', label: s.paceNormal, title: `${s.paceNormal} (240ms)` },
+            { value: 'fast', label: s.paceFast, title: `${s.paceFast} (90ms)` },
           ]}
           onchange={(v) =>
             display(() => (workbench.contextAutoLoadPace = normalizeContextAutoLoadPace(v)))}
-        />
-      </SettingRow>
-    </div>
-  </div>
-
-  <div>
-    <div
-      class="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11.5px] font-medium text-muted-foreground"
-      title={s.sectionEngine}
-    >
-      <Cpu class="h-3.5 w-3.5 shrink-0 text-muted-foreground/75" aria-hidden="true" />
-      <span>{s.sectionEngine}</span>
-    </div>
-    <div class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5">
-      <SettingRow icon={ListOrdered} label={s.maxResultsLabel} hint={s.maxResultsDesc}>
-        <NumberStepper
-          value={workbench.maxResults}
-          min={1}
-          max={500000}
-          step={1000}
-          widthClass="w-16"
-          onchange={(v) => search(() => (workbench.maxResults = v))}
         />
       </SettingRow>
     </div>

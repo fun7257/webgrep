@@ -106,12 +106,6 @@
               : 'border-border/80 bg-card/85 hover:border-border focus-within:border-border'
           }`}
         >
-          {#if workbench.authSubmitting}
-            <div class="pointer-events-none absolute inset-x-4 bottom-0 h-[1.5px] overflow-hidden bg-primary/10">
-              <div class="search-progress-shimmer h-full w-2/5 bg-gradient-to-r from-transparent via-primary to-transparent"></div>
-            </div>
-          {/if}
-
           <span class="flex h-5 w-5 shrink-0 items-center justify-center">
             {#if isUnlocking}
               <Unlock class="h-4 w-4 text-primary" />
@@ -148,7 +142,6 @@
             {#if password.length > 0 && !isUnlocking}
               <button
                 type="button"
-                tabindex={-1}
                 onmousedown={(e) => e.preventDefault()}
                 onclick={() => (showPassword = !showPassword)}
                 title={showPassword

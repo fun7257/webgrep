@@ -14,6 +14,7 @@
   import Switch from '../ui/Switch.svelte';
   import {
     Activity,
+    AlertTriangle,
     Braces,
     Check,
     ChevronDown,
@@ -25,6 +26,7 @@
     Link,
     ListOrdered,
     Plug,
+    Power,
     ScrollText,
     Search,
     Trash2,
@@ -93,6 +95,16 @@
 </script>
 
 <div class="space-y-4">
+  {#if workbench.mcpError}
+    <div
+      role="alert"
+      class="flex items-center gap-2 rounded-lg bg-status/10 px-3 py-2 text-xs text-status"
+    >
+      <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+      <span class="min-w-0 flex-1 break-words">{workbench.mcpError}</span>
+    </div>
+  {/if}
+
   <!-- Section 1: Service -->
   <div>
     <div
@@ -106,7 +118,7 @@
     <div
       class="rounded-xl border border-border/55 bg-card/55 dark:bg-card/50 divide-y divide-border/40 px-3.5"
     >
-      <SettingRow icon={Plug} label={m.enableLabel} hint={m.enableDesc}>
+      <SettingRow icon={Power} label={m.enableLabel} hint={m.enableDesc}>
         <div class="flex items-center gap-2.5">
           <span
             title={statusSummaryTitle}
@@ -133,7 +145,7 @@
         </div>
       </SettingRow>
 
-      <div class="flex min-h-11 items-center gap-2.5 py-1.5">
+      <div class="flex min-h-11 items-center gap-2 py-1.5">
         <Link class="h-4 w-4 shrink-0 text-muted-foreground/80" />
         <code
           class="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/90 select-all"
@@ -144,25 +156,27 @@
         {#if workbench.mcpTokenRequired}
           <span
             title={m.tokenRequiredHint}
-            aria-label={m.tokenRequiredBadge}
-            class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-secondary/75 text-muted-foreground"
+            aria-label={m.tokenRequiredHint}
+            class="inline-flex h-5 shrink-0 items-center gap-1 rounded bg-status/12 px-1.5 font-mono text-[10.5px] font-medium text-status ring-1 ring-inset ring-status/20"
           >
-            <KeyRound class="h-3.5 w-3.5" />
+            <KeyRound class="h-3 w-3 shrink-0" />
+            <span>{m.tokenRequiredBadge}</span>
           </span>
         {/if}
-        <div class="flex shrink-0 items-center gap-0.5">
+        <div class="flex shrink-0 items-center gap-1">
           <button
             type="button"
             title={m.copyUrlTitle}
             aria-label={m.copyUrlTitle}
             onclick={() => void copyValue('url', endpointUrl)}
-            class="touch-target flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/75 hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
+            class="touch-target inline-flex h-7 items-center gap-1 rounded-md border border-border/55 bg-background/70 px-2 font-mono text-[11px] text-muted-foreground hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
           >
             {#if copiedWhich === 'url'}
-              <Check class="h-3.5 w-3.5 text-primary" />
+              <Check class="h-3 w-3 text-primary" />
             {:else}
-              <Copy class="h-3.5 w-3.5" />
+              <Copy class="h-3 w-3" />
             {/if}
+            <span>URL</span>
           </button>
           <button
             type="button"
@@ -170,13 +184,14 @@
             aria-label={m.copyConfigTitle}
             onclick={() =>
               void copyValue('config', buildMcpClientConfigJson(endpointUrl, workbench.mcpTokenRequired))}
-            class="touch-target flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/75 hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
+            class="touch-target inline-flex h-7 items-center gap-1 rounded-md border border-border/55 bg-background/70 px-2 font-mono text-[11px] text-muted-foreground hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
           >
             {#if copiedWhich === 'config'}
-              <Check class="h-3.5 w-3.5 text-primary" />
+              <Check class="h-3 w-3 text-primary" />
             {:else}
-              <Braces class="h-3.5 w-3.5" />
+              <Braces class="h-3 w-3" />
             {/if}
+            <span>JSON</span>
           </button>
         </div>
       </div>
@@ -299,7 +314,7 @@
           <span>{m.emptyLogsTitle}</span>
         </div>
       {:else}
-        <div class="max-h-[320px] overflow-y-auto divide-y divide-border/40 px-3.5">
+        <div class="divide-y divide-border/40 px-3.5">
           {#each workbench.mcpLogs as entry (entry.seq)}
             {@const isExpanded = expandedSeq === entry.seq}
             {@const LogIcon = getToolIcon(entry.toolName || entry.method)}
@@ -307,9 +322,9 @@
               <button
                 type="button"
                 aria-expanded={isExpanded}
-                title={`${formatMcpTimestamp(entry.timestampMs)} · ${entry.toolName || entry.method} · ${formatMs(entry.durationMs)}ms`}
+                title={`${formatMcpTimestamp(entry.timestampMs)} · ${entry.toolName || entry.method} · ${formatMs(entry.durationMs)}`}
                 onclick={() => toggleLog(entry.seq)}
-                class="flex w-full items-center gap-2 text-left cursor-pointer group"
+                class="touch-target flex w-full items-center gap-2 text-left cursor-pointer group"
               >
                 <span
                   class={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -331,7 +346,7 @@
                 </span>
 
                 <span class="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/80">
-                  {formatMs(entry.durationMs)}ms
+                  {formatMs(entry.durationMs)}
                 </span>
                 <span class="shrink-0 text-muted-foreground/55 group-hover:text-foreground">
                   {#if isExpanded}
