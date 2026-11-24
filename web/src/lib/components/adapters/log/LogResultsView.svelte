@@ -272,7 +272,7 @@
 {#snippet renderSourceScopeChip(row: VisibleLogRow)}
   {#if row.showSrc && row.srcName}
     {#if host.isCompact}
-      <span class="shrink-0 text-muted-foreground/70">{row.srcName}</span>
+      <span class="shrink-0 text-muted-foreground/80">{row.srcName}</span>
     {:else}
       <button
         type="button"
@@ -284,7 +284,7 @@
           else host.soloSource(row.srcName);
         }}
         title={host.t.ui.onlyInSourceTitle(row.srcName)}
-        class="shrink-0 text-muted-foreground/45 hover:text-foreground cursor-pointer"
+        class="touch-target shrink-0 rounded text-muted-foreground/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50 cursor-pointer"
       >
         {row.srcName}
       </button>
@@ -336,7 +336,7 @@
           }}
           onclick={(e) => handleRowClick(e, row)}
           onkeydown={(e) => handleRowKeydown(e, row)}
-          class={`group ${host.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus:outline-none overflow-hidden rounded-lg ${
+          class={`group ${host.isTouch ? 'select-none' : ''} flex h-full flex-col justify-center gap-0.5 px-3 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50 overflow-hidden rounded-lg ${
             active
               ? 'bg-secondary/90 ring-1 ring-inset ring-primary/35 shadow-[inset_2.5px_0_0_hsl(var(--primary))]'
               : pressed
@@ -349,13 +349,13 @@
               {@render renderSourceScopeChip(row)}
               {#if row.fileChanged}
                 <span class="min-w-0 truncate" title={item.file}>
-                  <span class="text-muted-foreground/45">{row.dirLabel}</span><span class={active ? 'text-foreground' : 'text-foreground/75'}>{row.fileName}</span><span class="text-muted-foreground/60">:{item.line}</span>
+                  <span class="text-muted-foreground/75">{row.dirLabel}</span><span class={active ? 'text-foreground' : 'text-foreground/85'}>{row.fileName}</span><span class="text-muted-foreground/75">:{item.line}</span>
                 </span>
               {:else}
-                <span class={`shrink-0 tabular-nums ${active ? 'text-foreground/80' : 'text-muted-foreground/50'}`} title={item.file}>:{item.line}</span>
+                <span class={`shrink-0 tabular-nums ${active ? 'text-foreground/85' : 'text-muted-foreground/75'}`} title={item.file}>:{item.line}</span>
               {/if}
               {#if row.timeLabel}
-                <span title={row.timeFull} class="shrink-0 text-muted-foreground/65 tabular-nums">
+                <span title={row.timeFull} class="shrink-0 text-muted-foreground/80 tabular-nums">
                   {row.timeLabel}
                 </span>
               {/if}
@@ -366,7 +366,7 @@
               title={host.t.ui.copyContent}
               onclick={(e) => copyLineText(e, row.idx, item.text)}
               aria-label={host.t.ui.copyContent}
-              class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100"
+              class="touch-target shrink-0 rounded p-1 text-muted-foreground/70 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
             >
               {#if copiedIdx === row.idx}
                 <Check class="h-3.5 w-3.5 text-primary" />

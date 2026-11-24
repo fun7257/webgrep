@@ -3,10 +3,11 @@ import { workbench } from '$lib/state.svelte';
 import type { LocaleMessages } from '$lib/i18n';
 import type { HeadlessAdapter, ViewAdapterId } from '$lib/adapters/index.ts';
 import type { DataSourceItem, FileResponse, HitItem } from '$lib/types';
-import type {
-  CodeHighlightSegment,
-  HighlightSegment,
-  StructuredAnalysis,
+import {
+  copyTextToClipboard,
+  type CodeHighlightSegment,
+  type HighlightSegment,
+  type StructuredAnalysis,
 } from '$lib/utils';
 
 export interface AdapterHost {
@@ -158,23 +159,7 @@ export function createWorkbenchAdapterHost(): AdapterHost {
       workbench.executeSearch({ forceRefresh });
     },
     copyText(text) {
-      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-        void navigator.clipboard.writeText(text).catch(() => {});
-        return;
-      }
-      if (typeof document !== 'undefined') {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand('copy');
-        } finally {
-          document.body.removeChild(ta);
-        }
-      }
+      copyTextToClipboard(text);
     },
   };
 }

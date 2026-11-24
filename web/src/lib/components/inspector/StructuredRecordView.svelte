@@ -1,51 +1,54 @@
 <script lang="ts">
-  import { onDestroy, type Snippet } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { workbench } from '$lib/state.svelte';
   import {
     copyTextToClipboard,
     detectInlineEpochHint,
-    highlightCodeWithMatches,
-    type CodeHighlightSegment,
     type HighlightSegment,
     type StructuredAnalysis,
   } from '$lib/utils';
-  import { Check, ChevronDown, ChevronRight, Copy } from 'lucide-svelte';
+  import { Check, ChevronDown, ChevronRight, Copy, FunnelPlus } from 'lucide-svelte';
 
   interface Props {
     structuredInfo: StructuredAnalysis;
     highlightFormattedText: (text: string) => HighlightSegment[];
     recordKey: string;
-    renderCodeSegments: Snippet<[CodeHighlightSegment[]]>;
   }
 
-  let { structuredInfo, highlightFormattedText, recordKey, renderCodeSegments }: Props = $props();
+  let { structuredInfo, highlightFormattedText, recordKey }: Props = $props();
 
   let collapsedJsonPaths = $state<Record<string, boolean>>({});
   let copiedFieldPath = $state<string>('');
-  let hoveredFieldPath = $state<string>('');
+  let activeFieldPath = $state<string>('');
   let copiedFieldTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let alwaysShowFieldActions = $derived(workbench.isTouch || workbench.isCompact);
+  const isTouchMode = $derived(workbench.isTouch || workbench.isCompact);
 
   onDestroy(() => {
     if (copiedFieldTimer !== null) clearTimeout(copiedFieldTimer);
   });
 
-  // Reset per-record collapse and hover state when switching to another hit/record.
+  // Reset per-record collapse & active-row state when switching to another hit/record.
   $effect(() => {
     void recordKey;
     collapsedJsonPaths = {};
-    hoveredFieldPath = '';
+    activeFieldPath = '';
   });
+
+  function toggleTouchRow(path: string) {
+    if (!isTouchMode) return;
+    activeFieldPath = activeFieldPath === path ? '' : path;
+  }
 
   function toggleJsonPath(path: string, e: MouseEvent) {
     e.stopPropagation();
     collapsedJsonPaths[path] = !collapsedJsonPaths[path];
   }
 
-  function copyFieldValue(path: string, val: string, e: MouseEvent) {
+  async function copyFieldValue(path: string, val: string, e: MouseEvent) {
     e.stopPropagation();
-    void copyTextToClipboard(val);
+    const ok = await copyTextToClipboard(val);
+    if (!ok) return;
     copiedFieldPath = path;
     if (copiedFieldTimer !== null) clearTimeout(copiedFieldTimer);
     copiedFieldTimer = setTimeout(() => {
@@ -116,51 +119,48 @@
 
 {#snippet renderFieldActions(path: string, rawVal: string)}
   {#if rawVal.trim().length > 0 && rawVal.length <= 200}
-    {#if alwaysShowFieldActions || hoveredFieldPath === path || copiedFieldPath === path}
-      <span
-        class={alwaysShowFieldActions
-          ? 'flex items-center gap-0.5 shrink-0 select-none'
-          : 'absolute right-1 top-0.5 z-10 flex items-center gap-0.5 rounded-md border border-border/60 bg-popover/95 px-1 py-0.5 shadow-sm select-none'}
+    {@const isCopied = copiedFieldPath === path}
+    {@const isTouchActive = isTouchMode && activeFieldPath === path}
+    <span
+      class={`absolute right-1 top-0.5 z-10 items-center gap-0.5 rounded-md border border-border/60 bg-background/95 p-0.5 shadow-sm select-none ${
+        isCopied || isTouchActive
+          ? 'flex'
+          : isTouchMode
+            ? 'hidden'
+            : 'hidden group-hover:flex group-focus-within:flex'
+      }`}
+    >
+      <button
+        type="button"
+        title={workbench.t.inspector.includeTitle(rawVal)}
+        aria-label={workbench.t.inspector.includeTitle(rawVal)}
+        onclick={(e) => {
+          e.stopPropagation();
+          workbench.appendSearchTerm(rawVal);
+          activeFieldPath = '';
+        }}
+        class={`touch-target inline-flex items-center justify-center rounded text-muted-foreground hover:bg-primary/15 hover:text-primary active:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer ${
+          isTouchMode ? 'min-h-7 min-w-7 p-1' : 'h-5 w-5'
+        }`}
       >
-        <button
-          type="button"
-          title={workbench.t.inspector.includeTitle(rawVal)}
-          aria-label={workbench.t.inspector.includeTitle(rawVal)}
-          onclick={(e) => {
-            e.stopPropagation();
-            workbench.appendSearchTerm(rawVal);
-          }}
-          class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/70 text-foreground hover:bg-secondary active:bg-primary/20 cursor-pointer"
-        >
-          +
-        </button>
-        <button
-          type="button"
-          title={workbench.t.inspector.excludeTitle(rawVal)}
-          aria-label={workbench.t.inspector.excludeTitle(rawVal)}
-          onclick={(e) => {
-            e.stopPropagation();
-            workbench.excludeSearchTerm(rawVal);
-          }}
-          class="rounded px-1.5 py-0.5 text-[10px] font-semibold bg-secondary/60 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-status/20 cursor-pointer"
-        >
-          -
-        </button>
-        <button
-          type="button"
-          title={workbench.t.inspector.copyFieldTitle}
-          aria-label={workbench.t.inspector.copyFieldTitle}
-          onclick={(e) => copyFieldValue(path, rawVal, e)}
-          class="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary cursor-pointer"
-        >
-          {#if copiedFieldPath === path}
-            <Check class="h-3 w-3 text-primary" />
-          {:else}
-            <Copy class="h-3 w-3" />
-          {/if}
-        </button>
-      </span>
-    {/if}
+        <FunnelPlus class="h-3 w-3" />
+      </button>
+      <button
+        type="button"
+        title={workbench.t.inspector.copyFieldTitle}
+        aria-label={workbench.t.inspector.copyFieldTitle}
+        onclick={(e) => void copyFieldValue(path, rawVal, e)}
+        class={`touch-target inline-flex items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer ${
+          isTouchMode ? 'min-h-7 min-w-7 p-1' : 'h-5 w-5'
+        }`}
+      >
+        {#if isCopied}
+          <Check class="h-3 w-3 text-primary" />
+        {:else}
+          <Copy class="h-3 w-3" />
+        {/if}
+      </button>
+    </span>
   {/if}
 {/snippet}
 
@@ -189,7 +189,7 @@
                 <button
                   type="button"
                   onclick={(e) => toggleJsonPath(childPath, e)}
-                  class="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-secondary/40 active:bg-secondary/65 cursor-pointer"
+                  class="touch-target flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-secondary/40 active:bg-secondary/65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
                 >
                   {#if isCollapsed}
                     <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -199,11 +199,11 @@
                   <span class="text-muted-foreground font-medium shrink-0 text-[12px]">
                     {@render renderJsonKey(isArray, k)}
                   </span>
-                  <span class="rounded bg-secondary/55 px-1.5 py-0.2 text-[10px] text-muted-foreground">
+                  <span class="rounded bg-secondary/55 px-1.5 py-0.5 leading-none text-[10px] text-muted-foreground">
                     {Array.isArray(v) ? `[${childEntries.length}]` : `{${childEntries.length}}`}
                   </span>
                   {#if isCollapsed}
-                    <span class="truncate text-[11px] text-muted-foreground/70">
+                    <span class="truncate text-[11px] text-muted-foreground/75">
                       {summarizeCollapsedJson(v)}
                     </span>
                   {/if}
@@ -220,15 +220,11 @@
               typeof v === 'number' || (typeof v === 'string' && /^\d{10,19}$/.test(v))
                 ? detectInlineEpochHint(String(v))
                 : null}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
             <div
               role="group"
-              onpointerenter={() => {
-                if (!alwaysShowFieldActions) hoveredFieldPath = childPath;
-              }}
-              onpointerleave={() => {
-                if (!alwaysShowFieldActions && hoveredFieldPath === childPath) hoveredFieldPath = '';
-              }}
-              class="relative flex items-start justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40"
+              onclick={() => toggleTouchRow(childPath)}
+              class="group relative flex items-start rounded px-1.5 py-0.5 hover:bg-secondary/40"
             >
               <div class={`min-w-0 flex-1 ${isMultiLineStr ? 'space-y-1' : 'flex items-baseline gap-2.5'}`}>
                 <span class="text-muted-foreground shrink-0 select-none text-[12px] min-w-[76px]">
@@ -241,12 +237,12 @@
                 {:else}
                   <span class="text-foreground break-all">
                     {#if v === ''}
-                      <span class="text-muted-foreground/50 italic">""</span>
+                      <span class="text-muted-foreground/70 italic">""</span>
                     {:else}
                       {@render renderHighlighted(strVal)}
                     {/if}
                     {#if numEpochHint}
-                      <span class="ml-1.5 inline-block rounded bg-secondary/55 px-1.5 py-0.2 text-[10px] text-muted-foreground">
+                      <span class="ml-1.5 inline-block rounded bg-secondary/55 px-1.5 py-0.5 leading-none text-[10px] text-muted-foreground">
                         → {numEpochHint}
                       </span>
                     {/if}
@@ -264,34 +260,36 @@
   {/if}
 {/snippet}
 
-<!-- Humane Structured Record View (JSON / KV / HTML / STRUCT) -->
+<!-- Humane Structured Record View (JSON / KV) -->
 <div class="px-4 py-3 leading-[1.65]">
-  <div class="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-1.5 text-[10px] select-none">
-    <div class="flex items-center gap-2 min-w-0">
-      {#if structuredInfo.formatBadge}
-        <span class="rounded bg-secondary/65 px-1.5 py-0.5 font-medium text-muted-foreground">
-          {structuredInfo.formatBadge}
-        </span>
-      {/if}
-      {#if structuredInfo.timeHint}
-        <span class="truncate rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          {structuredInfo.timeHint}
-        </span>
+  {#if structuredInfo.formatBadge || structuredInfo.timeHint || (structuredInfo.jsonValue !== undefined && Object.keys(collapsedJsonPaths).length > 0)}
+    <div class="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-1.5 text-[10px] select-none">
+      <div class="flex items-center gap-2 min-w-0">
+        {#if structuredInfo.formatBadge}
+          <span class="rounded bg-secondary/65 px-1.5 py-0.5 font-medium text-muted-foreground">
+            {structuredInfo.formatBadge}
+          </span>
+        {/if}
+        {#if structuredInfo.timeHint}
+          <span class="truncate rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {structuredInfo.timeHint}
+          </span>
+        {/if}
+      </div>
+      {#if structuredInfo.jsonValue !== undefined && Object.keys(collapsedJsonPaths).length > 0}
+        <button
+          type="button"
+          onclick={(e) => {
+            e.stopPropagation();
+            collapsedJsonPaths = {};
+          }}
+          class="touch-target rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground active:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
+        >
+          {workbench.t.inspector.expandAllJson}
+        </button>
       {/if}
     </div>
-    {#if structuredInfo.jsonValue !== undefined && Object.keys(collapsedJsonPaths).length > 0}
-      <button
-        type="button"
-        onclick={(e) => {
-          e.stopPropagation();
-          collapsedJsonPaths = {};
-        }}
-        class="rounded bg-secondary/55 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground active:bg-secondary cursor-pointer"
-      >
-        {workbench.t.inspector.expandAllJson}
-      </button>
-    {/if}
-  </div>
+  {/if}
 
   {#if structuredInfo.kind === 'embedded-json' && structuredInfo.prefix}
     <div class="mb-1.5 rounded bg-secondary/35 px-2 py-1 text-xs text-muted-foreground break-all">
@@ -310,15 +308,11 @@
       {/if}
       {#each structuredInfo.kvPairs as kv, idx (`kv:${idx}:${kv.key}`)}
         {@const kvPath = `kv.${idx}`}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
         <div
           role="group"
-          onpointerenter={() => {
-            if (!alwaysShowFieldActions) hoveredFieldPath = kvPath;
-          }}
-          onpointerleave={() => {
-            if (!alwaysShowFieldActions && hoveredFieldPath === kvPath) hoveredFieldPath = '';
-          }}
-          class="relative flex items-baseline justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-secondary/40"
+          onclick={() => toggleTouchRow(kvPath)}
+          class="group relative flex items-baseline rounded px-1.5 py-0.5 hover:bg-secondary/40"
         >
           <div class="flex items-baseline gap-2.5 min-w-0 flex-1">
             <span class="text-muted-foreground shrink-0 select-none text-[12px] min-w-[76px]">
@@ -331,19 +325,6 @@
           {@render renderFieldActions(kvPath, kv.value)}
         </div>
       {/each}
-    </div>
-  {:else}
-    {@const bodyText = structuredInfo.bodyFormattedText ?? structuredInfo.formattedText}
-    <div
-      class={`${
-        workbench.wordWrap
-          ? 'whitespace-pre-wrap break-words'
-          : 'whitespace-pre overflow-x-auto'
-      } leading-[1.68] text-foreground`}
-    >
-      {@render renderCodeSegments(
-        highlightCodeWithMatches(bodyText, highlightFormattedText(bodyText))
-      )}
     </div>
   {/if}
 

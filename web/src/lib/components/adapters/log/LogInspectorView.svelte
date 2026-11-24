@@ -11,7 +11,6 @@
     structuredInfo,
     rawLineSegments,
     highlightFormattedText,
-    renderCodeSegments,
   }: AdapterInspectorProps = $props();
 
   const leadingTs = $derived(extractLeadingNanoTimestamp(activeLineText));
@@ -57,9 +56,8 @@
     {structuredInfo}
     {highlightFormattedText}
     {recordKey}
-    {renderCodeSegments}
   />
-{:else if inspectorTab === 'raw'}
+{:else if inspectorTab === 'raw' || (!leadingTs && !displayTimeHint)}
   <div class={`px-4 py-3 leading-[1.68] text-foreground font-normal ${wrapCls}`}>
     {@render renderMatchSpans(rawLineSegments)}
   </div>

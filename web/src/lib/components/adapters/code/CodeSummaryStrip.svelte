@@ -34,7 +34,7 @@
   const topDirs = $derived(stats.topDirs.slice(0, 3));
 </script>
 
-{#if stats.languages.length > 0 || stats.fileCount > 0}
+{#if stats.fileCount > 1 || stats.languages.length > 1 || hasLocalFilter}
   <div
     class="flex h-8 shrink-0 items-center justify-between gap-2 overflow-hidden border-b border-border/35 px-3 md:px-6 select-none"
   >
@@ -55,7 +55,7 @@
           }`}
         >
           <span>{lang.label}</span>
-          <span class="opacity-75">{lang.count.toLocaleString()}</span>
+          <span class="opacity-80">{lang.count.toLocaleString()}</span>
         </button>
       {/each}
 
@@ -78,7 +78,7 @@
               }`}
             >
               <span class="truncate">{d.dir}</span>
-              <span class="shrink-0 opacity-65">{d.count.toLocaleString()}</span>
+              <span class="shrink-0 opacity-80">{d.count.toLocaleString()}</span>
             </button>
           {/each}
         </div>
@@ -93,15 +93,11 @@
           onclick={onClearLocalFilters}
           title={cv.clearLocalFilter}
           aria-label={cv.clearLocalFilter}
-          class="touch-target inline-flex h-5 items-center gap-1 rounded bg-primary/15 px-1.5 text-primary ring-1 ring-inset ring-primary/30 hover:bg-primary/20 cursor-pointer"
+          class="touch-target inline-flex h-5 items-center gap-1 rounded bg-primary/15 px-1.5 text-primary ring-1 ring-inset ring-primary/35 hover:bg-primary/20 cursor-pointer"
         >
           <span>{cv.filteredSummary(matchedHitCount, host.hits.length)}</span>
           <X class="h-3 w-3" />
         </button>
-      {:else if stats.fileCount > 0}
-        <span class="hidden sm:inline text-muted-foreground/65">
-          {cv.filesCount(stats.fileCount)}
-        </span>
       {/if}
 
       <button

@@ -22,7 +22,6 @@
     Braces,
     Check,
     Copy,
-    FileText,
     Loader2,
     LocateFixed,
     UnfoldVertical,
@@ -203,9 +202,10 @@
     );
   }
 
-  async function maybeAutoLoad(direction: 'before' | 'after') {
+  async function maybeAutoLoad(direction: 'before' | 'after', manual = false) {
     const now = performance.now();
-    if (isLoadingAny() || now < suppressScrollUntil || now < nextAutoLoadAt) return;
+    if (isLoadingAny()) return;
+    if (!manual && (now < suppressScrollUntil || now < nextAutoLoadAt)) return;
     const b = untrack(() => bounds);
     if (direction === 'before' && !b.canLoadBefore) return;
     if (direction === 'after' && !b.canLoadAfter) return;
@@ -293,12 +293,13 @@
     };
   });
 
-  function copyLoadedLines() {
+  async function copyLoadedLines() {
     if (workbench.contextLines.length === 0) return;
     const content = workbench.contextLines
       .map((l) => (prettyMode ? formatContextRecordPretty(l.text) : l.text))
       .join('\n');
-    void copyTextToClipboard(content);
+    const ok = await copyTextToClipboard(content);
+    if (!ok) return;
     copiedAll = true;
     if (copiedAllTimer !== null) clearTimeout(copiedAllTimer);
     copiedAllTimer = setTimeout(() => {
@@ -333,6 +334,7 @@
 <DrawerTemplate
   icon={UnfoldVertical}
   title={fileTitle}
+  titleTooltip={workbench.contextPath ?? undefined}
   badge={rangeBadge}
   bind:bodyEl
   bodyClass="px-2.5 md:px-4 py-3 overscroll-contain"
@@ -361,17 +363,13 @@
             : 'text-muted-foreground/75 hover:bg-secondary/70 hover:text-foreground active:bg-secondary'
         }`}
       >
-        {#if prettyMode}
-          <Braces class="h-3.5 w-3.5" />
-        {:else}
-          <FileText class="h-3.5 w-3.5" />
-        {/if}
+        <Braces class="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
         title={ins.copyContextTitle}
         aria-label={ins.copyContextTitle}
-        onclick={copyLoadedLines}
+        onclick={() => void copyLoadedLines()}
         class="touch-target flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/75 hover:bg-secondary/70 hover:text-foreground active:bg-secondary cursor-pointer"
       >
         {#if copiedAll}
@@ -418,13 +416,15 @@
           <span>{ins.loadingAbove(stepUpCount)}</span>
         </div>
       {:else}
-        <div
+        <button
+          type="button"
           data-ctx-status="top"
-          class="flex items-center justify-center gap-1.5 py-1 text-[11px] text-muted-foreground/70 select-none"
+          onclick={() => void maybeAutoLoad('before', true)}
+          class="touch-target flex w-full items-center justify-center gap-1.5 rounded-md py-1 text-[11px] text-muted-foreground/75 hover:bg-secondary/50 hover:text-foreground active:bg-secondary/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 select-none cursor-pointer"
         >
-          <ArrowUp class="h-3 w-3 opacity-70" />
+          <ArrowUp class="h-3 w-3" />
           <span>{ins.autoLoadAboveHint(stepUpCount)}</span>
-        </div>
+        </button>
       {/if}
 
       {#if workbench.contextError}
@@ -450,7 +450,7 @@
             >
               <span
                 class={`w-12 shrink-0 pt-[1px] text-right font-mono text-[11px] tabular-nums select-none ${
-                  isAnchor ? 'font-semibold text-primary' : 'text-muted-foreground/70'
+                  isAnchor ? 'font-semibold text-primary' : 'text-muted-foreground/75'
                 }`}
               >
                 {item.n}
@@ -483,13 +483,15 @@
           <span>{ins.loadingBelow(stepDownCount)}</span>
         </div>
       {:else}
-        <div
+        <button
+          type="button"
           data-ctx-status="bottom"
-          class="flex items-center justify-center gap-1.5 py-1 text-[11px] text-muted-foreground/70 select-none"
+          onclick={() => void maybeAutoLoad('after', true)}
+          class="touch-target flex w-full items-center justify-center gap-1.5 rounded-md py-1 text-[11px] text-muted-foreground/75 hover:bg-secondary/50 hover:text-foreground active:bg-secondary/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 select-none cursor-pointer"
         >
-          <ArrowDown class="h-3 w-3 opacity-70" />
+          <ArrowDown class="h-3 w-3" />
           <span>{ins.autoLoadBelowHint(stepDownCount)}</span>
-        </div>
+        </button>
       {/if}
     </div>
   {/if}

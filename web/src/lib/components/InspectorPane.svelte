@@ -3,6 +3,7 @@
   import {
     analyzeStructuredLine,
     buildHighlightSegments,
+    extractLeadingNanoTimestamp,
     syntaxKindToClass,
     type CodeHighlightSegment,
     type HighlightSegment,
@@ -53,6 +54,17 @@
   let isRegexMode = $derived(workbench.mode === 'regex');
 
   let structuredInfo = $derived(analyzeStructuredLine(activeLineText));
+  let hasStructuredDiff = $derived.by(() => {
+    if (!activeAdapter.supportsStructuredToggle || !activeLineText) return false;
+    if (
+      structuredInfo.kind === 'json' ||
+      structuredInfo.kind === 'embedded-json' ||
+      structuredInfo.kind === 'kv'
+    ) {
+      return true;
+    }
+    return Boolean(structuredInfo.timeHint) || Boolean(extractLeadingNanoTimestamp(activeLineText));
+  });
   let recordKey = $derived(`${workbench.inspectedPath ?? ''}:${targetLine}`);
 
   // Reset scroll position when switching to another hit/record.
@@ -279,14 +291,20 @@
     {inspectedProject}
     {inspectedSubPath}
     {targetLine}
+    anchorByteHint={activeHit &&
+    activeHit.file === workbench.inspectedPath &&
+    activeHit.line === targetLine
+      ? activeHit.byteOffset
+      : null}
     {selectedText}
     {activeLineText}
-    showStructuredToggle={activeAdapter.supportsStructuredToggle}
+    showStructuredToggle={hasStructuredDiff}
     structuredFormattedText={activeAdapter.getFormattedCopyText?.(activeLineText, activeHit) ??
       structuredInfo.formattedText}
     onAppendSelection={appendSelectedText}
     onExcludeSelection={excludeSelectedText}
     onSearchSelection={searchSelectedText}
+    onClearSelection={clearSelectionText}
     onClose={closeDetail}
   />
 

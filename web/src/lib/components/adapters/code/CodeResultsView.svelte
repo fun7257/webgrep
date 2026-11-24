@@ -1,9 +1,12 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
+  import { workbench } from '$lib/state.svelte';
   import type { HitItem } from '$lib/types';
   import {
     CodeStreamStatsTracker,
     buildCodeVirtualLayout,
+    detectCodeLanguage,
+    extractCodeDirectory,
     getCachedPlainMeta,
     getCachedPlainProbe,
     indexAtY,
@@ -22,7 +25,7 @@
   import RowActionSheet from '../RowActionSheet.svelte';
   import CodeSummaryStrip from './CodeSummaryStrip.svelte';
   import type { AdapterResultsProps } from '../types.ts';
-  import { Check, ChevronDown, ChevronRight, Copy, UnfoldVertical } from 'lucide-svelte';
+  import { Check, ChevronDown, ChevronRight, Copy } from 'lucide-svelte';
 
   let { host }: AdapterResultsProps = $props();
 
@@ -39,6 +42,28 @@
     void host.currentSearchId;
     activeLangFilter = null;
     activeDirFilter = null;
+  });
+
+  // Sync local language/dir filters to global keyboard navigation predicate so ↑/↓/j/k/[/] skip hidden rows.
+  $effect(() => {
+    const langFilter = activeLangFilter;
+    const dirFilter = activeDirFilter;
+    if (!langFilter && !dirFilter) {
+      workbench.visibleHitPredicate = null;
+    } else {
+      workbench.visibleHitPredicate = (hit: HitItem) => {
+        if (langFilter && (detectCodeLanguage(hit.file)?.id ?? 'other') !== langFilter) {
+          return false;
+        }
+        if (dirFilter && extractCodeDirectory(hit.file) !== dirFilter) {
+          return false;
+        }
+        return true;
+      };
+    }
+    return () => {
+      workbench.visibleHitPredicate = null;
+    };
   });
 
   const statsTracker = new CodeStreamStatsTracker();
@@ -316,83 +341,48 @@
     class="group flex h-full items-center justify-between gap-2 pt-1.5 select-none"
   >
     <div
-      role="button"
-      tabindex="0"
-      aria-expanded={!row.collapsed}
-      onclick={() => host.toggleFileGroupCollapse(row.file)}
-      onkeydown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          host.toggleFileGroupCollapse(row.file);
-        }
-      }}
-      class="flex h-[28px] min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border border-border/45 bg-card/60 px-2.5 hover:bg-secondary/60 cursor-pointer focus:outline-none"
+      class="flex h-[28px] min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border/50 bg-card/60 px-2 hover:bg-secondary/60"
     >
-      <div class="flex min-w-0 items-center gap-1.5 font-mono text-[11.5px] leading-none">
+      <button
+        type="button"
+        aria-expanded={!row.collapsed}
+        onclick={() => host.toggleFileGroupCollapse(row.file)}
+        class="touch-target flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-0.5 text-left font-mono text-[11.5px] leading-none cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50"
+      >
         {#if row.collapsed}
           <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         {:else}
           <ChevronDown class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         {/if}
 
-        {#if row.showSrc && row.srcName}
-          <button
-            type="button"
-            onmousedown={(e) => e.preventDefault()}
-            onclick={(e) => {
-              e.stopPropagation();
-              if (e.altKey) host.excludeSource(row.srcName);
-              else if (e.metaKey || e.ctrlKey || e.shiftKey) host.toggleSource(row.srcName);
-              else host.soloSource(row.srcName);
-            }}
-            title={host.t.ui.onlyInSourceTitle(row.srcName)}
-            class="shrink-0 rounded bg-secondary/75 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
-          >
-            {row.srcName}
-          </button>
-        {/if}
-
         <span class="min-w-0 truncate" title={row.file}>
-          <span class="text-muted-foreground/55">{row.dirLabel}</span><span class="font-medium text-foreground">{row.fileName}</span>
+          <span class="text-muted-foreground/75">{row.dirLabel}</span><span class="font-medium text-foreground">{row.fileName}</span>
         </span>
+      </button>
 
-        {#if row.lang}
-          <span class="hidden sm:inline-flex shrink-0 rounded bg-secondary/50 px-1 py-0.5 text-[9.5px] text-muted-foreground/75">
-            {row.lang.ext}
-          </span>
-        {/if}
-      </div>
-
-      <div class="flex shrink-0 items-center gap-1 font-mono text-[10.5px]">
-        <button
-          type="button"
-          title={host.t.results.copyPathTitle}
-          aria-label={host.t.results.copyPathTitle}
-          onclick={(e) => flashCopy(e, `path:${row.file}`, row.file)}
-          class="touch-target rounded p-1 text-muted-foreground/55 hover:text-foreground opacity-0 group-hover:opacity-100 focus:opacity-100 cursor-pointer"
-        >
-          {#if copiedKey === `path:${row.file}`}
-            <Check class="h-3 w-3 text-primary" />
+      <div class="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
+        {#if row.showSrc && row.srcName}
+          {#if host.isCompact}
+            <span class="shrink-0 rounded bg-secondary/75 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+              {row.srcName}
+            </span>
           {:else}
-            <Copy class="h-3 w-3" />
+            <button
+              type="button"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={(e) => {
+                e.stopPropagation();
+                if (e.altKey) host.excludeSource(row.srcName);
+                else if (e.metaKey || e.ctrlKey || e.shiftKey) host.toggleSource(row.srcName);
+                else host.soloSource(row.srcName);
+              }}
+              title={host.t.ui.onlyInSourceTitle(row.srcName)}
+              class="touch-target shrink-0 rounded bg-secondary/75 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
+            >
+              {row.srcName}
+            </button>
           {/if}
-        </button>
-
-        <button
-          type="button"
-          title={host.t.codeView.openFullContext}
-          aria-label={host.t.codeView.openFullContext}
-          onclick={(e) => {
-            e.stopPropagation();
-            const firstHit = host.hits[row.firstHitIdx];
-            if (firstHit) {
-              host.openContextDrawer(firstHit.file, firstHit.line, firstHit.byteOffset);
-            }
-          }}
-          class="touch-target hidden sm:inline-flex rounded p-1 text-muted-foreground/55 hover:text-foreground opacity-0 group-hover:opacity-100 focus:opacity-100 cursor-pointer"
-        >
-          <UnfoldVertical class="h-3 w-3" />
-        </button>
+        {/if}
 
         <span
           class="inline-flex h-4 min-w-[20px] items-center justify-center rounded bg-secondary/75 px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground"
@@ -418,7 +408,7 @@
     }}
     onclick={(e) => handleHitClick(e, row)}
     onkeydown={(e) => handleHitKeydown(e, row)}
-    class={`group ${host.isTouch ? 'select-none' : ''} flex h-full items-stretch cursor-pointer focus:outline-none overflow-hidden rounded-md ml-1.5 ${
+    class={`group ${host.isTouch ? 'select-none' : ''} flex h-full items-stretch cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50 overflow-hidden rounded-md ml-1.5 ${
       active
         ? 'bg-secondary/90 ring-1 ring-inset ring-primary/35 shadow-[inset_2.5px_0_0_hsl(var(--primary))]'
         : pressed
@@ -429,7 +419,7 @@
     <div
       class={`flex w-11 shrink-0 items-start justify-end border-r border-border/35 pr-2.5 font-mono text-[11px] tabular-nums select-none ${
         host.resultDensity === 'compact' ? 'pt-1' : 'pt-1.5'
-      } ${active ? 'text-primary font-semibold' : 'text-muted-foreground/55'}`}
+      } ${active ? 'text-primary font-semibold' : 'text-muted-foreground/75'}`}
     >
       {row.item.line}
     </div>
@@ -462,7 +452,7 @@
         title={host.t.ui.copyContent}
         onclick={(e) => flashCopy(e, `hit:${row.hitIdx}`, row.item.text)}
         aria-label={host.t.ui.copyContent}
-        class="touch-target shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground opacity-0 group-hover:opacity-100 focus:opacity-100"
+        class="touch-target shrink-0 rounded p-1 text-muted-foreground/70 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
       >
         {#if copiedKey === `hit:${row.hitIdx}`}
           <Check class="h-3.5 w-3.5 text-primary" />
