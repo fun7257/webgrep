@@ -80,14 +80,28 @@
     const hits = workbench.flatHits;
     const cur = workbench.activeHitIndex;
     if (cur < 0 || cur >= hits.length) return;
+    const pred = workbench.visibleHitPredicate;
     const file = hits[cur].file;
     let i = cur + delta;
-    while (i >= 0 && i < hits.length && hits[i].file === file) i += delta;
+    while (
+      i >= 0 &&
+      i < hits.length &&
+      (hits[i].file === file || (pred && !pred(hits[i])))
+    ) {
+      i += delta;
+    }
     if (i < 0 || i >= hits.length) return;
     if (delta < 0) {
-      // jump to the first hit of the previous file
+      // jump to the first visible hit of the previous file
       const prevFile = hits[i].file;
-      while (i > 0 && hits[i - 1].file === prevFile) i--;
+      let firstVisible = i;
+      while (i > 0 && hits[i - 1].file === prevFile) {
+        i--;
+        if (!pred || pred(hits[i])) {
+          firstVisible = i;
+        }
+      }
+      i = firstVisible;
     }
     workbench.selectHitByIndex(i, false, rapid);
     workbench.scrollToActiveTick += 1;
@@ -120,7 +134,7 @@
 
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyK') {
       e.preventDefault();
-      workbench.closeTimePicker();
+      workbench.closeScopeOverlays();
       workbench.closeRightDrawer();
       workbench.paletteOpen = !workbench.paletteOpen;
       return;
@@ -129,7 +143,7 @@
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       workbench.paletteOpen = false;
-      workbench.closeTimePicker();
+      workbench.closeScopeOverlays();
       if (workbench.settingsOpen) {
         workbench.closeRightDrawer();
       } else {
@@ -171,7 +185,7 @@
 
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '?') {
       e.preventDefault();
-      workbench.closeTimePicker();
+      workbench.closeScopeOverlays();
       if (workbench.shortcutsDrawerOpen) {
         workbench.closeRightDrawer();
       } else {
@@ -296,7 +310,9 @@
         workbench.workspaceEnteredFromLogin ? 'workspace-unlock-enter' : ''
       }`}
     >
-      <Header />
+      {#if workbench.isCompact}
+        <Header />
+      {/if}
 
       <div class="relative flex flex-1 min-h-0 overflow-clip">
         <LeftScopeSidebar onFocusMainInput={() => searchInputEl?.focus()} />

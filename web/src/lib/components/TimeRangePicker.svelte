@@ -6,31 +6,27 @@
     QUICK_TIME_PRESET_GROUPS,
     buildSpecFromDateTimeParts,
     clampDateTimeParts,
-    formatTimeScopeLabel,
-    isBuiltinTimePreset,
     resolveSyncedDateTimeParts,
     type DateTimeParts,
   } from '$lib/time-range';
   import DateTimeRangeSlots from './pickers/DateTimeRangeSlots.svelte';
-  import { Clock, Infinity as InfinityIcon, Pin, PinOff, RotateCcw, X } from 'lucide-svelte';
+  import { Clock, Eraser, X } from 'lucide-svelte';
 
   interface Props {
     value: TimePreset;
     showClose?: boolean;
-    pinned?: boolean;
-    onPin?: () => void;
     onClose?: () => void;
     onApply: (spec: TimePreset) => void;
+    onCommitSilent?: (spec: TimePreset) => void;
     onFocusMainInput?: () => void;
   }
 
   let {
     value,
     showClose = false,
-    pinned = false,
-    onPin,
     onClose,
     onApply,
+    onCommitSilent,
     onFocusMainInput,
   }: Props = $props();
 
@@ -56,7 +52,6 @@
   const displayedStart = $derived(previewSynced ? previewSynced.start : startParts);
   const displayedEnd = $derived(previewSynced ? previewSynced.end : endParts);
   const effectiveEndIsNow = $derived(previewSynced ? previewSynced.endIsNow : endIsNow);
-  const hasCustomSpecBadge = $derived(!customDirty && value !== '' && !isBuiltinTimePreset(value));
 
   // Sync slots whenever external `scope.timePreset` changes (clear, history, share replay)
   $effect(() => {
@@ -107,11 +102,32 @@
     onApply(nextSpec);
   }
 
+  /** Commit pending custom time edits silently (e.g. on outside-click flyout dismiss). */
+  export function commitIfDirty(): boolean {
+    if (!customDirty) return false;
+    slotsRef?.commitFocusedSlot();
+    const normStart = clampDateTimeParts(startParts);
+    startParts = normStart;
+    if (!endIsNow) {
+      endParts = clampDateTimeParts(endParts);
+    }
+    const nextSpec = buildSpecFromDateTimeParts(normStart, endParts, endIsNow);
+    customDirty = false;
+    if (!nextSpec || nextSpec === value) return false;
+    lastSyncedValue = nextSpec;
+    if (onCommitSilent) {
+      onCommitSilent(nextSpec);
+    } else {
+      onApply(nextSpec);
+    }
+    return true;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (showClose && onClose) onClose();
+      onClose?.();
       onFocusMainInput?.();
     }
   }
@@ -119,38 +135,13 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div onkeydown={handleKeydown} class="flex flex-col">
-  <!-- Compact inline strip: Clock + ∞ + optional custom badge + reset/close -->
-  <div class="flex h-8 shrink-0 items-center justify-between gap-1.5 bg-card/30 px-2.5">
+  <!-- Compact inline strip: Clock + label + conditional reset/close -->
+  <div class="flex h-8 shrink-0 items-center justify-between gap-2 bg-card/30 px-2.5">
     <div class="flex min-w-0 items-center gap-1.5" title={s.timeSectionTitle}>
       <Clock class={`h-3.5 w-3.5 shrink-0 ${hasTimeScope ? 'text-primary' : 'text-muted-foreground/75'}`} />
-
-      <button
-        type="button"
-        onmousedown={(e) => e.preventDefault()}
-        onmouseenter={() => {
-          if (!customDirty && !workbench.isTouch) hoverPreset = '';
-        }}
-        onmouseleave={() => {
-          if (hoverPreset === '') hoverPreset = null;
-        }}
-        onclick={() => selectPreset('')}
-        title={s.timeLabels['']}
-        aria-label={s.timeLabels['']}
-        aria-pressed={!customDirty && !hasTimeScope}
-        class={`touch-target inline-flex h-5 w-6 shrink-0 items-center justify-center rounded cursor-pointer ${
-          !customDirty && !hasTimeScope
-            ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35'
-            : 'text-muted-foreground/70 hover:bg-secondary hover:text-foreground'
-        }`}
-      >
-        <InfinityIcon class="h-3.5 w-3.5" />
-      </button>
-
-      {#if hasCustomSpecBadge}
-        <span class="min-w-0 truncate rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10.5px] leading-none tabular-nums text-primary ring-1 ring-inset ring-primary/30">
-          {formatTimeScopeLabel(value, s.timeLabels)}
-        </span>
-      {/if}
+      <span class="shrink-0 text-[11.5px] font-medium text-muted-foreground">
+        {s.timeSectionTitle}
+      </span>
     </div>
 
     <div class="flex shrink-0 items-center gap-0.5">
@@ -159,41 +150,20 @@
           type="button"
           onmousedown={(e) => e.preventDefault()}
           onclick={() => selectPreset('')}
-          title={s.clearScope}
-          aria-label={s.clearScope}
-          class="touch-target flex h-5 w-5 items-center justify-center rounded text-muted-foreground/75 hover:bg-secondary hover:text-foreground cursor-pointer"
+          title={s.timeLabels['']}
+          aria-label={s.timeLabels['']}
+          class="touch-target flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/75 hover:bg-secondary hover:text-foreground cursor-pointer"
         >
-          <RotateCcw class="h-3 w-3" />
-        </button>
-      {/if}
-      {#if onPin}
-        <button
-          type="button"
-          onmousedown={(e) => e.preventDefault()}
-          onclick={onPin}
-          title={pinned ? s.unpinSidebar : s.pinSidebar}
-          aria-label={pinned ? s.unpinSidebar : s.pinSidebar}
-          aria-pressed={pinned}
-          class={`touch-target flex h-6 w-6 items-center justify-center rounded cursor-pointer ${
-            pinned
-              ? 'text-primary hover:bg-secondary'
-              : 'text-muted-foreground/75 hover:bg-secondary hover:text-foreground'
-          }`}
-        >
-          {#if pinned}
-            <PinOff class="h-3.5 w-3.5" />
-          {:else}
-            <Pin class="h-3.5 w-3.5" />
-          {/if}
+          <Eraser class="h-3.5 w-3.5" />
         </button>
       {/if}
       {#if showClose && onClose}
         <button
           type="button"
           onclick={onClose}
-          title={workbench.t.ui.close}
-          aria-label={workbench.t.ui.close}
-          class="touch-target flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
+          title={workbench.t.settings.closePanelTitle}
+          aria-label={workbench.t.settings.closePanelTitle}
+          class="touch-target flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer"
         >
           <X class="h-3.5 w-3.5" />
         </button>
@@ -239,7 +209,6 @@
     </div>
 
     <DateTimeRangeSlots
-      compact
       bind:this={slotsRef}
       bind:startParts
       bind:endParts

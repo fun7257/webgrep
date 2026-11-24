@@ -10,6 +10,7 @@
   let activeMode = $state<DrawerPanelId | null>(null);
   let panelEl = $state<HTMLDivElement | null>(null);
   let exitTimer: ReturnType<typeof setTimeout> | null = null;
+  let previousFocus: HTMLElement | null = null;
 
   let dragStartY: number | null = null;
   let dragY = $state(0);
@@ -44,6 +45,14 @@
     }
   }
 
+  function restoreFocus() {
+    const target = previousFocus;
+    previousFocus = null;
+    if (target && target.isConnected) {
+      target.focus({ preventScroll: true });
+    }
+  }
+
   $effect(() => {
     if (isOpen && workbench.drawerPanel !== null) {
       activeMode = workbench.drawerPanel;
@@ -55,6 +64,9 @@
       dragging = false;
 
       if (!mounted) {
+        if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+          previousFocus = document.activeElement;
+        }
         entered = false;
         mounted = true;
         return;
@@ -64,12 +76,16 @@
         // Force style commit at current transform so reversal/entry animates cleanly on Frame 1
         void panelEl.getBoundingClientRect();
         entered = true;
+        if (typeof document !== 'undefined' && !panelEl.contains(document.activeElement)) {
+          panelEl.focus({ preventScroll: true });
+        }
       }
       return;
     }
 
     if (mounted) {
       entered = false;
+      restoreFocus();
       if (exitTimer === null) {
         exitTimer = setTimeout(finishExit, workbench.frameProfile.sheetMotionMs + 60);
       }
@@ -131,15 +147,13 @@
 
 {#if mounted && activeMode}
   {@const isContextMode = activeMode === 'context'}
+  {@const desktopSide = isContextMode ? 'right' : 'left'}
   <div
-    class={`drawer-overlay-root fixed md:absolute inset-0 z-50 md:z-30 flex items-end md:items-stretch md:justify-end overflow-clip ${
-      isOpen ? 'pointer-events-auto' : 'pointer-events-none'
-    }`}
-    role="dialog"
-    aria-modal="false"
-    aria-label={drawerLabel}
+    class={`drawer-overlay-root fixed md:absolute inset-0 z-50 md:z-30 flex items-end md:items-stretch overflow-clip ${
+      desktopSide === 'left' ? 'md:left-12 md:justify-start' : 'md:justify-end'
+    } ${isOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}
   >
-    <!-- Mobile dimming scrim; optically transparent on desktop to avoid muddy gray seam below Header -->
+    <!-- Mobile dimming scrim; optically transparent on desktop -->
     <div
       class="drawer-scrim absolute inset-0 bg-black/25 dark:bg-black/45 md:bg-transparent dark:md:bg-transparent"
       data-open={entered ? 'true' : 'false'}
@@ -150,13 +164,18 @@
 
     <div
       bind:this={panelEl}
+      role="dialog"
+      aria-modal="false"
+      aria-label={drawerLabel}
+      tabindex={-1}
       ontransitionend={handleTransitionEnd}
-      class={`drawer-panel pb-safe md:pb-0 relative z-10 flex w-full ${
+      class={`drawer-panel pb-safe md:pb-0 relative z-10 flex w-full focus:outline-none ${
         isContextMode
-          ? 'h-[84dvh] max-h-[88dvh] md:h-full md:max-h-none md:w-[560px] lg:w-[680px] xl:w-[760px]'
-          : 'max-h-[82dvh] h-[78dvh] md:h-full md:max-h-none md:w-[440px] lg:w-[460px]'
-      } flex-col overflow-hidden rounded-t-2xl md:rounded-tr-none md:rounded-tl-xl border-t md:border-l border-border/65 bg-background text-foreground shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[-10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[-14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]`}
+          ? 'h-[84dvh] max-h-[88dvh] md:h-full md:max-h-none md:w-[560px] lg:w-[680px] xl:w-[760px] rounded-t-2xl md:rounded-tr-none md:rounded-tl-xl border-t md:border-t-0 md:border-l border-border/65 shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[-10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[-14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]'
+          : 'max-h-[82dvh] h-[78dvh] md:h-full md:max-h-none md:w-[440px] lg:w-[460px] rounded-t-2xl md:rounded-tl-none md:rounded-r-xl border-t md:border-t-0 md:border-r border-border/65 shadow-[0_-10px_28px_-10px_hsl(0_0%_0%/0.18)] md:shadow-[10px_4px_28px_-12px_hsl(215_25%_12%/0.09)] dark:md:shadow-[14px_4px_36px_-10px_hsl(0_0%_0%/0.55)]'
+      } flex-col overflow-hidden bg-background text-foreground`}
       data-open={entered ? 'true' : 'false'}
+      data-side={desktopSide}
       data-dragging={dragging ? 'true' : 'false'}
       style:transform={dragging || dragY > 0 ? `translate3d(0, ${dragY}px, 0)` : undefined}
     >
@@ -205,8 +224,11 @@
     transition: transform var(--motion-drawer-in, 183ms) cubic-bezier(0.22, 1, 0.36, 1);
   }
   @media (min-width: 768px) {
-    .drawer-panel {
+    .drawer-panel[data-side='right'] {
       transform: translate3d(100%, 0, 0);
+    }
+    .drawer-panel[data-side='left'] {
+      transform: translate3d(-100%, 0, 0);
     }
     .drawer-panel[data-open='true'] {
       transform: translate3d(0, 0, 0);

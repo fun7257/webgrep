@@ -1,7 +1,7 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
   import { workbench } from '$lib/state.svelte';
-  import { Check, Radio } from 'lucide-svelte';
+  import { Check, Lock, LockOpen } from 'lucide-svelte';
   import {
     DATETIME_SLOTS,
     clampDateTimeParts,
@@ -17,7 +17,6 @@
   type BoundSide = 'start' | 'end';
 
   interface Props {
-    compact?: boolean;
     startParts: DateTimeParts;
     endParts: DateTimeParts;
     endIsNow: boolean;
@@ -32,7 +31,6 @@
   }
 
   let {
-    compact = false,
     startParts = $bindable(),
     endParts = $bindable(),
     endIsNow = $bindable(),
@@ -100,7 +98,7 @@
       focusSlot(bound, DATETIME_SLOTS[nextIdx]);
       return;
     }
-    if (dir > 0 && bound === 'start') {
+    if (dir > 0 && bound === 'start' && !effectiveEndIsNow) {
       focusSlot('end', DATETIME_SLOTS[0]);
     } else if (dir < 0 && bound === 'end') {
       focusSlot('start', DATETIME_SLOTS[DATETIME_SLOTS.length - 1]);
@@ -153,7 +151,11 @@
     onClearHoverPreset();
     customDirty = true;
     endParts = dateToParts(new Date());
-    endIsNow = !curIsNow;
+    const nextIsNow = !curIsNow;
+    endIsNow = nextIsNow;
+    if (!nextIsNow && !workbench.isTouch) {
+      queueMicrotask(() => focusSlot('end', 'hour'));
+    }
   }
 
   function handleSlotFocus(bound: BoundSide, slot: DateTimeSlot, e: FocusEvent) {
@@ -331,8 +333,11 @@
     rawEditText = nextParts[slot];
   }
 
-  const slotInputCls =
-    'relative z-10 h-5 [@media(any-pointer:coarse)]:h-7 rounded bg-transparent px-0.5 text-center font-mono text-[11.5px] tabular-nums hover:bg-secondary/80 focus:bg-primary/20 focus:text-primary focus:ring-1 focus:ring-inset focus:ring-primary/45 focus:outline-none';
+  const slotInputBaseCls =
+    'relative z-10 h-5 [@media(any-pointer:coarse)]:h-7 rounded bg-transparent px-0.5 text-center font-mono text-[11.5px] tabular-nums focus:outline-none';
+  const slotInputEditableCls =
+    'text-foreground hover:bg-secondary/80 focus:bg-primary/20 focus:text-primary focus:ring-1 focus:ring-inset focus:ring-primary/45';
+  const slotInputLockedCls = 'text-muted-foreground/75 cursor-default';
 </script>
 
 {#snippet renderSlotInput(
@@ -340,7 +345,7 @@
   slot: DateTimeSlot,
   widthCls: string,
   ariaUnit: string,
-  muted: boolean
+  locked: boolean
 )}
   {@const key = slotKey(bound, slot)}
   {@const rowLabel = bound === 'start' ? tp.startLabel : tp.endLabel}
@@ -350,6 +355,7 @@
     inputmode="numeric"
     autocomplete="off"
     spellcheck="false"
+    disabled={locked}
     value={getSlotDisplayValue(bound, slot)}
     onfocus={(e) => handleSlotFocus(bound, slot, e)}
     onmouseup={(e) => handleSlotMouseUp(bound, slot, e)}
@@ -358,13 +364,20 @@
     onkeydown={(e) => handleSlotKeydown(bound, slot, e)}
     onpaste={(e) => handleSlotPaste(bound, slot, e)}
     aria-label={`${rowLabel} ${ariaUnit}`}
-    class={`${slotInputCls} ${widthCls} ${muted ? 'text-muted-foreground' : 'text-foreground'}`}
+    class={`${slotInputBaseCls} ${widthCls} ${locked ? slotInputLockedCls : slotInputEditableCls}`}
   />
 {/snippet}
 
 {#snippet renderBoundRow(bound: BoundSide)}
   {@const isEnd = bound === 'end'}
-  {@const mutedDigits = isEnd && effectiveEndIsNow}
+  {@const isLocked = isEnd && effectiveEndIsNow}
+  {@const lockTitle = isLocked
+    ? workbench.locale === 'zh'
+      ? '已锁定为现在 · 点击解锁输入结束时间'
+      : 'Locked to Now · Click to unlock end time'
+    : workbench.locale === 'zh'
+      ? '已解锁 · 点击锁定为现在'
+      : 'Unlocked · Click to lock to Now'}
   <div class="flex items-center gap-1.5 min-w-0">
     <!-- Visual timeline node (○ start → ● end) -->
     <span
@@ -380,82 +393,94 @@
     ></span>
 
     <div
-      class="flex h-7 [@media(any-pointer:coarse)]:h-9 min-w-0 flex-1 items-center rounded-md border border-border/60 bg-background/75 px-1.5 focus-within:border-primary/60"
+      class={`flex h-7 [@media(any-pointer:coarse)]:h-9 min-w-0 flex-1 items-center rounded-md border px-1.5 ${
+        isLocked
+          ? 'border-border/45 bg-secondary/25'
+          : 'border-border/60 bg-background/75 focus-within:border-primary/60'
+      }`}
     >
       <div class="flex items-center">
-        {@render renderSlotInput(bound, 'year', 'w-[34px] [@media(any-pointer:coarse)]:w-[42px]', tp.yearLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'year', 'w-[34px] [@media(any-pointer:coarse)]:w-[40px]', tp.yearLabel, isLocked)}
         <span class="font-mono text-[10px] text-muted-foreground/45 select-none">-</span>
-        {@render renderSlotInput(bound, 'month', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.monthLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'month', 'w-[19px] [@media(any-pointer:coarse)]:w-[24px]', tp.monthLabel, isLocked)}
         <span class="font-mono text-[10px] text-muted-foreground/45 select-none">-</span>
-        {@render renderSlotInput(bound, 'day', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.dayLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'day', 'w-[19px] [@media(any-pointer:coarse)]:w-[24px]', tp.dayLabel, isLocked)}
       </div>
 
       <span class="mx-1 h-3 w-px shrink-0 bg-border/55"></span>
 
       <div class="flex items-center">
-        {@render renderSlotInput(bound, 'hour', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.hourLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'hour', 'w-[19px] [@media(any-pointer:coarse)]:w-[24px]', tp.hourLabel, isLocked)}
         <span class="font-mono text-[10px] text-muted-foreground/45 select-none">:</span>
-        {@render renderSlotInput(bound, 'minute', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.minuteLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'minute', 'w-[19px] [@media(any-pointer:coarse)]:w-[24px]', tp.minuteLabel, isLocked)}
         <span class="font-mono text-[10px] text-muted-foreground/45 select-none">:</span>
-        {@render renderSlotInput(bound, 'second', 'w-[19px] [@media(any-pointer:coarse)]:w-[25px]', tp.secondLabel, mutedDigits)}
+        {@render renderSlotInput(bound, 'second', 'w-[19px] [@media(any-pointer:coarse)]:w-[24px]', tp.secondLabel, isLocked)}
       </div>
 
       {#if isEnd}
-        <div class="ml-auto flex items-center gap-0.5 pl-1">
-          <button
-            type="button"
-            onmousedown={(e) => e.preventDefault()}
-            onpointerdown={(e) => {
-              if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
-                e.preventDefault();
-                nowToggledOnDown = true;
-                flushSync(toggleEndNow);
-              }
-            }}
-            onclick={(e) => {
-              if (nowToggledOnDown && e.detail > 0) {
-                nowToggledOnDown = false;
-                return;
-              }
+        <button
+          type="button"
+          onmousedown={(e) => e.preventDefault()}
+          onpointerdown={(e) => {
+            if (e.pointerType === 'mouse' && e.button === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+              e.preventDefault();
+              e.stopPropagation();
+              nowToggledOnDown = true;
+              flushSync(toggleEndNow);
+            }
+          }}
+          onclick={(e) => {
+            if (nowToggledOnDown && e.detail > 0) {
               nowToggledOnDown = false;
-              toggleEndNow();
-            }}
-            title={tp.nowTitle}
-            aria-label={tp.nowBtn}
-            aria-pressed={effectiveEndIsNow}
-            class={`touch-target inline-flex h-5 w-5 shrink-0 items-center justify-center rounded cursor-pointer ${
-              effectiveEndIsNow
-                ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35'
-                : 'text-muted-foreground/65 hover:bg-secondary hover:text-foreground active:bg-secondary'
-            }`}
-          >
-            <Radio class="h-3 w-3" />
-          </button>
-
-          {#if customDirty}
-            <button
-              type="button"
-              onmousedown={(e) => e.preventDefault()}
-              onclick={onSubmit}
-              title={tp.apply}
-              aria-label={tp.apply}
-              class="touch-target inline-flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary text-primary-foreground hover:opacity-90 active:opacity-80 cursor-pointer"
-            >
-              <Check class="h-3 w-3 stroke-[2.5]" />
-            </button>
+              return;
+            }
+            nowToggledOnDown = false;
+            toggleEndNow();
+          }}
+          title={lockTitle}
+          aria-label={lockTitle}
+          aria-pressed={effectiveEndIsNow}
+          class={`touch-target ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded cursor-pointer ${
+            effectiveEndIsNow
+              ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/35 hover:bg-primary/20'
+              : 'text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary'
+          }`}
+        >
+          {#if effectiveEndIsNow}
+            <Lock class="h-3 w-3" />
+          {:else}
+            <LockOpen class="h-3 w-3" />
           {/if}
-        </div>
+        </button>
       {/if}
     </div>
   </div>
 {/snippet}
 
-<div class="relative space-y-1.5" title={tp.inputHint}>
-  <!-- Vertical timeline rail connecting start dot to end dot -->
-  <span
-    aria-hidden="true"
-    class="pointer-events-none absolute left-[3.5px] top-[18px] bottom-[18px] w-px bg-border/80"
-  ></span>
-  {@render renderBoundRow('start')}
-  {@render renderBoundRow('end')}
+<div class="space-y-1.5" title={tp.inputHint}>
+  <div class="relative space-y-1.5">
+    <!-- Vertical timeline rail connecting start dot to end dot -->
+    <span
+      aria-hidden="true"
+      class="pointer-events-none absolute left-[3.5px] top-[14px] bottom-[14px] [@media(any-pointer:coarse)]:top-[18px] [@media(any-pointer:coarse)]:bottom-[18px] w-px bg-border/80"
+    ></span>
+    {@render renderBoundRow('start')}
+    {@render renderBoundRow('end')}
+  </div>
+
+  {#if customDirty}
+    <div class="flex items-center justify-end pl-3.5">
+      <button
+        type="button"
+        onmousedown={(e) => e.preventDefault()}
+        onclick={onSubmit}
+        title={tp.apply}
+        aria-label={tp.apply}
+        class="touch-target inline-flex h-6 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:opacity-90 active:opacity-80 cursor-pointer"
+      >
+        <Check class="h-3 w-3 shrink-0 stroke-[2.5]" />
+        <span>{tp.apply}</span>
+      </button>
+    </div>
+  {/if}
 </div>

@@ -3,13 +3,11 @@
   import { workbench } from '$lib/state.svelte';
   import type { DataSourceItem } from '$lib/types';
   import {
-    countSourcesByKind,
     fuzzyFilterSourcesForPicker,
     getSourceSubtitle,
     isSourceRefInList,
     splitHighlightRanges,
     type HighlightRange,
-    type SourceKindFilter,
   } from '$lib/source-picker';
   import { resolveSourcePluginPreset } from '$lib/prefilter';
   import {
@@ -20,7 +18,6 @@
     Database,
     FileText,
     Folder,
-    Layers,
     Minus,
     Plus,
     ScrollText,
@@ -29,25 +26,18 @@
   } from 'lucide-svelte';
 
   interface Props {
-    inline?: boolean;
     sidebar?: boolean;
     onClose?: () => void;
     onFocusMainInput?: () => void;
-    panelEl?: HTMLDivElement | null;
-    onBodyKeydown?: (e: KeyboardEvent) => void;
   }
 
   let {
-    inline = false,
     sidebar = false,
     onClose,
     onFocusMainInput,
-    panelEl = $bindable(null),
-    onBodyKeydown,
   }: Props = $props();
 
   let searchQuery = $state<string>('');
-  let kindFilter = $state<SourceKindFilter>('all');
   let focusedIdx = $state<number>(0);
 
   let searchInputEl = $state<HTMLInputElement | null>(null);
@@ -56,46 +46,27 @@
 
   const s = $derived(workbench.t.scopeBar);
   const ui = $derived(workbench.t.ui);
-  const counts = $derived(countSourcesByKind(workbench.sources));
   const fuzzyResults = $derived(
-    fuzzyFilterSourcesForPicker(workbench.sources, kindFilter, searchQuery)
+    fuzzyFilterSourcesForPicker(workbench.sources, 'all', searchQuery)
   );
 
-  const kindTabs = $derived.by(() => {
-    const out: { id: SourceKindFilter; label: string; count: number; icon: typeof Layers }[] = [
-      { id: 'all', label: s.kindAll, count: counts.all, icon: Layers },
-    ];
-    if (counts.dir > 0 || kindFilter === 'dir') {
-      out.push({ id: 'dir', label: s.kindDir, count: counts.dir, icon: Folder });
-    }
-    if (counts.file > 0 || kindFilter === 'file') {
-      out.push({ id: 'file', label: s.kindFile, count: counts.file, icon: FileText });
-    }
-    return out;
-  });
-
-  const showKindBar = $derived(kindTabs.length >= 3);
   const allFilteredSelected = $derived.by(() => {
     if (fuzzyResults.length === 0) return false;
     const selected = workbench.scope.sources;
     return fuzzyResults.every((item) => isSourceRefInList(item.source, selected));
   });
   const canCheckFiltered = $derived(
-    (searchQuery.trim().length > 0 || kindFilter !== 'all') &&
-      fuzzyResults.length > 0 &&
-      !allFilteredSelected
+    searchQuery.trim().length > 0 && fuzzyResults.length > 0 && !allFilteredSelected
   );
 
   $effect(() => {
     untrack(() => {
       focusedIdx = 0;
     });
-    if (inline || sidebar) return;
+    if (sidebar) return;
     queueMicrotask(() => {
       if (!workbench.isCompact && !workbench.isTouch) {
         searchInputEl?.focus({ preventScroll: true });
-      } else {
-        panelEl?.focus({ preventScroll: true });
       }
     });
   });
@@ -113,8 +84,16 @@
 
   function scrollFocusedIntoView(idx: number) {
     queueMicrotask(() => {
-      const target = listEl?.querySelector(`[data-picker-idx="${idx}"]`) as HTMLElement | null;
-      target?.scrollIntoView({ block: 'nearest' });
+      if (!listEl) return;
+      const target = listEl.querySelector(`[data-picker-idx="${idx}"]`) as HTMLElement | null;
+      if (!target) return;
+      const listRect = listEl.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      if (targetRect.top < listRect.top) {
+        listEl.scrollTop -= listRect.top - targetRect.top + 6;
+      } else if (targetRect.bottom > listRect.bottom) {
+        listEl.scrollTop += targetRect.bottom - listRect.bottom + 6;
+      }
     });
   }
 
@@ -157,9 +136,13 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (inline || sidebar) {
+      if (sidebar) {
         if (searchQuery) {
           searchQuery = '';
+          return;
+        }
+        if (onClose) {
+          onClose();
           return;
         }
         onFocusMainInput?.();
@@ -173,7 +156,7 @@
     if (e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      if (!inline && !sidebar) onClose?.();
+      if (!sidebar) onClose?.();
       onFocusMainInput?.();
       return;
     }
@@ -198,7 +181,7 @@
       e.preventDefault();
       e.stopPropagation();
       if (e.metaKey || e.ctrlKey) {
-        if (!inline && !sidebar) onClose?.();
+        if (!sidebar) onClose?.();
         onFocusMainInput?.();
         if (workbench.hasExecutableQuery) workbench.submitSearch();
         return;
@@ -239,12 +222,12 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  onkeydown={inline || sidebar ? (onBodyKeydown ?? handleKeydown) : undefined}
+  onkeydown={sidebar ? handleKeydown : undefined}
   class="flex min-h-0 flex-1 flex-col"
 >
-  <!-- 1. Compact Filter Bar + Inline Icon-Only Kind Switcher -->
+  <!-- 1. Clean Full-Width Fuzzy Filter Bar -->
   <div class="flex h-8 shrink-0 items-center gap-1.5 border-b border-border/35 px-2.5">
-    <Search class="h-3 w-3 shrink-0 text-muted-foreground/65" />
+    <Search class="h-3 w-3 shrink-0 text-muted-foreground/70" />
     <input
       bind:this={searchInputEl}
       type="text"
@@ -252,11 +235,12 @@
       oninput={() => {
         focusedIdx = 0;
       }}
-      placeholder="…"
+      placeholder={s.pickerSearchPlaceholder}
+      aria-label={s.pickerSearchPlaceholder}
       title={s.pickerSearchPlaceholder}
       spellcheck="false"
       autocomplete="off"
-      class="h-full min-w-0 flex-1 bg-transparent text-[12px] [@media(any-pointer:coarse)]:text-[16px] text-foreground placeholder:text-muted-foreground/45 focus:outline-none"
+      class="h-full min-w-0 flex-1 bg-transparent text-[12px] [@media(any-pointer:coarse)]:text-[16px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
     />
 
     {#if searchQuery.length > 0}
@@ -287,33 +271,6 @@
       >
         <CheckCheck class="h-3 w-3" />
       </button>
-    {:else if showKindBar}
-      <div class="flex shrink-0 items-center gap-0.5 rounded-md bg-secondary/50 p-0.5">
-        {#each kindTabs as tab (tab.id)}
-          {@const active = kindFilter === tab.id}
-          {@const TabIcon = tab.icon}
-          {@const selectKind = () => {
-            kindFilter = tab.id;
-            focusedIdx = 0;
-          }}
-          <button
-            type="button"
-            onmousedown={(e) => e.preventDefault()}
-            onpointerdown={(e) => handleOptionPointerDown(`kind:${tab.id}`, e, selectKind)}
-            onclick={(e) => handleOptionClick(`kind:${tab.id}`, e, selectKind)}
-            title={`${tab.label} (${tab.count})`}
-            aria-label={`${tab.label} (${tab.count})`}
-            aria-pressed={active}
-            class={`touch-target inline-flex h-5 w-5 items-center justify-center rounded cursor-pointer ${
-              active
-                ? 'bg-background text-foreground shadow-sm ring-1 ring-inset ring-border/70'
-                : 'text-muted-foreground/75 hover:text-foreground'
-            }`}
-          >
-            <TabIcon class="h-3 w-3" />
-          </button>
-        {/each}
-      </div>
     {/if}
   </div>
 
@@ -331,7 +288,7 @@
         <button
           type="button"
           onclick={() => {
-            if (!inline && !sidebar) onClose?.();
+            if (!sidebar) onClose?.();
             workbench.openSourcesDrawer(true);
           }}
           title={s.addSourcePill}
@@ -342,14 +299,15 @@
         </button>
       </div>
     {:else if fuzzyResults.length === 0}
-      <div class="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground/65">
-        —
+      <div class="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground">
+        {s.pickerNoMatch}
       </div>
     {:else}
       {#each fuzzyResults as entry, idx (entry.source.id)}
         {@const src = entry.source}
         {@const checked = isSourceRefInList(src, workbench.scope.sources)}
         {@const excluded = isSourceRefInList(src, workbench.scope.excludedSources ?? [])}
+        {@const focused = idx === focusedIdx}
         {@const srcMode = resolveSourcePluginPreset(src)}
         {@const modeLabel = ui.sourcePrefilterPresets[srcMode]?.label ?? srcMode}
         {@const Icon = kindIconFor(src)}
@@ -369,11 +327,17 @@
           title={`[${modeLabel}] ${s.cardClickTitle(src.name)}${rawSub ? `\n${rawSub}` : ''}${!src.enabled ? ` (${ui.disabled})` : ''}`}
           class={`touch-target group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left cursor-pointer ${
             checked
-              ? 'bg-primary/[0.1] ring-1 ring-inset ring-primary/30 hover:bg-primary/[0.14]'
+              ? focused
+                ? 'bg-primary/[0.15] ring-1 ring-inset ring-primary/55'
+                : 'bg-primary/[0.1] ring-1 ring-inset ring-primary/30 hover:bg-primary/[0.14]'
               : excluded
-                ? 'bg-status/[0.08] ring-1 ring-inset ring-status/25 hover:bg-status/[0.12]'
-                : 'hover:bg-secondary/55'
-          } ${!src.enabled && !checked ? 'opacity-50' : ''}`}
+                ? focused
+                  ? 'bg-status/[0.14] ring-1 ring-inset ring-status/50'
+                  : 'bg-status/[0.08] ring-1 ring-inset ring-status/25 hover:bg-status/[0.12]'
+                : focused
+                  ? 'bg-secondary/75 ring-1 ring-inset ring-border/70'
+                  : 'hover:bg-secondary/55'
+          } ${!src.enabled && !checked ? 'opacity-70' : ''}`}
         >
           <!-- Visual Kind Squircle -->
           <span
@@ -405,13 +369,13 @@
                 {@render renderHighlighted(src.name, entry.nameRanges)}
               </span>
               {#if srcMode === 'code'}
-                <Code2 class="h-3 w-3 shrink-0 text-muted-foreground/65" />
+                <Code2 class="h-3 w-3 shrink-0 text-muted-foreground/70" />
               {:else}
-                <ScrollText class="h-3 w-3 shrink-0 text-muted-foreground/50" />
+                <ScrollText class="h-3 w-3 shrink-0 text-muted-foreground/70" />
               {/if}
             </div>
             {#if shortSub}
-              <div class="mt-0.5 truncate font-mono text-[10.5px] leading-tight text-muted-foreground/65">
+              <div class="mt-0.5 truncate font-mono text-[10.5px] leading-tight text-muted-foreground">
                 {shortSub}
               </div>
             {/if}

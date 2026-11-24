@@ -6,6 +6,7 @@
   let query = $state('');
   let selected = $state(0);
   let inputEl = $state<HTMLInputElement | null>(null);
+  let listEl = $state<HTMLDivElement | null>(null);
 
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -25,6 +26,21 @@
     if (selected >= filtered.length) selected = Math.max(0, filtered.length - 1);
   });
 
+  function scrollSelectedIntoView(idx: number) {
+    queueMicrotask(() => {
+      if (!listEl) return;
+      const target = listEl.querySelector(`[data-palette-idx="${idx}"]`) as HTMLElement | null;
+      if (!target) return;
+      const listRect = listEl.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      if (targetRect.top < listRect.top) {
+        listEl.scrollTop -= listRect.top - targetRect.top + 6;
+      } else if (targetRect.bottom > listRect.bottom) {
+        listEl.scrollTop += targetRect.bottom - listRect.bottom + 6;
+      }
+    });
+  }
+
   function close() {
     workbench.paletteOpen = false;
   }
@@ -39,15 +55,21 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
+      e.stopPropagation();
       selected = filtered.length ? (selected + 1) % filtered.length : 0;
+      scrollSelectedIntoView(selected);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
+      e.stopPropagation();
       selected = filtered.length ? (selected - 1 + filtered.length) % filtered.length : 0;
+      scrollSelectedIntoView(selected);
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      e.stopPropagation();
       runAt(selected);
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       close();
     }
   }
@@ -58,32 +80,36 @@
   <div
     onclick={close}
     onkeydown={onKeydown}
-    class="fixed inset-0 z-[60] flex items-start justify-center bg-black/55 backdrop-blur-xs p-0 md:p-4 md:pt-[14vh] select-none"
+    class="fixed inset-0 z-[60] flex items-start justify-center bg-black/45 p-0 md:p-4 md:pt-[14vh] select-none"
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      aria-label={workbench.t.palette.placeholder}
       onclick={(e) => e.stopPropagation()}
       class="pt-safe w-full md:max-w-[480px] overflow-hidden md:rounded-xl border-b md:border border-border bg-card shadow-2xl"
     >
-      <div class="flex h-12 items-center gap-2.5 border-b border-border/60 px-4">
+      <div class="flex h-11 items-center gap-2.5 border-b border-border/60 px-4">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
         <input
           bind:this={inputEl}
           bind:value={query}
-          onkeydown={onKeydown}
           placeholder={workbench.t.palette.placeholder}
+          aria-label={workbench.t.palette.placeholder}
           spellcheck="false"
           autocomplete="off"
-          class="h-full min-w-0 flex-1 bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/65 focus:outline-none"
+          class="h-full min-w-0 flex-1 bg-transparent text-[14px] [@media(any-pointer:coarse)]:text-[16px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
         />
       </div>
-      <div role="listbox" class="max-h-[60dvh] overflow-y-auto p-1.5">
+      <div bind:this={listEl} role="listbox" class="max-h-[60dvh] overflow-y-auto p-1.5">
         {#each filtered as cmd, idx (cmd.id)}
           {@const Icon = cmd.icon}
           <button
             type="button"
             role="option"
+            data-palette-idx={idx}
             aria-selected={idx === selected}
             onmouseenter={() => (selected = idx)}
             onpointerdown={() => (selected = idx)}

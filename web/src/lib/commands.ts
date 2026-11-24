@@ -1,12 +1,12 @@
 import type { Component } from 'svelte';
 import {
   Blocks,
-  Clock,
   Database,
-  FolderPlus,
+  Eraser,
   Keyboard,
   Languages,
   Lock,
+  PanelLeft,
   PanelRight,
   SlidersHorizontal,
   SunMoon,
@@ -26,6 +26,7 @@ export interface Command {
 /** Built lazily so titles follow the active locale. */
 export function buildCommands(): Command[] {
   const p = workbench.t.palette;
+
   return [
     {
       id: 'settings',
@@ -35,28 +36,23 @@ export function buildCommands(): Command[] {
       run: () => workbench.openSettingsDrawer(),
     },
     {
-      id: 'pick-time',
-      icon: Clock as unknown as Command['icon'],
-      title: p.pickTime,
-      run: () => workbench.openTimePicker(),
-    },
-    {
       id: 'sources',
       icon: Database as unknown as Command['icon'],
       title: p.sources,
-      run: () => workbench.openSourcesDrawer(false),
-    },
-    {
-      id: 'add-source',
-      icon: FolderPlus as unknown as Command['icon'],
-      title: p.addSource,
-      run: () => workbench.openSourcesDrawer(true),
+      run: () => workbench.openSourcesDrawer(workbench.sources.length === 0),
     },
     {
       id: 'mcp',
       icon: Blocks as unknown as Command['icon'],
       title: p.mcp,
       run: () => workbench.openMcpDrawer(),
+    },
+    {
+      id: 'shortcuts',
+      icon: Keyboard as unknown as Command['icon'],
+      title: p.shortcuts,
+      shortcut: '?',
+      run: () => workbench.openShortcutsDrawer(),
     },
     {
       id: 'theme',
@@ -70,19 +66,36 @@ export function buildCommands(): Command[] {
       title: p.language,
       run: () => workbench.toggleLocale(),
     },
-    {
-      id: 'shortcuts',
-      icon: Keyboard as unknown as Command['icon'],
-      title: p.shortcuts,
-      shortcut: '?',
-      run: () => workbench.openShortcutsDrawer(),
-    },
-    {
-      id: 'inspector',
-      icon: PanelRight as unknown as Command['icon'],
-      title: p.inspector,
-      run: () => workbench.toggleInspectorPane(),
-    },
+    ...(workbench.isCompact
+      ? [
+          {
+            id: 'toggle-scope',
+            icon: PanelLeft as unknown as Command['icon'],
+            title: workbench.t.header.toggleSidebar,
+            run: () => workbench.toggleScopeSidebar(),
+          },
+        ]
+      : []),
+    ...(workbench.hasActiveScope
+      ? [
+          {
+            id: 'clear-scope',
+            icon: Eraser as unknown as Command['icon'],
+            title: workbench.t.scopeBar.clearAllScope,
+            run: () => workbench.clearScopeAll(),
+          },
+        ]
+      : []),
+    ...(!workbench.isCompact && workbench.flatHits.length > 0
+      ? [
+          {
+            id: 'inspector',
+            icon: PanelRight as unknown as Command['icon'],
+            title: p.inspector,
+            run: () => workbench.toggleInspectorPane(),
+          },
+        ]
+      : []),
     ...(workbench.inspectedPath
       ? [
           {

@@ -8,6 +8,7 @@
     Lock,
     PanelLeft,
     SlidersHorizontal,
+    WifiOff,
   } from 'lucide-svelte';
 
   type HeaderTarget = 'sidebar' | 'sources' | 'mcp' | 'shortcuts' | 'settings';
@@ -17,13 +18,7 @@
       (workbench.sources.length === 0 ||
         workbench.sources.some((s) => s.enabled && !s.exists))
   );
-  const sidebarTitle = $derived(
-    workbench.isCompact
-      ? workbench.t.header.toggleSidebar
-      : workbench.leftSidebarOpen
-        ? workbench.t.scopeBar.unpinSidebar
-        : workbench.t.scopeBar.pinSidebar
-  );
+  const sidebarTitle = $derived(workbench.t.header.toggleSidebar);
 
   const iconBtn =
     'touch-target relative flex h-8 w-8 items-center justify-center rounded-md active:bg-secondary/80 cursor-pointer';
@@ -37,7 +32,7 @@
       workbench.toggleScopeSidebar();
     } else if (target === 'sources') {
       if (workbench.sourcesDrawerOpen) workbench.closeRightDrawer();
-      else workbench.openSourcesDrawer(false);
+      else workbench.openSourcesDrawer(workbench.sources.length === 0);
     } else if (target === 'mcp') {
       if (workbench.mcpDrawerOpen) workbench.closeRightDrawer();
       else workbench.openMcpDrawer();
@@ -87,8 +82,20 @@
       {/if}
     </button>
 
-    <!-- Right: standalone top-level menus (数据源 · MCP · 快捷键说明 · 设置) -->
+    <!-- Right: standalone top-level menus (断线重连 · 数据源 · MCP · 快捷键说明 · 设置) -->
     <div class="flex items-center gap-1">
+      {#if workbench.wsStatus === 'offline' || workbench.wsDegraded}
+        <button
+          type="button"
+          title={workbench.t.header.reconnectTitle}
+          aria-label={workbench.t.header.reconnectTitle}
+          onclick={() => workbench.connectWebSocket()}
+          class="touch-target relative flex h-8 w-8 items-center justify-center rounded-md text-status hover:bg-status/15 active:bg-status/20 cursor-pointer"
+        >
+          <WifiOff class="h-3.5 w-3.5" />
+        </button>
+      {/if}
+
       <button
         type="button"
         title={workbench.t.header.sourcesTriggerTitle}
